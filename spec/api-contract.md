@@ -136,7 +136,7 @@ Semantics:
   "audio_format": "wav",
   "audio_size_bytes": 401280,
   "transcript_language": "en",
-  "whisper_model": "gpt-4o-transcribe",
+  "model": "gpt-4o-transcribe",
   "processing_time_ms": 1843,
   "cost_cents": 1,
   "created_at": "2026-04-21T18:31:19Z"
@@ -151,9 +151,13 @@ Fields:
 - `audio_format`: accepted audio format
 - `audio_size_bytes`: original uploaded size
 - `transcript_language`: detected or hinted language
-- `whisper_model`: engine/model used
+- `model`: the transcription engine/model used to produce this transcript
 - `processing_time_ms`: total server-side processing time
-- `cost_cents`: transcription cost tracked by the backend
+- `cost_cents`: the backend's cost estimate for producing this transcript, in
+  cents. Populated when the backend can compute it from engine-provided data
+  using straightforward fixed-rate pricing (for example, audio duration times a
+  fixed per-minute rate). `null` when the cost cannot be determined without
+  dynamic pricing infrastructure.
 - `created_at`: transcript creation timestamp
 
 ## Idempotency Rules

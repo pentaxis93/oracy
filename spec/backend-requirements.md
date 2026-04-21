@@ -24,6 +24,16 @@ surfaces only completed transcripts.
 - Transcript resources are long-lived user artifacts. Job resources are
   workflow artifacts that may point to a transcript once complete.
 
+#### Cost Attribution
+
+- The transcript resource includes a `cost_cents` field recording the
+  backend's estimated cost to produce the transcript. The field is present on
+  every transcript resource; its value is nullable.
+- When the backend can compute cost from engine-provided data using
+  fixed-rate pricing, `cost_cents` carries a numeric estimate.
+- `cost_cents` is `null` when the cost cannot be determined without dynamic
+  pricing infrastructure.
+
 #### Durable Acceptance
 
 - `202 Accepted` is a durability commitment, not an admission of best effort.
