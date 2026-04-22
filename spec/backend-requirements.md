@@ -51,8 +51,9 @@ embeddings, free-text tags, optional sessions, and transcript search.
 
 - `202 Accepted` is a durability commitment, not an admission of best effort.
 - A request may return `202` only after the backend has durably persisted the
-  job record, the accepted audio payload, and the accepted audio content hash
-  used for idempotency matching.
+  job record, the accepted audio payload, the accepted audio content hash, and
+  the accepted `recorded_at`, `session_id`, and `language` values used for
+  idempotency matching.
 - If any persistence step fails, the request fails synchronously and no
   accepted job exists.
 - Accepted jobs must survive backend restart and continue progressing toward a
@@ -94,13 +95,17 @@ embeddings, free-text tags, optional sessions, and transcript search.
 #### Idempotency
 
 - One submission attempt is identified by `API key + Idempotency-Key +
-  accepted audio content hash`.
-- The backend computes and stores the accepted audio content hash at acceptance
+  accepted audio content hash + recorded_at + session_id + language`.
+- The backend computes and stores the accepted audio content hash and the
+  accepted `recorded_at`, `session_id`, and `language` values at acceptance
   time.
-- Reusing the same API key and `Idempotency-Key` with the same audio content
-  returns the original job instead of creating duplicate work.
-- Reusing the same API key and `Idempotency-Key` with different audio content
-  is a client conflict and must return `409 Conflict`.
+- Omitted optional `session_id` and `language` values participate in
+  idempotency as `null`.
+- Reusing the same API key and `Idempotency-Key` with the same accepted
+  submission tuple returns the original job instead of creating duplicate work.
+- Reusing the same API key and `Idempotency-Key` with a mismatch on any
+  accepted submission dimension is a client conflict and must return
+  `409 Conflict`.
 - One `Idempotency-Key` names one attempt forever. Reusing it after terminal
   failure returns the same failed job. An intentional fresh attempt requires a
   new key.
@@ -287,7 +292,11 @@ Semantics:
 - Transcript retention is indefinite until explicit transcript deletion.
 - Transcript deletion is a hard delete with no grace period.
 - Deleting a transcript cascades to its versions, segments, current embedding,
-  tag associations, and originating transcription job.
+  and tag associations.
+- The originating `TranscriptionJob` survives transcript deletion as the durable
+  replay record for the accepted submission attempt.
+- If a deleted transcript came from a succeeded job, that job remains
+  `succeeded` and its `transcript_id` becomes `null`.
 - Deleting a session sets `session_id` to `null` on contained transcripts. The
   transcripts remain otherwise unchanged.
 - Deleting a tag removes its transcript associations. The transcripts remain
@@ -318,10 +327,11 @@ true:
 
 - Valid submission returns a durable job resource instead of a blocking
   transcript response.
-- Replaying a submission with the same API key, `Idempotency-Key`, and audio
-  content returns the same job in every state.
-- Reusing an accepted `Idempotency-Key` with different audio content returns
-  `409 Conflict` and leaves the original job unchanged.
+- Replaying a submission with the same API key, `Idempotency-Key`, and
+  accepted submission tuple returns the same job in every state.
+- Reusing an accepted `Idempotency-Key` with a mismatch on any accepted
+  submission dimension returns `409 Conflict` and leaves the original job
+  unchanged.
 - Accepted jobs survive backend restart and still reach a terminal state.
 - Backend-managed retries move transient failures through `retry_waiting`
   instead of forcing client resubmission.
@@ -330,6 +340,8 @@ true:
 - Successful jobs create one transcript each and only completed transcripts
   appear in transcript history, detail, session transcript listings, and
   search.
+- Deleting a transcript does not delete its originating job, and replay of the
+  same accepted submission tuple still returns that original job.
 - The transcript substrate is concrete: transcripts carry current text,
   sessions, tags, and current version identity; versions are append-only;
   segments are first-class timing rows; embeddings are stored server-side and

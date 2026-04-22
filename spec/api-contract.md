@@ -90,8 +90,9 @@ Responses:
   API key
 - `413 Payload Too Large`: file exceeds allowed size
 - `415 Unsupported Media Type`: unsupported audio format
-- `409 Conflict`: same API key and `Idempotency-Key`, but different audio
-  content than the accepted submission
+- `409 Conflict`: same API key and `Idempotency-Key`, but a mismatch on audio
+  content, `recorded_at`, `session_id`, or `language` relative to the accepted
+  submission
 - `5xx`: synchronous failure before durable acceptance
 
 Response body for `200` and `202` is a `TranscriptionJob` resource.
@@ -216,7 +217,10 @@ Responses:
 Notes:
 
 - Deletion cascades to transcript versions, segments, the current embedding,
-  tag associations, and the originating transcription job.
+  and tag associations.
+- The originating succeeded `TranscriptionJob` survives as the durable replay
+  record for the accepted submission attempt, and its `transcript_id` becomes
+  `null`.
 
 ### GET `/api/v1/transcripts/{transcript_id}/versions`
 
@@ -545,7 +549,9 @@ Fields:
 - `failure_message`: human-readable explanation aligned with `failure_code`
 - `retryable_by_client`: whether a terminal failed job should be retried by
   creating a fresh submission with a new `Idempotency-Key`
-- `transcript_id`: present when `status=succeeded`
+- `transcript_id`: present when `status=succeeded` and the transcript is still
+  addressable; `null` for non-succeeded jobs and for succeeded jobs whose
+  transcript has been deleted
 
 Semantics:
 
@@ -672,11 +678,15 @@ Fields:
 ## Idempotency Rules
 
 - The backend matches a replay by `API key + Idempotency-Key + accepted audio
-  content hash`.
-- Same API key + same `Idempotency-Key` + same audio content returns the same
-  `TranscriptionJob`.
-- Same API key + same `Idempotency-Key` + different audio content returns
-  `409 Conflict`.
+  content hash + recorded_at + session_id + language`.
+- Omitted optional `session_id` and `language` values participate as `null`.
+- Same API key + same `Idempotency-Key` + same accepted submission tuple
+  returns the same `TranscriptionJob`.
+- Same API key + same `Idempotency-Key` + a mismatch on any accepted
+  submission dimension returns `409 Conflict`.
+- If the transcript created by a succeeded job is later deleted, idempotent
+  replays still return the original succeeded `TranscriptionJob` with
+  `transcript_id=null`.
 - A new submission attempt after terminal failure must use a new
   `Idempotency-Key`.
 
