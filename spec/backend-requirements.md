@@ -280,6 +280,8 @@ Semantics:
 - Repeated `tag_id` filters combine by intersection: a transcript matches only
   if it is associated with all supplied tags.
 - Transcript history is ordered newest-first by transcript `created_at`.
+- Version-history listings are ordered newest-first by `created_at`, with
+  descending `id` as the deterministic tiebreaker.
 - Tag listings are ordered newest-first by `created_at`, with descending `id`
   as the deterministic tiebreaker.
 - Session listings are ordered newest-first by `created_at`, with descending

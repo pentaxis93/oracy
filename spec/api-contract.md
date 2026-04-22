@@ -240,12 +240,14 @@ Query parameters:
 Responses:
 
 - `200 OK`
+- `400 Bad Request`: malformed `cursor` or `limit` outside `1..100`
 - `401 Unauthorized`
 - `404 Not Found`
 
 Notes:
 
-- Versions are returned newest-first by `created_at`.
+- Versions are returned newest-first by `created_at`, with descending `id` as
+  the deterministic tiebreaker for cursor pagination.
 - Version history is linear and append-only.
 
 Response body is a collection envelope whose `items` are
@@ -263,6 +265,7 @@ Query parameters:
 Responses:
 
 - `200 OK`
+- `400 Bad Request`: malformed `cursor` or `limit` outside `1..100`
 - `401 Unauthorized`
 - `404 Not Found`
 
@@ -314,6 +317,7 @@ Query parameters:
 Responses:
 
 - `200 OK`
+- `400 Bad Request`: malformed `cursor` or `limit` outside `1..100`
 - `401 Unauthorized`
 
 Notes:
@@ -417,6 +421,7 @@ Query parameters:
 Responses:
 
 - `200 OK`
+- `400 Bad Request`: malformed `cursor` or `limit` outside `1..100`
 - `401 Unauthorized`
 
 Notes:
