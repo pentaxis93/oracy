@@ -95,10 +95,12 @@ embeddings, free-text tags, optional sessions, and transcript search.
 #### Idempotency
 
 - One submission attempt is identified by `API key + Idempotency-Key +
-  accepted audio content hash + recorded_at + session_id + language`.
+accepted audio content hash + recorded_at + session_id + language`.
 - The backend computes and stores the accepted audio content hash and the
   accepted `recorded_at`, `session_id`, and `language` values at acceptance
   time.
+- The accepted submission tuple is an immutable acceptance-time record, not a
+  live reference to current resource state.
 - Omitted optional `session_id` and `language` values participate in
   idempotency as `null`.
 - Reusing the same API key and `Idempotency-Key` with the same accepted
@@ -106,6 +108,8 @@ embeddings, free-text tags, optional sessions, and transcript search.
 - Reusing the same API key and `Idempotency-Key` with a mismatch on any
   accepted submission dimension is a client conflict and must return
   `409 Conflict`.
+- Deletion of a session referenced by an accepted `session_id` does not mutate
+  the stored tuple or invalidate replay of that accepted submission attempt.
 - One `Idempotency-Key` names one attempt forever. Reusing it after terminal
   failure returns the same failed job. An intentional fresh attempt requires a
   new key.
@@ -266,8 +270,12 @@ Semantics:
 - Semantic search uses the current transcript embedding.
 - Hybrid search combines keyword and semantic ranking over the same transcript
   result set.
+- When `q` is present and `search_mode` is omitted, the backend defaults to
+  `hybrid`.
 - Search filters support tag, session, `recorded_at` time range, and
   `created_at` time range.
+- Repeated `tag_id` filters combine by intersection: a transcript matches only
+  if it is associated with all supplied tags.
 - Transcript history is ordered newest-first by transcript `created_at`.
 - Search results are ordered by backend relevance, with newest transcript
   `created_at` as the tiebreaker.
@@ -299,6 +307,8 @@ Semantics:
   `succeeded` and its `transcript_id` becomes `null`.
 - Deleting a session sets `session_id` to `null` on contained transcripts. The
   transcripts remain otherwise unchanged.
+- Deleting a session does not invalidate replay records for submissions that
+  were accepted with that `session_id`.
 - Deleting a tag removes its transcript associations. The transcripts remain
   otherwise unchanged.
 - The backend retains accepted audio only while a job is `queued`,
@@ -347,8 +357,9 @@ true:
   segments are first-class timing rows; embeddings are stored server-side and
   regenerated asynchronously after text edits.
 - Search behavior is explicit: history and search share one transcript
-  collection contract, results are transcript-only, and semantic search is
-  eventually consistent after edits.
+  collection contract, omitted `search_mode` with `q` defaults to `hybrid`,
+  repeated `tag_id` filters intersect, results are transcript-only, and
+  semantic search is eventually consistent after edits.
 - Deletion semantics are explicit and match resource ownership expectations.
 - Supported audio formats, maximum upload size, language-hint semantics,
   pagination shape, and error-envelope semantics are named concretely.

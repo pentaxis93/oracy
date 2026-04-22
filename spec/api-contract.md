@@ -76,6 +76,8 @@ Validation:
 
 - Accepted file formats are `m4a`, `mp3`, `wav`, and `webm`.
 - Maximum upload size is `25 MiB`.
+- `session_id`, when present on a new submission attempt, must identify an
+  existing session owned by the authenticated API key.
 - `language`, when present, constrains transcription to the supplied language.
   The backend does not auto-detect language for that submission.
 
@@ -86,8 +88,8 @@ Responses:
 - `200 OK`: replay of an existing terminal job
 - `400 Bad Request`: invalid idempotency header or invalid request fields
 - `401 Unauthorized`: missing or invalid API key
-- `404 Not Found`: supplied `session_id` does not exist for the authenticated
-  API key
+- `404 Not Found`: on a new submission attempt, supplied `session_id` does not
+  exist for the authenticated API key
 - `413 Payload Too Large`: file exceeds allowed size
 - `415 Unsupported Media Type`: unsupported audio format
 - `409 Conflict`: same API key and `Idempotency-Key`, but a mismatch on audio
@@ -119,8 +121,9 @@ Query parameters:
 - `limit` optional
 - `q` optional: search query text
 - `search_mode` optional when `q` is present: one of `keyword`, `semantic`,
-  `hybrid`
-- `tag_id` optional and repeatable
+  `hybrid`; defaults to `hybrid` when omitted
+- `tag_id` optional and repeatable; repeated values combine by intersection
+  (`AND`)
 - `session_id` optional
 - `recorded_after` optional
 - `recorded_before` optional
@@ -144,12 +147,15 @@ Notes:
   `Transcript` resource shape, filters, and collection envelope. This is an
   explicit `v0.1.0` governance decision to avoid duplicating transcript
   collection surface with no semantic gain.
+- If `q` is present and `search_mode` is omitted, the backend uses `hybrid`.
 - Search results are always transcript resources.
 - Keyword search may match current transcript text and historical
   `TranscriptVersion` text, but the returned item is always the parent
   `Transcript`.
 - Semantic and hybrid search use the current embedding. After a transcript
   text edit, semantic freshness is eventual rather than immediate.
+- Repeated `tag_id` filters combine by intersection: a transcript matches only
+  if it is associated with all supplied tags.
 - Failed jobs and in-flight jobs are not listed.
 
 Response body is a transcript collection envelope whose `items` are
@@ -275,10 +281,7 @@ Request body:
 
 ```json
 {
-  "tag_ids": [
-    "01JS9P0Q0THR2X3E4A5B6C7D8E",
-    "01JS9P0R6CK9M0N1P2Q3R4S5T6"
-  ]
+  "tag_ids": ["01JS9P0Q0THR2X3E4A5B6C7D8E", "01JS9P0R6CK9M0N1P2Q3R4S5T6"]
 }
 ```
 
@@ -480,6 +483,8 @@ Notes:
 
 - Deleting a session preserves contained transcripts and sets their
   `session_id` to `null`.
+- Deleting a session does not invalidate previously accepted replay records
+  whose stored submission tuple referenced that session.
 
 ### GET `/api/v1/sessions/{session_id}/transcripts`
 
@@ -491,8 +496,9 @@ Query parameters:
 - `limit` optional
 - `q` optional
 - `search_mode` optional when `q` is present: one of `keyword`, `semantic`,
-  `hybrid`
-- `tag_id` optional and repeatable
+  `hybrid`; defaults to `hybrid` when omitted
+- `tag_id` optional and repeatable; repeated values combine by intersection
+  (`AND`)
 - `recorded_after` optional
 - `recorded_before` optional
 - `created_after` optional
@@ -509,6 +515,9 @@ Notes:
 
 - This endpoint applies the same collection semantics as `GET /api/v1/transcripts`
   but with the session scope fixed by the path.
+- If `q` is present and `search_mode` is omitted, the backend uses `hybrid`.
+- Repeated `tag_id` filters combine by intersection: a transcript matches only
+  if it is associated with all supplied tags.
 
 Response body is a transcript collection envelope whose `items` are
 `Transcript` resources.
@@ -678,12 +687,17 @@ Fields:
 ## Idempotency Rules
 
 - The backend matches a replay by `API key + Idempotency-Key + accepted audio
-  content hash + recorded_at + session_id + language`.
+content hash + recorded_at + session_id + language`.
+- The accepted submission tuple is an immutable acceptance-time record, not a
+  live reference to current resource state.
 - Omitted optional `session_id` and `language` values participate as `null`.
 - Same API key + same `Idempotency-Key` + same accepted submission tuple
   returns the same `TranscriptionJob`.
 - Same API key + same `Idempotency-Key` + a mismatch on any accepted
   submission dimension returns `409 Conflict`.
+- If the session referenced by an accepted `session_id` is later deleted,
+  idempotent replays still return the original `TranscriptionJob` matched by
+  the stored accepted tuple.
 - If the transcript created by a succeeded job is later deleted, idempotent
   replays still return the original succeeded `TranscriptionJob` with
   `transcript_id=null`.
