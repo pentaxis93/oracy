@@ -101,6 +101,9 @@ accepted audio content hash + recorded_at + session_id + language`.
   time.
 - The accepted submission tuple is an immutable acceptance-time record, not a
   live reference to current resource state.
+- For `recorded_at`, replay matching compares the parsed instant normalized to
+  UTC, not the raw wire-format string. Any RFC 3339 UTC representation of the
+  same instant is a match.
 - Omitted optional `session_id` and `language` values participate in
   idempotency as `null`.
 - Reusing the same API key and `Idempotency-Key` with the same accepted
@@ -277,6 +280,10 @@ Semantics:
 - Repeated `tag_id` filters combine by intersection: a transcript matches only
   if it is associated with all supplied tags.
 - Transcript history is ordered newest-first by transcript `created_at`.
+- Tag listings are ordered newest-first by `created_at`, with descending `id`
+  as the deterministic tiebreaker.
+- Session listings are ordered newest-first by `created_at`, with descending
+  `id` as the deterministic tiebreaker.
 - Search results are ordered by backend relevance, with newest transcript
   `created_at` as the tiebreaker.
 - Transcript collection pagination is cursor-based. The default page size is

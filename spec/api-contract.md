@@ -316,6 +316,11 @@ Responses:
 - `200 OK`
 - `401 Unauthorized`
 
+Notes:
+
+- Tags are returned newest-first by `created_at`, with descending `id` as the
+  deterministic tiebreaker for cursor pagination.
+
 Response body is a collection envelope whose `items` are `Tag` resources.
 
 ### POST `/api/v1/tags`
@@ -413,6 +418,11 @@ Responses:
 
 - `200 OK`
 - `401 Unauthorized`
+
+Notes:
+
+- Sessions are returned newest-first by `created_at`, with descending `id` as
+  the deterministic tiebreaker for cursor pagination.
 
 Response body is a collection envelope whose `items` are `Session` resources.
 
@@ -690,6 +700,9 @@ Fields:
 content hash + recorded_at + session_id + language`.
 - The accepted submission tuple is an immutable acceptance-time record, not a
   live reference to current resource state.
+- For `recorded_at`, replay matching compares the parsed instant normalized to
+  UTC, not the raw wire-format string. Any RFC 3339 UTC representation of the
+  same instant is a match.
 - Omitted optional `session_id` and `language` values participate as `null`.
 - Same API key + same `Idempotency-Key` + same accepted submission tuple
   returns the same `TranscriptionJob`.
