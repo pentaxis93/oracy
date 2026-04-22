@@ -180,7 +180,8 @@ Semantics:
 - Job claim order is FIFO by readiness: first by retry eligibility, then by
   acceptance time.
 - Completion order is not guaranteed and is not exposed as a contract.
-- Transcript history is ordered newest-first by transcript `created_at`.
+- Transcript history is ordered newest-first by transcript `created_at`, with
+  descending `id` as the deterministic tiebreaker.
 
 ### Data Substrate
 
@@ -276,18 +277,21 @@ Semantics:
 - When `q` is present and `search_mode` is omitted, the backend defaults to
   `hybrid`.
 - Search filters support tag, session, `recorded_at` time range, and
-  `created_at` time range.
+  `created_at` time range. `*_after` bounds are exclusive; `*_before` bounds
+  are inclusive.
 - Repeated `tag_id` filters combine by intersection: a transcript matches only
   if it is associated with all supplied tags.
-- Transcript history is ordered newest-first by transcript `created_at`.
+- Transcript history is ordered newest-first by transcript `created_at`, with
+  descending `id` as the deterministic tiebreaker.
 - Version-history listings are ordered newest-first by `created_at`, with
   descending `id` as the deterministic tiebreaker.
 - Tag listings are ordered newest-first by `created_at`, with descending `id`
   as the deterministic tiebreaker.
 - Session listings are ordered newest-first by `created_at`, with descending
   `id` as the deterministic tiebreaker.
-- Search results are ordered by backend relevance, with newest transcript
-  `created_at` as the tiebreaker.
+- Search results are ordered by backend relevance score descending, then by
+  transcript `created_at` descending, then by descending `id` as the final
+  deterministic tiebreaker.
 - Transcript collection pagination is cursor-based. The default page size is
   `50`; the maximum page size is `100`.
 - Transcript, session, tag, version-history, and segment listings use the same

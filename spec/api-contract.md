@@ -125,10 +125,10 @@ Query parameters:
 - `tag_id` optional and repeatable; repeated values combine by intersection
   (`AND`)
 - `session_id` optional
-- `recorded_after` optional
-- `recorded_before` optional
-- `created_after` optional
-- `created_before` optional
+- `recorded_after` optional: exclusive lower bound on `recorded_at`
+- `recorded_before` optional: inclusive upper bound on `recorded_at`
+- `created_after` optional: exclusive lower bound on `created_at`
+- `created_before` optional: inclusive upper bound on `created_at`
 
 Responses:
 
@@ -142,7 +142,8 @@ Notes:
 - This endpoint is the unified transcript collection for both history and
   search.
 - Without `q`, the endpoint returns transcript history ordered newest-first by
-  transcript `created_at`.
+  transcript `created_at`, with descending `id` as the deterministic
+  tiebreaker for cursor pagination.
 - With `q`, the endpoint returns transcript search results using the same
   `Transcript` resource shape, filters, and collection envelope. This is an
   explicit `v0.1.0` governance decision to avoid duplicating transcript
@@ -154,6 +155,9 @@ Notes:
   `Transcript`.
 - Semantic and hybrid search use the current embedding. After a transcript
   text edit, semantic freshness is eventual rather than immediate.
+- Search results are ordered by backend relevance score descending, then by
+  transcript `created_at` descending, then by descending `id` as the final
+  deterministic tiebreaker for cursor pagination.
 - Repeated `tag_id` filters combine by intersection: a transcript matches only
   if it is associated with all supplied tags.
 - Failed jobs and in-flight jobs are not listed.
@@ -529,7 +533,8 @@ Responses:
 Notes:
 
 - This endpoint applies the same collection semantics as `GET /api/v1/transcripts`
-  but with the session scope fixed by the path.
+  but with the session scope fixed by the path, including the same ordering
+  and time-bound semantics.
 - If `q` is present and `search_mode` is omitted, the backend uses `hybrid`.
 - Repeated `tag_id` filters combine by intersection: a transcript matches only
   if it is associated with all supplied tags.
