@@ -126,6 +126,28 @@ async fn valid_bearer_key_exposes_api_key_id_to_handlers() {
     assert_eq!(json_body(response).await, json!({ "api_key_id": "alpha" }));
 }
 
+#[tokio::test]
+async fn bearer_scheme_is_case_insensitive() {
+    let router = protected_router().await;
+
+    for authorization in ["bearer alpha-secret", "BEARER alpha-secret"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", authorization)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await, json!({ "api_key_id": "alpha" }));
+    }
+}
+
 async fn protected_router() -> Router {
     let tempdir = TempDir::new().expect("tempdir");
     let audio_dir = tempdir.path().join("accepted-audio");

@@ -61,6 +61,14 @@ fn digest_key(key: &str) -> [u8; 32] {
     Sha256::digest(key.as_bytes()).into()
 }
 
+fn extract_bearer_token(header_value: &str) -> Option<&str> {
+    let (scheme, remainder) = header_value.split_once(|char: char| char.is_ascii_whitespace())?;
+    scheme
+        .eq_ignore_ascii_case("Bearer")
+        .then_some(remainder.trim())
+        .filter(|token| !token.is_empty())
+}
+
 impl<S> FromRequestParts<S> for AuthenticatedKey
 where
     S: Send + Sync,
@@ -76,10 +84,7 @@ where
             .and_then(|value| value.to_str().ok())
             .ok_or_else(ApiError::unauthorized)?;
 
-        let bearer = header_value
-            .strip_prefix("Bearer ")
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(ApiError::unauthorized)?;
+        let bearer = extract_bearer_token(header_value).ok_or_else(ApiError::unauthorized)?;
 
         auth_store
             .authenticate(bearer)

@@ -9,6 +9,7 @@ long-poll versus short-poll behavior are deferred to a later revision.
 ## Authentication
 
 - All endpoints below require `Authorization: Bearer <api_key>`.
+- The `Bearer` auth scheme is matched case-insensitively.
 - API keys are provisioned out-of-band by the operator.
 - Idempotency is scoped per authenticated API key.
 - Every resource lookup is scoped to the authenticated API key.
