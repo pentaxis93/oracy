@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -85,6 +87,48 @@ void main() {
       expect(permissions.checkCount, greaterThanOrEqualTo(1));
       expect(recordingNotifier.startCount, 0);
       expect(find.text('Microphone Access Required'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'Given another route is open, When the Android widget starts recording, Then Home shows the recording controls',
+    (tester) async {
+      final permissions = MockPermissionService();
+      final recordingNotifier = MockRecordingNotifier();
+
+      await HomeWidgetService.initialize();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pendingUploadCountOverride(0),
+            transcriptionOverride(),
+            permissionOverride(permissions),
+            recordingProvider.overrideWith(() => recordingNotifier),
+          ],
+          child: const OracyApp(),
+        ),
+      );
+      await tester.pump();
+
+      final homeContext = tester.element(find.byType(HomePage));
+      unawaited(
+        Navigator.of(homeContext).push(
+          MaterialPageRoute<void>(
+            builder: (_) => const Scaffold(body: Text('Covered Home')),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Covered Home'), findsOneWidget);
+
+      await sendWidgetRecordRequest();
+      await tester.pumpAndSettle();
+
+      expect(permissions.checkCount, greaterThanOrEqualTo(1));
+      expect(recordingNotifier.startCount, 1);
+      expect(find.text('Tap to Record'), findsOneWidget);
+      expect(find.byIcon(Icons.stop_rounded), findsOneWidget);
+      expect(find.text('Covered Home'), findsNothing);
     },
   );
 

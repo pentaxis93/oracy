@@ -126,11 +126,9 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
   }
 
   void _onScroll() {
-    // Load more when near the bottom (only if not searching)
-    final searchQuery = ref.read(searchQueryProvider);
-    if (searchQuery.isEmpty &&
-        _scrollController.position.pixels >=
-            _scrollController.position.maxScrollExtent - 200) {
+    // Load more when near the bottom.
+    if (_scrollController.position.pixels >=
+        _scrollController.position.maxScrollExtent - 200) {
       ref.read(transcriptHistoryProvider.notifier).loadMore();
     }
   }
@@ -229,13 +227,13 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
       );
     }
 
-    if (state.isEmpty) {
-      return const _EmptyView();
+    // Show no results message for search
+    if (state.query.isNotEmpty && filteredTranscripts.isEmpty) {
+      return _NoSearchResults(query: state.query);
     }
 
-    // Show no results message for search
-    if (searchQuery.isNotEmpty && filteredTranscripts.isEmpty) {
-      return _NoSearchResults(query: searchQuery);
+    if (state.isEmpty) {
+      return const _EmptyView();
     }
 
     // Group transcripts by date
@@ -284,7 +282,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
           ],
 
           // Loading indicator
-          if (searchQuery.isEmpty && state.isLoadingMore)
+          if (state.isLoadingMore)
             const Padding(
               padding: EdgeInsets.all(16),
               child: Center(child: CircularProgressIndicator()),

@@ -149,7 +149,17 @@ class _HomePageState extends ConsumerState<HomePage>
   }
 
   void _startRecordingFromWidget() {
-    unawaited(startRecordingWithPermission(context, ref));
+    unawaited(_startRecordingFromWidgetAsync());
+  }
+
+  Future<void> _startRecordingFromWidgetAsync() async {
+    final navigator = Navigator.of(context);
+    final started = await startRecordingWithPermission(context, ref);
+    if (!started || !context.mounted) {
+      return;
+    }
+
+    navigator.popUntil((route) => route.isFirst);
   }
 
   void _showAuthErrorDialog(String message) {

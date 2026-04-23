@@ -119,6 +119,7 @@ class TranscriptHistoryState {
 /// Notifier for managing transcript history with pagination.
 class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
   static const int _pageSize = 20;
+  int _requestVersion = 0;
 
   HistoryService get _service => ref.read(historyServiceProvider);
 
@@ -131,25 +132,30 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
   Future<void> loadInitial() async {
     if (state.isLoading) return;
 
+    final query = state.query;
+    final requestVersion = ++_requestVersion;
     state = state.copyWith(isLoading: true, error: null);
 
     try {
       final response = await _service.getTranscripts(
         offset: 0,
         limit: _pageSize,
-        query: state.query,
+        query: query,
       );
+      if (!_isCurrentRequest(requestVersion, query)) return;
 
       state = TranscriptHistoryState(
         transcripts: response.transcripts,
         total: response.total,
         isLoading: false,
         hasMore: response.hasMore,
-        query: state.query,
+        query: query,
       );
     } on DioException catch (e) {
+      if (!_isCurrentRequest(requestVersion, query)) return;
       state = state.copyWith(isLoading: false, error: _mapError(e));
     } catch (e) {
+      if (!_isCurrentRequest(requestVersion, query)) return;
       state = state.copyWith(
         isLoading: false,
         error: 'Failed to load transcripts: $e',
@@ -161,14 +167,21 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
   Future<void> loadMore() async {
     if (state.isLoading || state.isLoadingMore || !state.hasMore) return;
 
+    final query = state.query;
+    final offset = state.transcripts.length;
+    final requestVersion = ++_requestVersion;
     state = state.copyWith(isLoadingMore: true);
 
     try {
       final response = await _service.getTranscripts(
-        offset: state.transcripts.length,
+        offset: offset,
         limit: _pageSize,
-        query: state.query,
+        query: query,
       );
+      if (!_isCurrentRequest(requestVersion, query) ||
+          state.transcripts.length != offset) {
+        return;
+      }
 
       state = state.copyWith(
         transcripts: [...state.transcripts, ...response.transcripts],
@@ -177,8 +190,10 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
         hasMore: response.hasMore,
       );
     } on DioException catch (e) {
+      if (!_isCurrentRequest(requestVersion, query)) return;
       state = state.copyWith(isLoadingMore: false, error: _mapError(e));
     } catch (e) {
+      if (!_isCurrentRequest(requestVersion, query)) return;
       state = state.copyWith(
         isLoadingMore: false,
         error: 'Failed to load more transcripts: $e',
@@ -201,6 +216,10 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
 
     state = TranscriptHistoryState(query: normalizedQuery);
     await loadInitial();
+  }
+
+  bool _isCurrentRequest(int requestVersion, String query) {
+    return requestVersion == _requestVersion && state.query == query;
   }
 
   String _mapError(DioException e) {
