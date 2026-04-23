@@ -123,6 +123,7 @@ class MockPermissionService extends PermissionService {
   MicrophonePermissionStatus requestedStatus;
   int checkCount = 0;
   int requestCount = 0;
+  int openSettingsCount = 0;
 
   MockPermissionService({
     this.status = MicrophonePermissionStatus.granted,
@@ -143,7 +144,10 @@ class MockPermissionService extends PermissionService {
   }
 
   @override
-  Future<bool> openSettings() async => true;
+  Future<bool> openSettings() async {
+    openSettingsCount++;
+    return true;
+  }
 }
 
 /// Mock transcription notifier for testing.

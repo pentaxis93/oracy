@@ -133,6 +133,45 @@ void main() {
   );
 
   testWidgets(
+    'Given microphone permission is granted in settings, When the app resumes, Then recording starts',
+    (tester) async {
+      final permissions = MockPermissionService(
+        status: MicrophonePermissionStatus.permanentlyDenied,
+      );
+      final recordingNotifier = MockRecordingNotifier();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pendingUploadCountOverride(0),
+            transcriptionOverride(),
+            permissionOverride(permissions),
+            recordingProvider.overrideWith(() => recordingNotifier),
+          ],
+          child: const OracyApp(),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byIcon(Icons.mic));
+      await tester.pumpAndSettle();
+      expect(find.text('Permission Required'), findsOneWidget);
+
+      await tester.tap(find.text('Open Settings'));
+      await tester.pump();
+      expect(permissions.openSettingsCount, 1);
+
+      permissions.status = MicrophonePermissionStatus.granted;
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+
+      expect(recordingNotifier.startCount, 1);
+      expect(find.text('Permission Required'), findsNothing);
+      expect(find.byIcon(Icons.stop_rounded), findsOneWidget);
+    },
+  );
+
+  testWidgets(
     'Given microphone permission is denied, When New Recording is tapped from a transcript, Then the result screen remains and recording does not start',
     (tester) async {
       final permissions = MockPermissionService(

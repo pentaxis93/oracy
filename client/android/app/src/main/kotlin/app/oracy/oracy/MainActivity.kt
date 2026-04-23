@@ -8,7 +8,6 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     companion object {
         private const val CHANNEL = "app.oracy.oracy/widget"
-        const val ACTION_RECORD = "app.oracy.oracy.ACTION_RECORD"
     }
 
     private var methodChannel: MethodChannel? = null
@@ -37,7 +36,15 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        if (intent?.action == ACTION_RECORD) {
+        val authenticator = WidgetRecordIntentAuthenticator(
+            expectedAction = WidgetRecordIntentContract.ACTION_RECORD,
+            expectedToken = WidgetRecordIntentTokens.getOrCreate(this)
+        )
+        if (authenticator.isAuthenticatedRecordIntent(
+                action = intent?.action,
+                token = intent?.getStringExtra(WidgetRecordIntentContract.EXTRA_RECORD_TOKEN)
+            )
+        ) {
             recordIntentBuffer.recordIntentReceived {
                 methodChannel?.invokeMethod("startRecordingFromWidget", null)
             }

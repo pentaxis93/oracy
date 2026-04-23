@@ -7,7 +7,7 @@ import 'package:oracy/services/recording_service.dart';
 ///
 /// Shows appropriate messages based on permission status and provides
 /// buttons to request permission or open settings.
-class MicrophonePermissionDialog extends ConsumerWidget {
+class MicrophonePermissionDialog extends ConsumerStatefulWidget {
   const MicrophonePermissionDialog({super.key});
 
   /// Show the permission dialog and return true if permission was granted.
@@ -21,7 +21,36 @@ class MicrophonePermissionDialog extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MicrophonePermissionDialog> createState() =>
+      _MicrophonePermissionDialogState();
+}
+
+class _MicrophonePermissionDialogState
+    extends ConsumerState<MicrophonePermissionDialog>
+    with WidgetsBindingObserver {
+  bool _refreshPermissionOnResume = false;
+
+  @override
+  void dispose() {
+    if (_refreshPermissionOnResume) {
+      WidgetsBinding.instance.removeObserver(this);
+    }
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_refreshPermissionOnResume || state != AppLifecycleState.resumed) {
+      return;
+    }
+
+    _refreshPermissionOnResume = false;
+    WidgetsBinding.instance.removeObserver(this);
+    ref.invalidate(microphonePermissionProvider);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final permissionStatus = ref.watch(microphonePermissionProvider);
 
     return permissionStatus.when(
@@ -41,13 +70,12 @@ class MicrophonePermissionDialog extends ConsumerWidget {
           ),
         ],
       ),
-      data: (status) => _buildDialogForStatus(context, ref, status),
+      data: (status) => _buildDialogForStatus(context, status),
     );
   }
 
   Widget _buildDialogForStatus(
     BuildContext context,
-    WidgetRef ref,
     MicrophonePermissionStatus status,
   ) {
     switch (status) {
@@ -77,7 +105,7 @@ class MicrophonePermissionDialog extends ConsumerWidget {
               child: const Text('Not Now'),
             ),
             FilledButton(
-              onPressed: () => _requestPermission(context, ref),
+              onPressed: _requestPermission,
               child: const Text('Allow Microphone'),
             ),
           ],
@@ -97,7 +125,7 @@ class MicrophonePermissionDialog extends ConsumerWidget {
               child: const Text('Cancel'),
             ),
             FilledButton(
-              onPressed: () => _openSettings(context, ref),
+              onPressed: _openSettings,
               child: const Text('Open Settings'),
             ),
           ],
@@ -132,7 +160,7 @@ class MicrophonePermissionDialog extends ConsumerWidget {
               child: const Text('Not Now'),
             ),
             FilledButton(
-              onPressed: () => _requestPermission(context, ref),
+              onPressed: _requestPermission,
               child: const Text('Continue'),
             ),
           ],
@@ -140,11 +168,11 @@ class MicrophonePermissionDialog extends ConsumerWidget {
     }
   }
 
-  Future<void> _requestPermission(BuildContext context, WidgetRef ref) async {
+  Future<void> _requestPermission() async {
     final service = ref.read(permissionServiceProvider);
     final status = await service.requestMicrophonePermission();
 
-    if (!context.mounted) return;
+    if (!mounted) return;
 
     if (status == MicrophonePermissionStatus.granted) {
       Navigator.of(context).pop(true);
@@ -154,14 +182,16 @@ class MicrophonePermissionDialog extends ConsumerWidget {
     }
   }
 
-  Future<void> _openSettings(BuildContext context, WidgetRef ref) async {
+  Future<void> _openSettings() async {
     final service = ref.read(permissionServiceProvider);
-    await service.openSettings();
+    final opened = await service.openSettings();
 
-    if (!context.mounted) return;
+    if (!mounted || !opened) return;
 
-    // User may return from settings - check again
-    ref.invalidate(microphonePermissionProvider);
+    if (!_refreshPermissionOnResume) {
+      _refreshPermissionOnResume = true;
+      WidgetsBinding.instance.addObserver(this);
+    }
   }
 }
 

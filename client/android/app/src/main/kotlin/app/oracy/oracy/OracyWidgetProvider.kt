@@ -34,8 +34,6 @@ class OracyWidgetProvider : AppWidgetProvider() {
     }
 
     companion object {
-        private const val ACTION_RECORD = "app.oracy.oracy.ACTION_RECORD"
-
         internal fun updateAppWidget(
             context: Context,
             appWidgetManager: AppWidgetManager,
@@ -53,8 +51,12 @@ class OracyWidgetProvider : AppWidgetProvider() {
 
             // Create intent to launch app with record action
             val recordIntent = Intent(context, MainActivity::class.java).apply {
-                action = ACTION_RECORD
+                action = WidgetRecordIntentContract.ACTION_RECORD
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(
+                    WidgetRecordIntentContract.EXTRA_RECORD_TOKEN,
+                    WidgetRecordIntentTokens.getOrCreate(context)
+                )
             }
 
             val recordPendingIntent = PendingIntent.getActivity(
