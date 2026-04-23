@@ -48,6 +48,38 @@ async fn non_bearer_authorization_header_returns_shared_401() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        json_body(response).await,
+        json!({
+            "error_code": "unauthorized",
+            "message": "Missing or invalid API key."
+        })
+    );
+}
+
+#[tokio::test]
+async fn blank_bearer_token_returns_shared_401() {
+    let router = protected_router().await;
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/protected")
+                .header("Authorization", "Bearer   ")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        json_body(response).await,
+        json!({
+            "error_code": "unauthorized",
+            "message": "Missing or invalid API key."
+        })
+    );
 }
 
 #[tokio::test]
@@ -66,6 +98,13 @@ async fn unknown_bearer_key_returns_shared_401() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        json_body(response).await,
+        json!({
+            "error_code": "unauthorized",
+            "message": "Missing or invalid API key."
+        })
+    );
 }
 
 #[tokio::test]

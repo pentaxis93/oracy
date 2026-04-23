@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 use crate::config::ApiKeyConfig;
 use crate::errors::ApiError;
@@ -39,11 +39,20 @@ impl AuthStore {
 
     pub fn authenticate(&self, presented_key: &str) -> Option<AuthenticatedKey> {
         let candidate_digest = digest_key(presented_key);
+        let mut matched = Choice::from(0);
+        let mut matched_index = 0u64;
 
-        self.records.iter().find_map(|record| {
-            bool::from(record.key_digest.ct_eq(&candidate_digest)).then(|| AuthenticatedKey {
-                api_key_id: record.api_key_id.clone(),
-            })
+        // Keep this loop as a full scan. Returning early on a match would make
+        // authentication time depend on key position and hit-vs-miss behavior.
+        for (index, record) in self.records.iter().enumerate() {
+            let is_match = record.key_digest.ct_eq(&candidate_digest);
+            let is_first_match = is_match & !matched;
+            matched_index.conditional_assign(&(index as u64), is_first_match);
+            matched |= is_match;
+        }
+
+        bool::from(matched).then(|| AuthenticatedKey {
+            api_key_id: self.records[matched_index as usize].api_key_id.clone(),
         })
     }
 }

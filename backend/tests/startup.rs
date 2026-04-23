@@ -36,6 +36,28 @@ api_keys = []
 }
 
 #[test]
+fn startup_rejects_invalid_toml() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+bogus = true
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    let error = load_runtime_from_path(&config_path).expect_err("invalid toml should fail");
+    assert!(error.to_string().contains("failed to parse config file"));
+}
+
+#[test]
 fn startup_rejects_duplicate_api_key_ids() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
@@ -58,6 +80,78 @@ key = "key-two"
 
     let error = load_runtime_from_path(&config_path).expect_err("duplicate ids should fail");
     assert!(error.to_string().contains("duplicate api_key_id"));
+}
+
+#[test]
+fn startup_rejects_blank_api_key_ids() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "   "
+key = "key-one"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    let error = load_runtime_from_path(&config_path).expect_err("blank ids should fail");
+    assert!(error.to_string().contains("api_key_id must not be blank"));
+}
+
+#[test]
+fn startup_rejects_blank_api_key_material() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "   "
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    let error = load_runtime_from_path(&config_path).expect_err("blank key material should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("api key material must not be blank")
+    );
+}
+
+#[test]
+fn startup_rejects_duplicate_api_key_material() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "shared-key"
+
+[[api_keys]]
+api_key_id = "beta"
+key = "shared-key"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    let error =
+        load_runtime_from_path(&config_path).expect_err("duplicate key material should fail");
+    assert!(error.to_string().contains("duplicate api key material"));
 }
 
 #[test]
