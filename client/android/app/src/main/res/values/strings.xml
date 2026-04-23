@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Oracy</string>
+    <string name="widget_description">Quick voice recording widget</string>
+    <string name="record_button_description">Record audio</string>
+</resources>
