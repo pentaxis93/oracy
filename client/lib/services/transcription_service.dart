@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/db/database.dart';
 import 'package:oracy/services/api_client.dart';
+import 'package:oracy/services/upload_retry_policy.dart';
 
 // Conditional imports for platform-specific file handling
 import 'transcription_service_stub.dart'
@@ -248,6 +249,19 @@ Future<void> recordUploadFailure(
   UploadFailureClassification classification,
 ) async {
   if (classification.isRetryable) {
+    final upload = await db.getUploadById(uploadId);
+    if (upload != null && upload.retryCount + 1 >= maxRetryAttempts) {
+      await db.incrementRetryCount(
+        uploadId,
+        errorMessage: 'Automatic retries exhausted. ${classification.message}',
+      );
+      await db.markAsTerminalFailure(
+        uploadId,
+        errorMessage: 'Automatic retries exhausted. ${classification.message}',
+      );
+      return;
+    }
+
     await db.incrementRetryCount(
       uploadId,
       errorMessage: classification.message,

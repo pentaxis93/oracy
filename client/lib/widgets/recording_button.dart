@@ -83,23 +83,13 @@ class RecordingButton extends ConsumerWidget {
         onRecordingComplete!(path);
       }
     } else {
-      // Check permission first
+      // Check permission and start recording
       if (kDebugMode && kIsWeb) {
         print('[RECORDING_BUTTON] Checking permission...');
       }
-      final hasPermission = await ensureMicrophonePermission(context, ref);
+      final started = await startRecordingWithPermission(context, ref);
       if (kDebugMode && kIsWeb) {
-        print('[RECORDING_BUTTON] Permission result: $hasPermission');
-      }
-      if (!hasPermission) return;
-
-      // Start recording
-      if (kDebugMode && kIsWeb) {
-        print('[RECORDING_BUTTON] Starting recording...');
-      }
-      await notifier.startRecording();
-      if (kDebugMode && kIsWeb) {
-        print('[RECORDING_BUTTON] Recording started!');
+        print('[RECORDING_BUTTON] Recording started: $started');
       }
     }
   }

@@ -44,10 +44,15 @@ class HistoryService {
   Future<TranscriptListResponse> getTranscripts({
     int offset = 0,
     int limit = 20,
+    String? query,
   }) async {
     final response = await _dio.get(
       '/api/v1/transcripts',
-      queryParameters: {'offset': offset, 'limit': limit},
+      queryParameters: {
+        'offset': offset,
+        'limit': limit,
+        if (query != null && query.isNotEmpty) 'q': query,
+      },
     );
 
     return TranscriptListResponse.fromJson(
@@ -76,6 +81,7 @@ class TranscriptHistoryState {
   final bool isLoadingMore;
   final String? error;
   final bool hasMore;
+  final String query;
 
   const TranscriptHistoryState({
     this.transcripts = const [],
@@ -84,6 +90,7 @@ class TranscriptHistoryState {
     this.isLoadingMore = false,
     this.error,
     this.hasMore = true,
+    this.query = '',
   });
 
   TranscriptHistoryState copyWith({
@@ -93,6 +100,7 @@ class TranscriptHistoryState {
     bool? isLoadingMore,
     String? error,
     bool? hasMore,
+    String? query,
   }) {
     return TranscriptHistoryState(
       transcripts: transcripts ?? this.transcripts,
@@ -101,6 +109,7 @@ class TranscriptHistoryState {
       isLoadingMore: isLoadingMore ?? this.isLoadingMore,
       error: error,
       hasMore: hasMore ?? this.hasMore,
+      query: query ?? this.query,
     );
   }
 
@@ -128,6 +137,7 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
       final response = await _service.getTranscripts(
         offset: 0,
         limit: _pageSize,
+        query: state.query,
       );
 
       state = TranscriptHistoryState(
@@ -135,6 +145,7 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
         total: response.total,
         isLoading: false,
         hasMore: response.hasMore,
+        query: state.query,
       );
     } on DioException catch (e) {
       state = state.copyWith(isLoading: false, error: _mapError(e));
@@ -156,6 +167,7 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
       final response = await _service.getTranscripts(
         offset: state.transcripts.length,
         limit: _pageSize,
+        query: state.query,
       );
 
       state = state.copyWith(
@@ -176,7 +188,18 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
 
   /// Refresh the list (reload from beginning).
   Future<void> refresh() async {
-    state = const TranscriptHistoryState();
+    state = TranscriptHistoryState(query: state.query);
+    await loadInitial();
+  }
+
+  /// Search transcripts using the same paginated collection contract as history.
+  Future<void> search(String query) async {
+    final normalizedQuery = query.trim();
+    if (normalizedQuery == state.query && !state.isLoading) {
+      return;
+    }
+
+    state = TranscriptHistoryState(query: normalizedQuery);
     await loadInitial();
   }
 

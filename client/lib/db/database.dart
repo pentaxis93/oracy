@@ -1,5 +1,6 @@
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:oracy/services/upload_retry_policy.dart';
 import 'package:uuid/uuid.dart';
 
 // Platform-specific database connection
@@ -93,7 +94,9 @@ class AppDatabase extends _$AppDatabase {
   );
 
   /// Get all pending uploads (status = pending or failed with retryCount < max).
-  Future<List<PendingUpload>> getPendingUploads({int maxRetries = 3}) {
+  Future<List<PendingUpload>> getPendingUploads({
+    int maxRetries = maxRetryAttempts,
+  }) {
     return (select(pendingUploads)
           ..where(
             (t) =>
@@ -392,9 +395,9 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<void> _backfillMissingIdempotencyKeys() async {
-    final uploadsMissingKeys = (await select(
-      pendingUploads,
-    ).get()).where((upload) {
+    final uploadsMissingKeys = (await select(pendingUploads).get()).where((
+      upload,
+    ) {
       final key = upload.idempotencyKey;
       return key == null || key.isEmpty;
     });

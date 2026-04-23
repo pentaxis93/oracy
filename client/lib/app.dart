@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +11,7 @@ import 'package:oracy/services/home_widget_service.dart';
 import 'package:oracy/services/preferences_service.dart';
 import 'package:oracy/services/recording_service.dart';
 import 'package:oracy/services/transcription_service.dart';
+import 'package:oracy/widgets/permission_dialog.dart';
 import 'package:oracy/widgets/recording_button.dart';
 import 'package:oracy/widgets/sync_status_indicator.dart';
 
@@ -71,6 +74,7 @@ class _HomePageState extends ConsumerState<HomePage>
       if (kDebugMode && kIsWeb) {
         print('[HOME] PostFrameCallback executing...');
       }
+      HomeWidgetService.setOnRecordCallback(_startRecordingFromWidget);
       _setupTranscriptionListener();
     });
   }
@@ -78,6 +82,7 @@ class _HomePageState extends ConsumerState<HomePage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    HomeWidgetService.setOnRecordCallback(null);
     super.dispose();
   }
 
@@ -141,14 +146,10 @@ class _HomePageState extends ConsumerState<HomePage>
           HomeWidgetService.updateStatus('Tap to record');
       }
     });
+  }
 
-    // Set up widget callback for auto-start recording
-    HomeWidgetService.setOnRecordCallback(() {
-      final recordingState = ref.read(recordingProvider);
-      if (recordingState.state == RecordingState.idle) {
-        ref.read(recordingProvider.notifier).startRecording();
-      }
-    });
+  void _startRecordingFromWidget() {
+    unawaited(startRecordingWithPermission(context, ref));
   }
 
   void _showAuthErrorDialog(String message) {

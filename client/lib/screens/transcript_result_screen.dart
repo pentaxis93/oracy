@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:oracy/services/recording_service.dart';
 import 'package:oracy/services/transcription_service.dart';
+import 'package:oracy/widgets/permission_dialog.dart';
 
 /// Screen that displays the result of a transcription.
 class TranscriptResultScreen extends ConsumerStatefulWidget {
@@ -139,11 +139,14 @@ class _TranscriptResultScreenState
     );
   }
 
-  void _startNewRecording(BuildContext context) {
+  Future<void> _startNewRecording(BuildContext context) async {
+    final started = await startRecordingWithPermission(context, ref);
+    if (!started || !context.mounted) {
+      return;
+    }
+
     // Reset transcription state
     ref.read(transcriptionProvider.notifier).reset();
-    // Start recording immediately
-    ref.read(recordingProvider.notifier).startRecording();
     // Pop back to home page
     Navigator.of(context).popUntil((route) => route.isFirst);
   }

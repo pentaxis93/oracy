@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/history_service.dart';
+import 'package:oracy/services/permission_service.dart';
 import 'package:oracy/services/recording_service.dart';
 import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/services/upload_queue_service.dart';
@@ -70,6 +71,7 @@ class MockSecureStorage extends SecureStorageService {
 /// Mock recording notifier for testing.
 class MockRecordingNotifier extends RecordingNotifier {
   RecordingInfo _mockState;
+  int startCount = 0;
 
   MockRecordingNotifier([RecordingInfo? initialState])
     : _mockState =
@@ -86,6 +88,7 @@ class MockRecordingNotifier extends RecordingNotifier {
 
   @override
   Future<void> startRecording() async {
+    startCount++;
     state = RecordingInfo(
       state: RecordingState.recording,
       filePath: '/mock/recording.m4a',
@@ -112,6 +115,35 @@ class MockRecordingNotifier extends RecordingNotifier {
   void reset() {
     state = const RecordingInfo(state: RecordingState.idle);
   }
+}
+
+/// Mock permission service for recording-entrypoint tests.
+class MockPermissionService extends PermissionService {
+  MicrophonePermissionStatus status;
+  MicrophonePermissionStatus requestedStatus;
+  int checkCount = 0;
+  int requestCount = 0;
+
+  MockPermissionService({
+    this.status = MicrophonePermissionStatus.granted,
+    MicrophonePermissionStatus? requestedStatus,
+  }) : requestedStatus = requestedStatus ?? status;
+
+  @override
+  Future<MicrophonePermissionStatus> checkMicrophonePermission() async {
+    checkCount++;
+    return status;
+  }
+
+  @override
+  Future<MicrophonePermissionStatus> requestMicrophonePermission() async {
+    requestCount++;
+    status = requestedStatus;
+    return status;
+  }
+
+  @override
+  Future<bool> openSettings() async => true;
 }
 
 /// Mock transcription notifier for testing.
@@ -261,6 +293,11 @@ dynamic recordingOverride([RecordingInfo? initialState]) {
   return recordingProvider.overrideWith(
     () => MockRecordingNotifier(initialState),
   );
+}
+
+/// Override for mock microphone permissions.
+dynamic permissionOverride(MockPermissionService service) {
+  return permissionServiceProvider.overrideWith((_) => service);
 }
 
 /// Override for mock transcription state.

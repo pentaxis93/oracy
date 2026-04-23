@@ -8,6 +8,7 @@ import 'package:oracy/db/database.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/recording_recovery_service.dart';
 import 'package:oracy/services/transcription_service.dart';
+import 'package:oracy/services/upload_retry_policy.dart';
 import 'package:workmanager/workmanager.dart';
 
 /// Unique name for the background sync task.
@@ -18,9 +19,6 @@ const String backgroundSyncOneOffTaskName = 'oracy.backgroundSyncOneOff';
 
 /// Minimum interval between periodic sync attempts (Android limitation: min 15 min).
 const Duration periodicSyncInterval = Duration(minutes: 15);
-
-/// Maximum number of retry attempts for background sync.
-const int maxBackgroundRetries = 5;
 
 /// Age beyond which an `uploading` row is considered stranded in background sync.
 /// Must exceed the Dio receiveTimeout above. A row can only stay
@@ -82,7 +80,7 @@ Future<bool> runBackgroundSyncPass({
   required ConnectivityCheck checkConnectivity,
   required ApiKeyReader readApiKey,
   required BackgroundTranscriptionServiceFactory createTranscriptionService,
-  int maxRetries = maxBackgroundRetries,
+  int maxRetries = maxRetryAttempts,
   LocalFileDeleter deleteLocalFile = defaultLocalFileDeleter,
   BackgroundRecordingReconciler reconcilePersistentRecordings =
       RecordingRecoveryService.reconcilePersistentRecordings,

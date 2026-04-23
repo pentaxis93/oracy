@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/services/permission_service.dart';
+import 'package:oracy/services/recording_service.dart';
 
 /// A dialog that handles microphone permission requests.
 ///
@@ -182,4 +183,23 @@ Future<bool> ensureMicrophonePermission(
   if (!context.mounted) return false;
 
   return MicrophonePermissionDialog.show(context);
+}
+
+/// Start recording through the same permission gate used by every UI entrypoint.
+Future<bool> startRecordingWithPermission(
+  BuildContext context,
+  WidgetRef ref,
+) async {
+  final hasPermission = await ensureMicrophonePermission(context, ref);
+  if (!hasPermission || !context.mounted) {
+    return false;
+  }
+
+  final recordingState = ref.read(recordingProvider);
+  if (recordingState.isRecording) {
+    return false;
+  }
+
+  await ref.read(recordingProvider.notifier).startRecording();
+  return true;
 }

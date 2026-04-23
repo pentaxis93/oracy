@@ -9,9 +9,7 @@ import 'package:oracy/db/database.dart';
 import 'package:oracy/services/background_sync_service.dart';
 import 'package:oracy/services/recording_recovery_service.dart';
 import 'package:oracy/services/transcription_service.dart';
-
-/// Maximum number of retry attempts for a failed upload.
-const int maxRetryAttempts = 5;
+import 'package:oracy/services/upload_retry_policy.dart';
 
 /// Base delay for exponential backoff (in milliseconds).
 const int baseBackoffDelayMs = 1000;

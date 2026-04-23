@@ -2,12 +2,14 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/db/database.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/transcription_service.dart';
+import 'package:oracy/services/upload_retry_policy.dart';
 
 import 'helpers/test_utils.dart';
 
@@ -101,7 +103,8 @@ class _StatusCodeFailingTranscriptionService extends TranscriptionService {
   }
 }
 
-class _PlainTextResponseFailingTranscriptionService extends TranscriptionService {
+class _PlainTextResponseFailingTranscriptionService
+    extends TranscriptionService {
   final int statusCode;
   final Object? responseData;
 
@@ -244,7 +247,10 @@ void main() {
       storage.unblock.complete();
       await transcriptionFuture;
 
-      expect(container.read(transcriptionProvider), isA<TranscriptionSuccess>());
+      expect(
+        container.read(transcriptionProvider),
+        isA<TranscriptionSuccess>(),
+      );
     },
   );
 
@@ -271,7 +277,10 @@ void main() {
       final storedUpload = await db.getUploadByAudioPath(audioFile.path);
 
       expect(state, isA<TranscriptionError>());
-      expect((state as TranscriptionError).errorType, TranscriptionErrorType.auth);
+      expect(
+        (state as TranscriptionError).errorType,
+        TranscriptionErrorType.auth,
+      );
       expect(pendingUploads, hasLength(1));
       expect(storedUpload, isNotNull);
       expect(storedUpload!.status, UploadStatus.pending.index);
@@ -337,7 +346,9 @@ void main() {
       );
 
       await expectLater(
-        container.read(transcriptionProvider.notifier).transcribe(audioFile.path),
+        container
+            .read(transcriptionProvider.notifier)
+            .transcribe(audioFile.path),
         completes,
       );
 
@@ -592,6 +603,46 @@ void main() {
 
       expect(await db.getPendingCount(), 1);
       expect(await db.watchPendingCount().first, 1);
+    },
+  );
+
+  test(
+    'Given a retryable upload has exhausted automatic retries, When another retryable failure is recorded, Then it becomes a terminal failure for manual recovery',
+    () async {
+      container = ProviderContainer();
+      final audioFile = await createAudioFile('exhausted_retry.wav');
+      final uploadId = await db.ensurePendingUpload(audioPath: audioFile.path);
+      await (db.update(
+        db.pendingUploads,
+      )..where((t) => t.id.equals(uploadId))).write(
+        PendingUploadsCompanion(
+          status: Value(UploadStatus.failed.index),
+          retryCount: Value(maxRetryAttempts - 1),
+        ),
+      );
+
+      await recordUploadFailure(
+        db,
+        uploadId,
+        const UploadFailureClassification(
+          message: 'Unable to connect to server.',
+          errorType: TranscriptionErrorType.network,
+          isRetryable: true,
+        ),
+      );
+
+      final storedUpload = await db.getUploadById(uploadId);
+
+      expect(storedUpload, isNotNull);
+      expect(storedUpload!.status, UploadStatus.terminalFailure.index);
+      expect(storedUpload.retryCount, maxRetryAttempts);
+      expect(
+        storedUpload.errorMessage,
+        contains('Automatic retries exhausted'),
+      );
+      expect(await db.getPendingUploads(), isEmpty);
+      expect(await db.getPendingCount(), 1);
+      expect(await db.watchTerminalFailureUploads().first, hasLength(1));
     },
   );
 }

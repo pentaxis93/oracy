@@ -139,13 +139,16 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
     // Debounce search input (300ms)
     _debounceTimer?.cancel();
     _debounceTimer = Timer(const Duration(milliseconds: 300), () {
-      ref.read(searchQueryProvider.notifier).update(_searchController.text);
+      final query = _searchController.text;
+      ref.read(searchQueryProvider.notifier).update(query);
+      unawaited(ref.read(transcriptHistoryProvider.notifier).search(query));
     });
   }
 
   void _clearSearch() {
     _searchController.clear();
     ref.read(searchQueryProvider.notifier).clear();
+    unawaited(ref.read(transcriptHistoryProvider.notifier).search(''));
   }
 
   @override
@@ -153,17 +156,6 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
     final state = ref.watch(transcriptHistoryProvider);
     final searchQuery = ref.watch(searchQueryProvider);
     final theme = Theme.of(context);
-
-    // Filter transcripts based on search query (client-side for now)
-    final filteredTranscripts = searchQuery.isEmpty
-        ? state.transcripts
-        : state.transcripts
-              .where(
-                (t) => t.transcript.toLowerCase().contains(
-                  searchQuery.toLowerCase(),
-                ),
-              )
-              .toList();
 
     return Scaffold(
       appBar: AppBar(
@@ -212,7 +204,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
 
           // Results
           Expanded(
-            child: _buildBody(state, filteredTranscripts, searchQuery, theme),
+            child: _buildBody(state, state.transcripts, searchQuery, theme),
           ),
         ],
       ),
@@ -292,7 +284,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
           ],
 
           // Loading indicator
-          if (searchQuery.isEmpty && state.hasMore)
+          if (searchQuery.isEmpty && state.isLoadingMore)
             const Padding(
               padding: EdgeInsets.all(16),
               child: Center(child: CircularProgressIndicator()),

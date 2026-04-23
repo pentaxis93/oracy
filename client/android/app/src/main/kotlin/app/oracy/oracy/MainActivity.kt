@@ -12,11 +12,20 @@ class MainActivity : FlutterActivity() {
     }
 
     private var methodChannel: MethodChannel? = null
+    private val recordIntentBuffer = RecordIntentBuffer()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        methodChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "consumePendingRecordIntent" -> {
+                    result.success(recordIntentBuffer.consumePendingRecordIntent())
+                }
+                else -> result.notImplemented()
+            }
+        }
 
         // Check if launched from widget
         handleIntent(intent)
@@ -29,8 +38,9 @@ class MainActivity : FlutterActivity() {
 
     private fun handleIntent(intent: Intent?) {
         if (intent?.action == ACTION_RECORD) {
-            // Notify Flutter to start recording
-            methodChannel?.invokeMethod("startRecordingFromWidget", null)
+            recordIntentBuffer.recordIntentReceived {
+                methodChannel?.invokeMethod("startRecordingFromWidget", null)
+            }
         }
     }
 }
