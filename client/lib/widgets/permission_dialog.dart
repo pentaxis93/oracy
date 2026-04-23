@@ -231,5 +231,5 @@ Future<bool> startRecordingWithPermission(
   }
 
   await ref.read(recordingProvider.notifier).startRecording();
-  return true;
+  return ref.read(recordingProvider).isRecording;
 }

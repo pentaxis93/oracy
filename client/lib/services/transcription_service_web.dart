@@ -4,6 +4,7 @@ import 'dart:html' as html;
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'transcription_service.dart';
+import 'web_recording_upload_metadata.dart';
 
 Future<FileData> getFileData(String filePath) async {
   // On web, filePath is a blob URL (e.g., blob:https://oracy.app/...)
@@ -27,15 +28,21 @@ Future<FileData> getFileData(String filePath) async {
   }
 
   // Generate a filename based on timestamp
-  // The record_web package produces webm files
   final timestamp = DateTime.now().millisecondsSinceEpoch;
-  final filename = 'recording_$timestamp.webm';
+  final uploadMetadata = webRecordingUploadMetadata(
+    timestamp: timestamp,
+    blobContentType: response.getResponseHeader('content-type'),
+  );
 
   if (kDebugMode) {
-    print('[TRANSCRIPTION_WEB] Using filename: $filename');
+    print('[TRANSCRIPTION_WEB] Using filename: ${uploadMetadata.filename}');
   }
 
-  return FileData(bytes: bytes, filename: filename);
+  return FileData(
+    bytes: bytes,
+    filename: uploadMetadata.filename,
+    contentType: uploadMetadata.contentType,
+  );
 }
 
 Future<void> deleteLocalFileIfExists(String filePath) async {}

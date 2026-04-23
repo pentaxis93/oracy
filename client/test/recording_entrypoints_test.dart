@@ -10,8 +10,32 @@ import 'package:oracy/services/home_widget_service.dart';
 import 'package:oracy/services/permission_service.dart';
 import 'package:oracy/services/recording_service.dart';
 import 'package:oracy/services/transcription_service.dart';
+import 'package:oracy/widgets/permission_dialog.dart';
 
 import 'helpers/test_utils.dart';
+
+class _StartupFailingRecordingNotifier extends MockRecordingNotifier {
+  @override
+  Future<void> startRecording() async {
+    startCount++;
+    state = const RecordingInfo(
+      state: RecordingState.error,
+      errorMessage: 'recording startup failed',
+    );
+  }
+}
+
+class _ResetCountingTranscriptionNotifier extends MockTranscriptionNotifier {
+  int resetCount = 0;
+
+  _ResetCountingTranscriptionNotifier([super.initialState]);
+
+  @override
+  void reset() {
+    resetCount++;
+    super.reset();
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -172,6 +196,41 @@ void main() {
   );
 
   testWidgets(
+    'Given microphone permission is granted but recorder startup fails, When recording is requested, Then the helper reports failure',
+    (tester) async {
+      final permissions = MockPermissionService();
+      final recordingNotifier = _StartupFailingRecordingNotifier();
+      bool? started;
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            permissionOverride(permissions),
+            recordingProvider.overrideWith(() => recordingNotifier),
+          ],
+          child: MaterialApp(
+            home: Consumer(
+              builder: (context, ref, _) => TextButton(
+                onPressed: () async {
+                  started = await startRecordingWithPermission(context, ref);
+                },
+                child: const Text('Start'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Start'));
+      await tester.pump();
+
+      expect(permissions.checkCount, greaterThanOrEqualTo(1));
+      expect(recordingNotifier.startCount, 1);
+      expect(started, isFalse);
+    },
+  );
+
+  testWidgets(
     'Given microphone permission is denied, When New Recording is tapped from a transcript, Then the result screen remains and recording does not start',
     (tester) async {
       final permissions = MockPermissionService(
@@ -215,6 +274,54 @@ void main() {
       expect(recordingNotifier.startCount, 0);
       expect(find.text('Transcript'), findsOneWidget);
       expect(find.text('Microphone Access Required'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'Given microphone permission is granted but recorder startup fails, When New Recording is tapped from a transcript, Then the result screen remains and transcript state is preserved',
+    (tester) async {
+      final permissions = MockPermissionService();
+      final recordingNotifier = _StartupFailingRecordingNotifier();
+      final transcriptionNotifier = _ResetCountingTranscriptionNotifier(
+        TranscriptionSuccess(createMockTranscript()),
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            transcriptionProvider.overrideWith(() => transcriptionNotifier),
+            permissionOverride(permissions),
+            recordingProvider.overrideWith(() => recordingNotifier),
+          ],
+          child: MaterialApp(
+            home: Builder(
+              builder: (context) => TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => TranscriptResultScreen(
+                      transcript: createMockTranscript(
+                        transcript: 'Saved result',
+                      ),
+                    ),
+                  ),
+                ),
+                child: const Text('Open result'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open result'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('New Recording'));
+      await tester.pumpAndSettle();
+
+      expect(permissions.checkCount, greaterThanOrEqualTo(1));
+      expect(recordingNotifier.startCount, 1);
+      expect(transcriptionNotifier.resetCount, 0);
+      expect(find.text('Transcript'), findsOneWidget);
+      expect(find.text('Open result'), findsNothing);
     },
   );
 

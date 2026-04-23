@@ -50,6 +50,11 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
+        <service
+            android:name="com.llfbandit.record.service.AudioRecordingService"
+            android:foregroundServiceType="microphone"
+            android:exported="false" />
+
         <!-- Oracy Home Widget -->
         <receiver
             android:name=".OracyWidgetProvider"

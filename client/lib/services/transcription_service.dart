@@ -345,10 +345,7 @@ class TranscriptionService {
     }
 
     final formFields = <String, dynamic>{
-      'file': MultipartFile.fromBytes(
-        fileData.bytes,
-        filename: fileData.filename,
-      ),
+      'file': multipartFileFromFileData(fileData),
     };
     if (language != null) {
       formFields['language'] = language;
@@ -382,8 +379,21 @@ class TranscriptionService {
 class FileData {
   final Uint8List bytes;
   final String filename;
+  final DioMediaType? contentType;
 
-  const FileData({required this.bytes, required this.filename});
+  const FileData({
+    required this.bytes,
+    required this.filename,
+    this.contentType,
+  });
+}
+
+MultipartFile multipartFileFromFileData(FileData fileData) {
+  return MultipartFile.fromBytes(
+    fileData.bytes,
+    filename: fileData.filename,
+    contentType: fileData.contentType,
+  );
 }
 
 /// Provider for transcription service.
