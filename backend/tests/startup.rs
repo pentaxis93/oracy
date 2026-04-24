@@ -3,14 +3,21 @@ use std::fs;
 use oracy_backend::bootstrap::{BootstrapError, load_runtime_from_env, load_runtime_from_path};
 use tempfile::TempDir;
 
+mod support;
+
 #[test]
 fn startup_rejects_missing_oracy_config_env() {
-    unsafe {
-        std::env::remove_var("ORACY_CONFIG");
-    }
+    support::assert_ignored_test_passes_with_env_missing(
+        "startup_rejects_missing_oracy_config_env_helper",
+        "ORACY_CONFIG",
+    );
+}
 
+#[test]
+#[ignore = "helper subprocess only"]
+fn startup_rejects_missing_oracy_config_env_helper() {
     let error = load_runtime_from_env().expect_err("missing env should fail");
-    assert!(error.to_string().contains("ORACY_CONFIG is not set"));
+    assert!(matches!(error, BootstrapError::MissingConfigEnv));
 }
 
 #[test]
@@ -453,6 +460,11 @@ key = "key-one"
 fn startup_rejects_unwritable_accepted_audio_directory() {
     use std::os::unix::fs::PermissionsExt;
 
+    if let Some(reason) = support::skip_reason_for_unwritable_directory_test() {
+        eprintln!("{reason}");
+        return;
+    }
+
     let tempdir = TempDir::new().expect("tempdir");
     let audio_dir = tempdir.path().join("accepted-audio");
     fs::create_dir(&audio_dir).expect("create dir");
@@ -475,11 +487,10 @@ key = "key-one"
     );
 
     let error = load_runtime_from_path(&config_path).expect_err("unwritable dir should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("accepted audio directory is not writable")
-    );
+    match error {
+        BootstrapError::AcceptedAudioDirNotWritable { path, .. } => assert_eq!(path, audio_dir),
+        other => panic!("expected unwritable accepted audio dir error, got {other}"),
+    }
 }
 
 fn write_config(tempdir: &TempDir, contents: String) -> std::path::PathBuf {
