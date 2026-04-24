@@ -1,6 +1,6 @@
 use std::fs;
 
-use oracy_backend::bootstrap::{load_runtime_from_env, load_runtime_from_path};
+use oracy_backend::bootstrap::{BootstrapError, load_runtime_from_env, load_runtime_from_path};
 use tempfile::TempDir;
 
 #[test]
@@ -104,6 +104,34 @@ key = "key-one"
 }
 
 #[test]
+fn startup_rejects_api_key_id_with_surrounding_whitespace() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "default "
+key = "key-one"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    let error =
+        load_runtime_from_path(&config_path).expect_err("whitespace-padded ids should fail");
+    match error {
+        BootstrapError::InvalidConfiguration(message) => {
+            assert!(message.contains("default "));
+            assert!(message.contains("surrounding whitespace"));
+        }
+        other => panic!("expected invalid configuration error, got {other}"),
+    }
+}
+
+#[test]
 fn startup_rejects_blank_api_key_material() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
@@ -126,6 +154,35 @@ key = "   "
             .to_string()
             .contains("api key material must not be blank")
     );
+}
+
+#[test]
+fn startup_rejects_api_key_with_surrounding_whitespace() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "default"
+key = "alpha-secret "
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    let error =
+        load_runtime_from_path(&config_path).expect_err("whitespace-padded keys should fail");
+    match error {
+        BootstrapError::InvalidConfiguration(message) => {
+            assert!(message.contains("default"));
+            assert!(message.contains("surrounding whitespace"));
+            assert!(!message.contains("alpha-secret "));
+        }
+        other => panic!("expected invalid configuration error, got {other}"),
+    }
 }
 
 #[test]

@@ -88,10 +88,24 @@ fn validate_settings(settings: &Settings) -> Result<(), BootstrapError> {
             ));
         }
 
+        if key.api_key_id != key.api_key_id.trim() {
+            return Err(BootstrapError::InvalidConfiguration(format!(
+                "api_key_id '{}' has surrounding whitespace",
+                key.api_key_id
+            )));
+        }
+
         if key.key.trim().is_empty() {
             return Err(BootstrapError::InvalidConfiguration(
                 "api key material must not be blank".to_owned(),
             ));
+        }
+
+        if key.key != key.key.trim() {
+            return Err(BootstrapError::InvalidConfiguration(format!(
+                "api key material for api_key_id '{}' has surrounding whitespace",
+                key.api_key_id
+            )));
         }
 
         if !seen_ids.insert(key.api_key_id.clone()) {
