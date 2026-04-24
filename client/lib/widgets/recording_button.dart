@@ -67,7 +67,7 @@ class RecordingButton extends ConsumerWidget {
     RecordingInfo recording,
   ) async {
     if (kDebugMode && kIsWeb) {
-      print(
+      debugPrint(
         '[RECORDING_BUTTON] _handleTap called! isRecording=${recording.isRecording}',
       );
     }
@@ -76,7 +76,7 @@ class RecordingButton extends ConsumerWidget {
     if (recording.isRecording) {
       // Stop recording
       if (kDebugMode && kIsWeb) {
-        print('[RECORDING_BUTTON] Stopping recording...');
+        debugPrint('[RECORDING_BUTTON] Stopping recording...');
       }
       final path = await notifier.stopRecording();
       if (path != null && onRecordingComplete != null) {
@@ -85,11 +85,11 @@ class RecordingButton extends ConsumerWidget {
     } else {
       // Check permission and start recording
       if (kDebugMode && kIsWeb) {
-        print('[RECORDING_BUTTON] Checking permission...');
+        debugPrint('[RECORDING_BUTTON] Checking permission...');
       }
       final started = await startRecordingWithPermission(context, ref);
       if (kDebugMode && kIsWeb) {
-        print('[RECORDING_BUTTON] Recording started: $started');
+        debugPrint('[RECORDING_BUTTON] Recording started: $started');
       }
     }
   }

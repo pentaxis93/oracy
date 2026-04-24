@@ -12,7 +12,7 @@ QueryExecutor openConnection() {
 
     if (result.missingFeatures.isNotEmpty) {
       if (kDebugMode) {
-        print('Missing web features: ${result.missingFeatures}');
+        debugPrint('Missing web features: ${result.missingFeatures}');
       }
     }
 

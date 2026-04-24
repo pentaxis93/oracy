@@ -14,7 +14,7 @@ void main() async {
 
   // Debug log for web
   if (kDebugMode && kIsWeb) {
-    print('[MAIN] Starting Oracy web app...');
+    debugPrint('[MAIN] Starting Oracy web app...');
   }
 
   // Initialize SharedPreferences
@@ -48,7 +48,7 @@ void main() async {
   }
 
   if (kDebugMode && kIsWeb) {
-    print('[MAIN] About to run app...');
+    debugPrint('[MAIN] About to run app...');
   }
 
   runApp(
@@ -61,6 +61,6 @@ void main() async {
   );
 
   if (kDebugMode && kIsWeb) {
-    print('[MAIN] App started!');
+    debugPrint('[MAIN] App started!');
   }
 }

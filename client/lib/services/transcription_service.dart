@@ -328,18 +328,18 @@ class TranscriptionService {
     void Function(double progress)? onProgress,
   }) async {
     if (kDebugMode) {
-      print(
+      debugPrint(
         '[TRANSCRIPTION_SERVICE] transcribe() called with filePath: $filePath',
       );
     }
 
     // Get file data using platform-specific implementation
     if (kDebugMode) {
-      print('[TRANSCRIPTION_SERVICE] Calling platform.getFileData...');
+      debugPrint('[TRANSCRIPTION_SERVICE] Calling platform.getFileData...');
     }
     final fileData = await platform.getFileData(filePath);
     if (kDebugMode) {
-      print(
+      debugPrint(
         '[TRANSCRIPTION_SERVICE] Got ${fileData.bytes.length} bytes, filename: ${fileData.filename}',
       );
     }
@@ -410,7 +410,9 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
   /// Transcribe an audio file.
   Future<void> transcribe(String filePath, {String? language}) async {
     if (kDebugMode) {
-      print('[TRANSCRIPTION] transcribe() called with filePath: $filePath');
+      debugPrint(
+        '[TRANSCRIPTION] transcribe() called with filePath: $filePath',
+      );
     }
 
     final queuedUploadId = await _ensureQueuedForRetry(
@@ -431,7 +433,7 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
     final storage = ref.read(secureStorageProvider);
     final hasKey = await storage.hasApiKey();
     if (kDebugMode) {
-      print('[TRANSCRIPTION] hasApiKey: $hasKey');
+      debugPrint('[TRANSCRIPTION] hasApiKey: $hasKey');
     }
     if (!hasKey) {
       if (queuedUploadId != null) {
@@ -448,7 +450,7 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
 
     state = const TranscriptionUploading();
     if (kDebugMode) {
-      print('[TRANSCRIPTION] State set to TranscriptionUploading');
+      debugPrint('[TRANSCRIPTION] State set to TranscriptionUploading');
     }
 
     try {
@@ -502,8 +504,8 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
       );
 
       if (kDebugMode) {
-        print('[TRANSCRIPTION] Caught exception: $e');
-        print('[TRANSCRIPTION] Stack trace: $stackTrace');
+        debugPrint('[TRANSCRIPTION] Caught exception: $e');
+        debugPrint('[TRANSCRIPTION] Stack trace: $stackTrace');
       }
       state = TranscriptionError(
         classification.message,
