@@ -39,7 +39,9 @@ fn skip_reason_for_unwritable_directory_test_from_status(
     status: Option<&str>,
 ) -> Option<&'static str> {
     let Some(status) = status else {
-        return Some("skipping unwritable-directory startup test: unable to determine privilege state");
+        return Some(
+            "skipping unwritable-directory startup test: unable to determine privilege state",
+        );
     };
 
     let Some(effective_uid) = status
@@ -47,7 +49,9 @@ fn skip_reason_for_unwritable_directory_test_from_status(
         .find_map(|line| line.strip_prefix("Uid:"))
         .and_then(|line| line.split_whitespace().nth(1))
     else {
-        return Some("skipping unwritable-directory startup test: unable to determine privilege state");
+        return Some(
+            "skipping unwritable-directory startup test: unable to determine privilege state",
+        );
     };
     if effective_uid == "0" {
         return Some("skipping unwritable-directory startup test: effective uid is root");
@@ -58,7 +62,9 @@ fn skip_reason_for_unwritable_directory_test_from_status(
         .find_map(|line| line.strip_prefix("CapEff:"))
         .and_then(|line| u64::from_str_radix(line.trim(), 16).ok())
     else {
-        return Some("skipping unwritable-directory startup test: unable to determine privilege state");
+        return Some(
+            "skipping unwritable-directory startup test: unable to determine privilege state",
+        );
     };
     if (cap_eff & CAP_DAC_OVERRIDE_MASK) != 0 {
         return Some(
@@ -118,9 +124,7 @@ CapEff:\t0000000000000002\n";
     fn unwritable_directory_test_skips_when_privilege_state_cannot_be_determined() {
         assert_eq!(
             skip_reason_for_unwritable_directory_test_from_status(None),
-            Some(
-                "skipping unwritable-directory startup test: unable to determine privilege state"
-            )
+            Some("skipping unwritable-directory startup test: unable to determine privilege state")
         );
     }
 
@@ -133,9 +137,7 @@ CapEff:\tnot-hex\n";
 
         assert_eq!(
             skip_reason_for_unwritable_directory_test_from_status(Some(status)),
-            Some(
-                "skipping unwritable-directory startup test: unable to determine privilege state"
-            )
+            Some("skipping unwritable-directory startup test: unable to determine privilege state")
         );
     }
 }

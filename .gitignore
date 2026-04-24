@@ -7,3 +7,6 @@
 *.log
 *.swp
 target/
+
+# The backend is a deployable binary crate; keep its resolved graph reviewable.
+!backend/Cargo.lock
