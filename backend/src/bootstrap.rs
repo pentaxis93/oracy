@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
+use tracing::info;
 
 use crate::auth::AuthStore;
 use crate::config::Settings;
@@ -54,11 +55,18 @@ pub fn load_runtime_from_path(
         path: config_path.to_path_buf(),
         source,
     })?;
-    let settings: Settings =
+    let mut settings: Settings =
         toml::from_str(&raw).map_err(|source| BootstrapError::ParseConfig {
             path: config_path.to_path_buf(),
             source,
         })?;
+
+    settings.accepted_audio_dir =
+        resolve_accepted_audio_dir(config_path, &settings.accepted_audio_dir)?;
+    info!(
+        "accepted audio storage directory resolved to {}",
+        settings.accepted_audio_dir.display()
+    );
 
     validate_settings(&settings)?;
     ensure_writable_directory(&settings.accepted_audio_dir)?;
@@ -69,6 +77,65 @@ pub fn load_runtime_from_path(
     };
 
     Ok((settings.listen_addr, state))
+}
+
+fn resolve_accepted_audio_dir(
+    config_path: &Path,
+    accepted_audio_dir: &Path,
+) -> Result<PathBuf, BootstrapError> {
+    if accepted_audio_dir.is_absolute() {
+        return Ok(accepted_audio_dir.to_path_buf());
+    }
+
+    let absolute_config_path = if config_path.is_absolute() {
+        config_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| {
+                BootstrapError::InvalidConfiguration(format!(
+                    "failed to resolve config file directory for {}: {source}",
+                    config_path.display()
+                ))
+            })?
+            .join(config_path)
+    };
+    let config_dir = absolute_config_path.parent().ok_or_else(|| {
+        BootstrapError::InvalidConfiguration(format!(
+            "config file path has no parent directory: {}",
+            config_path.display()
+        ))
+    })?;
+
+    Ok(normalize_path(&config_dir.join(accepted_audio_dir)))
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let is_absolute = path.is_absolute();
+    let mut normalized = if is_absolute {
+        PathBuf::from(Path::new("/"))
+    } else {
+        PathBuf::new()
+    };
+
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
+            Component::Normal(segment) => normalized.push(segment),
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                Some(Component::ParentDir) | None if !is_absolute => normalized.push(".."),
+                Some(Component::RootDir) | Some(Component::ParentDir) | None => {}
+                Some(Component::Prefix(_)) => {
+                    unreachable!("prefix components are not used on unix")
+                }
+                Some(Component::CurDir) => unreachable!("curdir components are skipped"),
+            },
+        }
+    }
+
+    normalized
 }
 
 fn validate_settings(settings: &Settings) -> Result<(), BootstrapError> {

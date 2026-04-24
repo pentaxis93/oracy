@@ -238,6 +238,53 @@ key = "key-one"
 }
 
 #[test]
+fn startup_accepts_relative_accepted_audio_dir_resolved_against_config() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let expected_dir = tempdir.path().join("accepted-audio");
+    fs::create_dir(&expected_dir).expect("create accepted audio dir");
+    let config_path = write_config(
+        &tempdir,
+        r#"
+accepted_audio_dir = "accepted-audio"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#
+        .to_owned(),
+    );
+
+    let (_, state) = load_runtime_from_path(&config_path).expect("relative path should resolve");
+
+    assert_eq!(state.accepted_audio_dir, expected_dir);
+}
+
+#[test]
+fn startup_rejects_relative_accepted_audio_dir_when_target_missing() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let expected_dir = tempdir.path().join("accepted-audio");
+    let config_path = write_config(
+        &tempdir,
+        r#"
+accepted_audio_dir = "accepted-audio"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#
+        .to_owned(),
+    );
+
+    let error =
+        load_runtime_from_path(&config_path).expect_err("missing relative path should fail");
+
+    match error {
+        BootstrapError::MissingAcceptedAudioDir(path) => assert_eq!(path, expected_dir),
+        other => panic!("expected missing accepted audio dir error, got {other}"),
+    }
+}
+
+#[test]
 fn startup_rejects_when_accepted_audio_path_is_a_file() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("accepted-audio");
