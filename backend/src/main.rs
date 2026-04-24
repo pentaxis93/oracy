@@ -15,7 +15,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (listen_addr, state) = load_runtime_from_env()?;
+    let (listen_addr, state) = load_runtime_from_env().await?;
     serve(listen_addr, build_router(state)).await
 }
 

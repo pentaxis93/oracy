@@ -76,18 +76,22 @@ async fn unmatched_route_returns_shared_json_404() {
         format!(
             r#"
 accepted_audio_dir = "{}"
+database_path = "{}"
 
 [[api_keys]]
 api_key_id = "alpha"
 key = "alpha-secret"
 "#,
-            audio_dir.display()
+            audio_dir.display(),
+            tempdir.path().join("oracy.sqlite").display()
         )
         .trim_start(),
     )
     .expect("write config");
 
-    let (_, state) = load_runtime_from_path(&config_path).expect("valid runtime");
+    let (_, state) = load_runtime_from_path(&config_path)
+        .await
+        .expect("valid runtime");
     let app = build_router(state);
 
     let response = app
