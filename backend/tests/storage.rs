@@ -2,10 +2,12 @@ use std::path::PathBuf;
 
 use oracy_backend::storage::{
     AcceptJobOutcome, NewEmbedding, NewSegment, NewTranscript, NewTranscriptVersion,
-    NewTranscriptionJob, Storage, TranscriptMaterialization,
+    NewTranscriptionJob, Storage, StorageError, TranscriptMaterialization,
 };
+use sqlx::Row;
 use tempfile::TempDir;
 use time::macros::datetime;
+use tokio::time::{Duration, sleep};
 
 #[tokio::test]
 async fn accepted_jobs_replay_by_owner_and_reject_tuple_mismatches() {
@@ -53,6 +55,43 @@ async fn accepted_jobs_replay_by_owner_and_reject_tuple_mismatches() {
 }
 
 #[tokio::test]
+async fn racing_acceptance_resolves_unique_conflicts_as_replay_or_submission_conflict() {
+    let (_tempdir, storage) = storage().await;
+    let input = new_job("owner-a", "attempt-1", "hash-a");
+
+    let replayed = accept_while_uncommitted_row_exists(
+        &storage,
+        "racing-replay-job",
+        input.clone(),
+        input.clone(),
+    )
+    .await
+    .expect("racing replay should not return storage error");
+    assert!(matches!(
+        replayed,
+        AcceptJobOutcome::Replayed(job) if job.id == "racing-replay-job"
+    ));
+
+    let conflict = accept_while_uncommitted_row_exists(
+        &storage,
+        "racing-conflict-job",
+        new_job("owner-a", "attempt-2", "hash-a"),
+        new_job("owner-a", "attempt-2", "hash-b"),
+    )
+    .await
+    .expect("racing conflict should not return storage error");
+    assert_eq!(
+        conflict,
+        AcceptJobOutcome::Conflict(oracy_backend::storage::SubmissionConflict {
+            job_id: "racing-conflict-job".to_owned()
+        })
+    );
+
+    assert_eq!(job_count_by_key(&storage, "owner-a", "attempt-1").await, 1);
+    assert_eq!(job_count_by_key(&storage, "owner-a", "attempt-2").await, 1);
+}
+
+#[tokio::test]
 async fn accepted_submission_tuple_is_immutable_in_storage() {
     let (_tempdir, storage) = storage().await;
     let created = match storage
@@ -93,6 +132,7 @@ async fn accepted_submission_tuple_is_immutable_in_storage() {
 async fn transcript_materialization_is_transactional() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
+    mark_job_processing(&storage, &job.id).await;
     let mut materialization = materialization("transcript-a");
     materialization.segments[1].position = materialization.segments[0].position;
 
@@ -113,7 +153,7 @@ async fn transcript_materialization_is_transactional() {
         .await
         .expect("job lookup")
         .expect("job exists");
-    assert_eq!(job.status, "queued");
+    assert_eq!(job.status, "processing");
     assert_eq!(job.transcript_id, None);
 }
 
@@ -121,6 +161,7 @@ async fn transcript_materialization_is_transactional() {
 async fn completed_transcripts_expose_current_version_ordered_segments_and_current_embedding() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
+    mark_job_processing(&storage, &job.id).await;
     storage
         .complete_job_with_transcript("owner-a", &job.id, materialization("transcript-a"))
         .await
@@ -204,9 +245,52 @@ async fn completed_transcripts_expose_current_version_ordered_segments_and_curre
 }
 
 #[tokio::test]
+async fn duplicate_completion_fails_without_orphaning_materialized_rows() {
+    let (_tempdir, storage) = storage().await;
+    let job = created_job(&storage, "owner-a", "attempt-1").await;
+    mark_job_processing(&storage, &job.id).await;
+
+    storage
+        .complete_job_with_transcript("owner-a", &job.id, materialization("transcript-a"))
+        .await
+        .expect("first materialization succeeds");
+
+    let error = storage
+        .complete_job_with_transcript("owner-a", &job.id, materialization("transcript-b"))
+        .await
+        .expect_err("duplicate materialization should fail");
+    assert!(matches!(
+        error,
+        StorageError::JobNotCompletable { job_id } if job_id == job.id
+    ));
+
+    let job = storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(job.status, "succeeded");
+    assert_eq!(job.transcript_id.as_deref(), Some("transcript-a"));
+    assert_eq!(row_count(&storage, "transcripts", "transcript-b").await, 0);
+    assert_eq!(
+        child_row_count(&storage, "transcript_versions", "transcript-b").await,
+        0
+    );
+    assert_eq!(
+        child_row_count(&storage, "segments", "transcript-b").await,
+        0
+    );
+    assert_eq!(
+        child_row_count(&storage, "embeddings", "transcript-b").await,
+        0
+    );
+}
+
+#[tokio::test]
 async fn deleting_a_transcript_cascades_children_and_nulls_the_succeeded_job() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
+    mark_job_processing(&storage, &job.id).await;
     storage
         .complete_job_with_transcript("owner-a", &job.id, materialization("transcript-a"))
         .await
@@ -273,6 +357,96 @@ async fn created_job(
     }
 }
 
+async fn accept_while_uncommitted_row_exists(
+    storage: &Storage,
+    existing_job_id: &str,
+    stored: NewTranscriptionJob,
+    attempted: NewTranscriptionJob,
+) -> Result<AcceptJobOutcome, oracy_backend::storage::StorageError> {
+    let mut tx = storage.pool().begin().await.expect("begin transaction");
+    sqlx::query(
+        r#"
+        INSERT INTO transcription_jobs (
+            id, api_key_id, idempotency_key, audio_sha256_hex, recorded_at,
+            session_id, language, accepted_audio_path, status, created_at,
+            updated_at, retry_count, max_retries
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?)
+        "#,
+    )
+    .bind(existing_job_id)
+    .bind(&stored.api_key_id)
+    .bind(&stored.idempotency_key)
+    .bind(&stored.audio_sha256_hex)
+    .bind("2026-04-24T17:59:00Z")
+    .bind(&stored.session_id)
+    .bind(&stored.language)
+    .bind(stored.accepted_audio_path.to_string_lossy().into_owned())
+    .bind("2026-04-24T18:00:00Z")
+    .bind("2026-04-24T18:00:00Z")
+    .bind(stored.max_retries)
+    .execute(&mut *tx)
+    .await
+    .expect("insert uncommitted accepted row");
+
+    let racing_storage = storage.clone();
+    let handle = tokio::spawn(async move { racing_storage.accept_job(attempted).await });
+    sleep(Duration::from_millis(100)).await;
+    tx.commit().await.expect("commit accepted row");
+    handle.await.expect("accept task should not panic")
+}
+
+async fn mark_job_processing(storage: &Storage, job_id: &str) {
+    let result = sqlx::query(
+        r#"
+        UPDATE transcription_jobs
+        SET status = 'processing'
+        WHERE api_key_id = 'owner-a' AND id = ?
+        "#,
+    )
+    .bind(job_id)
+    .execute(storage.pool())
+    .await
+    .expect("mark job processing");
+    assert_eq!(result.rows_affected(), 1);
+}
+
+async fn job_count_by_key(storage: &Storage, owner: &str, idempotency_key: &str) -> i64 {
+    sqlx::query(
+        r#"
+        SELECT COUNT(*) AS count
+        FROM transcription_jobs
+        WHERE api_key_id = ? AND idempotency_key = ?
+        "#,
+    )
+    .bind(owner)
+    .bind(idempotency_key)
+    .fetch_one(storage.pool())
+    .await
+    .expect("count jobs")
+    .get("count")
+}
+
+async fn row_count(storage: &Storage, table: &str, id: &str) -> i64 {
+    let sql = format!("SELECT COUNT(*) AS count FROM {table} WHERE id = ?");
+    sqlx::query(&sql)
+        .bind(id)
+        .fetch_one(storage.pool())
+        .await
+        .expect("count rows")
+        .get("count")
+}
+
+async fn child_row_count(storage: &Storage, table: &str, transcript_id: &str) -> i64 {
+    let sql = format!("SELECT COUNT(*) AS count FROM {table} WHERE transcript_id = ?");
+    sqlx::query(&sql)
+        .bind(transcript_id)
+        .fetch_one(storage.pool())
+        .await
+        .expect("count child rows")
+        .get("count")
+}
+
 fn new_job(owner: &str, idempotency_key: &str, hash: &str) -> NewTranscriptionJob {
     NewTranscriptionJob {
         api_key_id: owner.to_owned(),
@@ -303,20 +477,20 @@ fn materialization(transcript_id: &str) -> TranscriptMaterialization {
             session_id: Some("session-a".to_owned()),
         },
         initial_version: NewTranscriptVersion {
-            id: "version-1".to_owned(),
+            id: format!("{transcript_id}-version-1"),
             transcript: "initial text".to_owned(),
             created_at: datetime!(2026-04-24 18:00:30 UTC),
         },
         segments: vec![
             NewSegment {
-                id: "segment-1".to_owned(),
+                id: format!("{transcript_id}-segment-1"),
                 position: 0,
                 start_ms: 0,
                 end_ms: 1_000,
                 text: "first segment".to_owned(),
             },
             NewSegment {
-                id: "segment-2".to_owned(),
+                id: format!("{transcript_id}-segment-2"),
                 position: 1,
                 start_ms: 1_000,
                 end_ms: 2_000,

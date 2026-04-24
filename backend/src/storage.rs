@@ -45,6 +45,8 @@ pub enum StorageError {
     },
     #[error("storage query failed: {0}")]
     Query(#[from] sqlx::Error),
+    #[error("job is not eligible for transcript completion: {job_id}")]
+    JobNotCompletable { job_id: String },
     #[error("stored timestamp is invalid: {0}")]
     InvalidTimestamp(#[from] time::error::Parse),
     #[error("timestamp could not be formatted: {0}")]
@@ -217,25 +219,13 @@ impl Storage {
         &self,
         input: NewTranscriptionJob,
     ) -> Result<AcceptJobOutcome, StorageError> {
-        if let Some(existing) = self
-            .find_job_by_idempotency_key(&input.api_key_id, &input.idempotency_key)
-            .await?
-        {
-            return if existing.matches_submission(&input) {
-                Ok(AcceptJobOutcome::Replayed(existing))
-            } else {
-                Ok(AcceptJobOutcome::Conflict(SubmissionConflict {
-                    job_id: existing.id,
-                }))
-            };
-        }
-
+        let mut tx = self.pool.begin().await?;
         let id = new_id();
         let now = format_timestamp(input.now)?;
         let recorded_at = format_timestamp(input.recorded_at)?;
         let accepted_audio_path = input.accepted_audio_path.to_string_lossy().into_owned();
 
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT INTO transcription_jobs (
                 id, api_key_id, idempotency_key, audio_sha256_hex, recorded_at,
@@ -243,6 +233,7 @@ impl Storage {
                 updated_at, retry_count, max_retries
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?)
+            ON CONFLICT(api_key_id, idempotency_key) DO NOTHING
             "#,
         )
         .bind(&id)
@@ -256,14 +247,44 @@ impl Storage {
         .bind(&now)
         .bind(&now)
         .bind(input.max_retries)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
-        let created = self
-            .get_job(&input.api_key_id, &id)
+        let row = if result.rows_affected() == 1 {
+            sqlx::query(
+                r#"
+                SELECT * FROM transcription_jobs
+                WHERE api_key_id = ? AND id = ?
+                "#,
+            )
+            .bind(&input.api_key_id)
+            .bind(&id)
+            .fetch_one(&mut *tx)
             .await?
-            .expect("inserted job should be readable");
-        Ok(AcceptJobOutcome::Created(created))
+        } else {
+            sqlx::query(
+                r#"
+                SELECT * FROM transcription_jobs
+                WHERE api_key_id = ? AND idempotency_key = ?
+                "#,
+            )
+            .bind(&input.api_key_id)
+            .bind(&input.idempotency_key)
+            .fetch_one(&mut *tx)
+            .await?
+        };
+        let job = job_from_row(row)?;
+        tx.commit().await?;
+
+        if result.rows_affected() == 1 {
+            Ok(AcceptJobOutcome::Created(job))
+        } else if job.matches_submission(&input) {
+            Ok(AcceptJobOutcome::Replayed(job))
+        } else {
+            Ok(AcceptJobOutcome::Conflict(SubmissionConflict {
+                job_id: job.id,
+            }))
+        }
     }
 
     pub async fn find_job_by_idempotency_key(
@@ -314,6 +335,27 @@ impl Storage {
         let transcript = materialization.transcript;
         let version = materialization.initial_version;
         let now = format_timestamp(transcript.created_at)?;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET updated_at = ?
+            WHERE api_key_id = ?
+                AND id = ?
+                AND status IN ('processing', 'retry_waiting')
+                AND transcript_id IS NULL
+            "#,
+        )
+        .bind(&now)
+        .bind(api_key_id)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::JobNotCompletable {
+                job_id: job_id.to_owned(),
+            });
+        }
 
         sqlx::query(
             r#"
@@ -394,17 +436,22 @@ impl Storage {
             r#"
             UPDATE transcription_jobs
             SET status = 'succeeded', transcript_id = ?, updated_at = ?
-            WHERE api_key_id = ? AND id = ?
+            WHERE api_key_id = ?
+                AND id = ?
+                AND status IN ('processing', 'retry_waiting')
+                AND transcript_id IS NULL
             "#,
         )
         .bind(&transcript.id)
-        .bind(now)
+        .bind(&now)
         .bind(api_key_id)
         .bind(job_id)
         .execute(&mut *tx)
         .await?;
         if result.rows_affected() != 1 {
-            return Err(StorageError::Query(sqlx::Error::RowNotFound));
+            return Err(StorageError::JobNotCompletable {
+                job_id: job_id.to_owned(),
+            });
         }
 
         tx.commit().await?;
