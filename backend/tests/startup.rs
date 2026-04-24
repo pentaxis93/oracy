@@ -338,6 +338,50 @@ key = "key-one"
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn startup_resolves_relative_accepted_audio_dir_through_config_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let release_root = tempdir.path().join("releases").join("v1");
+    let real_config_dir = release_root.join("config");
+    let real_accepted_audio_dir = release_root.join("accepted-audio");
+    fs::create_dir_all(&real_config_dir).expect("create real config dir");
+    fs::create_dir(&real_accepted_audio_dir).expect("create accepted audio dir");
+
+    let symlink_config_dir = tempdir.path().join("current");
+    symlink(&real_config_dir, &symlink_config_dir).expect("create config dir symlink");
+
+    let real_config_path = real_config_dir.join("oracy.toml");
+    fs::write(
+        &real_config_path,
+        r#"
+accepted_audio_dir = "../accepted-audio"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#
+        .trim_start(),
+    )
+    .expect("write config");
+
+    let symlinked_config_path = symlink_config_dir.join("oracy.toml");
+    let (_, state) = load_runtime_from_path(&symlinked_config_path)
+        .expect("relative path should resolve through symlink target");
+
+    let expected_dir =
+        fs::canonicalize(&symlink_config_dir).expect("canonicalize symlinked config dir");
+    let expected_dir = expected_dir.join("../accepted-audio");
+
+    assert_eq!(state.accepted_audio_dir, expected_dir);
+    assert_eq!(
+        fs::canonicalize(&state.accepted_audio_dir).expect("canonicalize resolved audio dir"),
+        real_accepted_audio_dir
+    );
+}
+
 #[test]
 fn startup_rejects_when_accepted_audio_path_is_a_file() {
     let tempdir = TempDir::new().expect("tempdir");

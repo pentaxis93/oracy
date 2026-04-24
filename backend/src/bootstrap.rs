@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -106,37 +106,14 @@ fn resolve_accepted_audio_dir(
             config_path.display()
         ))
     })?;
+    let canonical_config_dir = fs::canonicalize(config_dir).map_err(|source| {
+        BootstrapError::InvalidConfiguration(format!(
+            "failed to resolve config file directory for {}: {source}",
+            config_path.display()
+        ))
+    })?;
 
-    Ok(normalize_path(&config_dir.join(accepted_audio_dir)))
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    let is_absolute = path.is_absolute();
-    let mut normalized = if is_absolute {
-        PathBuf::from(Path::new("/"))
-    } else {
-        PathBuf::new()
-    };
-
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
-            Component::Normal(segment) => normalized.push(segment),
-            Component::ParentDir => match normalized.components().next_back() {
-                Some(Component::Normal(_)) => {
-                    normalized.pop();
-                }
-                Some(Component::ParentDir) | None if !is_absolute => normalized.push(".."),
-                Some(Component::RootDir) | Some(Component::ParentDir) | None => {}
-                Some(Component::Prefix(_)) => {
-                    unreachable!("prefix components are not used on unix")
-                }
-                Some(Component::CurDir) => unreachable!("curdir components are skipped"),
-            },
-        }
-    }
-
-    normalized
+    Ok(canonical_config_dir.join(accepted_audio_dir))
 }
 
 fn validate_settings(settings: &Settings) -> Result<(), BootstrapError> {
