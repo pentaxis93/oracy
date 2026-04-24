@@ -4,6 +4,17 @@ Study the pentaxis93 commons before changing this project:
 
 - Principles: https://github.com/tesserine/commons
 
+## Platform Scope
+
+Oracy's backend targets Linux-only deployment for `v0.1.0` (Fedora CoreOS;
+POSIX semantics assumed throughout). Cross-platform correctness for the
+backend — Windows, non-POSIX filesystems, path-separator portability, or
+platform-specific file handle semantics — is explicit non-scope. Reviews,
+tests, and implementation may assume POSIX.
+
+This matches the client's platform scope declaration (see
+`client/README.md`): `v0.1.0` scopes the client to Android and web only.
+
 ## Project Principles
 
 1. Always greenfield.

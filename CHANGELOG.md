@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add the initial Rust backend runtime with explicit startup validation for
+  operator-provisioned API keys, durable accepted-audio storage, shared JSON
+  errors, and bearer authentication.
 - Import the Flutter client into `client/` with six inherited defects fixed
   in-place rather than deferred, and commit `client/pubspec.lock` for
   reproducible app builds.

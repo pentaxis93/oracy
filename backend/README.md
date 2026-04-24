@@ -1,0 +1,23 @@
+# Oracy Backend
+
+`backend/` contains the Rust service for Oracy's `v0.1.0` backend. The
+backend targets Linux deployment and assumes POSIX filesystem semantics.
+
+Run the service with `ORACY_CONFIG` set to a TOML configuration file:
+
+```toml
+listen_addr = "127.0.0.1:8080"
+accepted_audio_dir = "/var/lib/oracy/accepted-audio"
+
+[[api_keys]]
+api_key_id = "operator-issued-id"
+key = "operator-issued-secret"
+```
+
+Startup fails unless `api_keys` contains at least one valid operator-provisioned
+key and `accepted_audio_dir` already exists as a writable directory. Relative
+`accepted_audio_dir` values resolve from the real configuration file directory.
+
+Every API route requires `Authorization: Bearer <api_key>`. The bearer scheme is
+case-insensitive, and missing or invalid keys return the shared JSON
+`ErrorResponse` with `401 Unauthorized`.
