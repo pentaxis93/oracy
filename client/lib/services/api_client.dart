@@ -13,10 +13,7 @@ const kDefaultBaseUrl = 'https://api.oracy.app';
 class SecureStorageService {
   final FlutterSecureStorage _storage;
 
-  SecureStorageService()
-    : _storage = const FlutterSecureStorage(
-        aOptions: AndroidOptions(encryptedSharedPreferences: true),
-      );
+  SecureStorageService() : _storage = const FlutterSecureStorage();
 
   /// Get the stored API key.
   Future<String?> getApiKey() async {
@@ -125,7 +122,7 @@ class ApiClientFactory {
           responseBody: true,
           logPrint: (o) {
             if (kDebugMode) {
-              print('[DIO] $o');
+              debugPrint('[DIO] $o');
             }
           },
         ),

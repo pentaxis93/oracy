@@ -188,10 +188,7 @@ bool _isConnected(List<ConnectivityResult> results) {
 class BackgroundSyncService {
   /// Initialize workmanager and register background tasks.
   static Future<void> initialize() async {
-    await Workmanager().initialize(
-      callbackDispatcher,
-      isInDebugMode: kDebugMode,
-    );
+    await Workmanager().initialize(callbackDispatcher);
 
     // Register periodic background sync task
     // Note: Android requires minimum 15 minutes between executions

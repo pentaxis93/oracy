@@ -25,7 +25,7 @@ class OracyApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (kDebugMode && kIsWeb) {
-      print('[APP] Building MaterialApp...');
+      debugPrint('[APP] Building MaterialApp...');
     }
     return MaterialApp(
       title: 'Oracy',
@@ -67,12 +67,12 @@ class _HomePageState extends ConsumerState<HomePage>
     WidgetsBinding.instance.addObserver(this);
 
     if (kDebugMode && kIsWeb) {
-      print('[HOME] initState called');
+      debugPrint('[HOME] initState called');
     }
     // Listen for transcription state changes
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (kDebugMode && kIsWeb) {
-        print('[HOME] PostFrameCallback executing...');
+        debugPrint('[HOME] PostFrameCallback executing...');
       }
       HomeWidgetService.setOnRecordCallback(_startRecordingFromWidget);
       _setupTranscriptionListener();
@@ -191,7 +191,7 @@ class _HomePageState extends ConsumerState<HomePage>
   void _onRecordingComplete(String filePath) {
     // Start transcription
     if (kDebugMode && kIsWeb) {
-      print('[HOME] _onRecordingComplete called with filePath: $filePath');
+      debugPrint('[HOME] _onRecordingComplete called with filePath: $filePath');
     }
     ref.read(transcriptionProvider.notifier).transcribe(filePath);
   }
@@ -199,11 +199,11 @@ class _HomePageState extends ConsumerState<HomePage>
   @override
   Widget build(BuildContext context) {
     if (kDebugMode && kIsWeb) {
-      print('[HOME] build called');
+      debugPrint('[HOME] build called');
     }
     final transcriptionState = ref.watch(transcriptionProvider);
     if (kDebugMode && kIsWeb) {
-      print('[HOME] transcriptionState: $transcriptionState');
+      debugPrint('[HOME] transcriptionState: $transcriptionState');
     }
 
     return Scaffold(

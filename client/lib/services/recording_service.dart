@@ -192,17 +192,17 @@ class RecordingNotifier extends Notifier<RecordingInfo> {
   /// Start recording.
   Future<void> startRecording() async {
     if (kDebugMode && kIsWeb) {
-      print('[RECORDING_SERVICE] startRecording called');
+      debugPrint('[RECORDING_SERVICE] startRecording called');
     }
     if (state.isRecording) return;
 
     try {
       if (kDebugMode && kIsWeb) {
-        print('[RECORDING_SERVICE] Calling _service.startRecording()...');
+        debugPrint('[RECORDING_SERVICE] Calling _service.startRecording()...');
       }
       final path = await _service.startRecording();
       if (kDebugMode && kIsWeb) {
-        print('[RECORDING_SERVICE] Got path: $path');
+        debugPrint('[RECORDING_SERVICE] Got path: $path');
       }
       state = RecordingInfo(
         state: RecordingState.recording,
@@ -210,7 +210,7 @@ class RecordingNotifier extends Notifier<RecordingInfo> {
         duration: Duration.zero,
       );
       if (kDebugMode && kIsWeb) {
-        print('[RECORDING_SERVICE] State updated to recording');
+        debugPrint('[RECORDING_SERVICE] State updated to recording');
       }
 
       // Mark recording as active for crash recovery
@@ -225,7 +225,7 @@ class RecordingNotifier extends Notifier<RecordingInfo> {
       );
     } catch (e) {
       if (kDebugMode && kIsWeb) {
-        print('[RECORDING_SERVICE] ERROR: $e');
+        debugPrint('[RECORDING_SERVICE] ERROR: $e');
       }
       state = RecordingInfo(
         state: RecordingState.error,
