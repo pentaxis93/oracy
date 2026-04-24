@@ -180,7 +180,7 @@ async fn protected_handler(
     authenticated_key: AuthenticatedKey,
     State(_): State<oracy_backend::state::AppState>,
 ) -> Json<Value> {
-    Json(json!({ "api_key_id": authenticated_key.api_key_id }))
+    Json(json!({ "api_key_id": authenticated_key.api_key_id.as_str() }))
 }
 
 async fn json_body(response: axum::response::Response) -> Value {

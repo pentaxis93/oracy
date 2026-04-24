@@ -149,11 +149,14 @@ key = "   "
     );
 
     let error = load_runtime_from_path(&config_path).expect_err("blank key material should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("api key material must not be blank")
-    );
+    match error {
+        BootstrapError::InvalidConfiguration(message) => {
+            assert!(message.contains("alpha"));
+            assert!(message.contains("must not be blank"));
+            assert!(!message.contains("   "));
+        }
+        other => panic!("expected invalid configuration error, got {other}"),
+    }
 }
 
 #[test]
@@ -180,6 +183,57 @@ key = "alpha-secret "
             assert!(message.contains("default"));
             assert!(message.contains("surrounding whitespace"));
             assert!(!message.contains("alpha-secret "));
+        }
+        other => panic!("expected invalid configuration error, got {other}"),
+    }
+}
+
+#[test]
+fn startup_rejects_api_key_with_non_ascii_bytes() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "sëcret"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    let error = load_runtime_from_path(&config_path).expect_err("non-ascii keys should fail");
+    match error {
+        BootstrapError::InvalidConfiguration(message) => {
+            assert!(message.contains("alpha"));
+            assert!(message.contains("visible ASCII"));
+            assert!(!message.contains("sëcret"));
+        }
+        other => panic!("expected invalid configuration error, got {other}"),
+    }
+}
+
+#[test]
+fn startup_rejects_api_key_with_control_characters() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            "accepted_audio_dir = \"{}\"\n\n[[api_keys]]\napi_key_id = \"alpha\"\nkey = \"bad\\u0001key\"\n",
+            tempdir.path().display()
+        ),
+    );
+
+    let error =
+        load_runtime_from_path(&config_path).expect_err("control-character keys should fail");
+    match error {
+        BootstrapError::InvalidConfiguration(message) => {
+            assert!(message.contains("alpha"));
+            assert!(message.contains("visible ASCII"));
+            assert!(!message.contains("bad"));
         }
         other => panic!("expected invalid configuration error, got {other}"),
     }

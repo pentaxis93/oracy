@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -70,10 +69,12 @@ pub fn load_runtime_from_path(
 
     validate_settings(&settings)?;
     ensure_writable_directory(&settings.accepted_audio_dir)?;
+    let auth_store = AuthStore::try_from_configs(&settings.api_keys)
+        .map_err(|error| BootstrapError::InvalidConfiguration(error.to_string()))?;
 
     let state = AppState {
         accepted_audio_dir: settings.accepted_audio_dir.clone(),
-        auth_store: Arc::new(AuthStore::from_configs(&settings.api_keys)),
+        auth_store: Arc::new(auth_store),
     };
 
     Ok((settings.listen_addr, state))
@@ -143,50 +144,6 @@ fn validate_settings(settings: &Settings) -> Result<(), BootstrapError> {
         return Err(BootstrapError::InvalidConfiguration(
             "at least one api_keys entry is required".to_owned(),
         ));
-    }
-
-    let mut seen_ids = HashSet::new();
-    let mut seen_keys = HashSet::new();
-
-    for key in &settings.api_keys {
-        if key.api_key_id.trim().is_empty() {
-            return Err(BootstrapError::InvalidConfiguration(
-                "api_key_id must not be blank".to_owned(),
-            ));
-        }
-
-        if key.api_key_id != key.api_key_id.trim() {
-            return Err(BootstrapError::InvalidConfiguration(format!(
-                "api_key_id '{}' has surrounding whitespace",
-                key.api_key_id
-            )));
-        }
-
-        if key.key.trim().is_empty() {
-            return Err(BootstrapError::InvalidConfiguration(
-                "api key material must not be blank".to_owned(),
-            ));
-        }
-
-        if key.key != key.key.trim() {
-            return Err(BootstrapError::InvalidConfiguration(format!(
-                "api key material for api_key_id '{}' has surrounding whitespace",
-                key.api_key_id
-            )));
-        }
-
-        if !seen_ids.insert(key.api_key_id.clone()) {
-            return Err(BootstrapError::InvalidConfiguration(format!(
-                "duplicate api_key_id: {}",
-                key.api_key_id
-            )));
-        }
-
-        if !seen_keys.insert(key.key.clone()) {
-            return Err(BootstrapError::InvalidConfiguration(
-                "duplicate api key material".to_owned(),
-            ));
-        }
     }
 
     Ok(())
