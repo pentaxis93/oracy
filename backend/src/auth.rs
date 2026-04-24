@@ -324,7 +324,7 @@ fn extract_bearer_credential(header_value: &str) -> Option<ApiKey> {
         return None;
     }
 
-    ApiKey::try_from_presented_bearer(remainder.trim()).ok()
+    ApiKey::try_from_presented_bearer(remainder).ok()
 }
 
 impl KeyValidationError {
@@ -421,6 +421,8 @@ mod tests {
             ("   ", false),
             (" secret", false),
             ("secret ", false),
+            (" alpha-secret", false),
+            ("alpha-secret ", false),
             ("sëcret", false),
             ("bad\u{1}key", false),
             ("visible-ascii-secret", true),

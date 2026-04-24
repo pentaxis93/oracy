@@ -382,6 +382,45 @@ key = "key-one"
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn startup_resolves_relative_accepted_audio_dir_from_real_config_file() {
+    use std::os::unix::fs::symlink;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let release_root = tempdir.path().join("releases").join("v1");
+    let deploy_root = tempdir.path().join("deploy");
+    let real_accepted_audio_dir = release_root.join("accepted-audio");
+    let decoy_accepted_audio_dir = deploy_root.join("accepted-audio");
+    fs::create_dir_all(&release_root).expect("create release dir");
+    fs::create_dir_all(&deploy_root).expect("create deploy dir");
+    fs::create_dir(&real_accepted_audio_dir).expect("create release accepted audio dir");
+    fs::create_dir(&decoy_accepted_audio_dir).expect("create deploy accepted audio dir");
+
+    let real_config_path = release_root.join("oracy.toml");
+    fs::write(
+        &real_config_path,
+        r#"
+accepted_audio_dir = "accepted-audio"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#
+        .trim_start(),
+    )
+    .expect("write real config");
+
+    let symlinked_config_path = deploy_root.join("current.toml");
+    symlink(&real_config_path, &symlinked_config_path).expect("create config file symlink");
+
+    let (_, state) = load_runtime_from_path(&symlinked_config_path)
+        .expect("relative path should resolve through real config file");
+
+    assert_eq!(state.accepted_audio_dir, real_accepted_audio_dir);
+    assert_ne!(state.accepted_audio_dir, decoy_accepted_audio_dir);
+}
+
 #[test]
 fn startup_rejects_when_accepted_audio_path_is_a_file() {
     let tempdir = TempDir::new().expect("tempdir");

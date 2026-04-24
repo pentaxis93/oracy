@@ -100,20 +100,20 @@ fn resolve_accepted_audio_dir(
             })?
             .join(config_path)
     };
-    let config_dir = absolute_config_path.parent().ok_or_else(|| {
+    let canonical_config_path = fs::canonicalize(&absolute_config_path).map_err(|source| {
+        BootstrapError::InvalidConfiguration(format!(
+            "failed to resolve config file path for {}: {source}",
+            config_path.display()
+        ))
+    })?;
+    let config_dir = canonical_config_path.parent().ok_or_else(|| {
         BootstrapError::InvalidConfiguration(format!(
             "config file path has no parent directory: {}",
             config_path.display()
         ))
     })?;
-    let canonical_config_dir = fs::canonicalize(config_dir).map_err(|source| {
-        BootstrapError::InvalidConfiguration(format!(
-            "failed to resolve config file directory for {}: {source}",
-            config_path.display()
-        ))
-    })?;
 
-    Ok(canonical_config_dir.join(accepted_audio_dir))
+    Ok(config_dir.join(accepted_audio_dir))
 }
 
 fn validate_settings(settings: &Settings) -> Result<(), BootstrapError> {
