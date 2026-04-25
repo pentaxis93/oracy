@@ -6,6 +6,7 @@ use sqlx::{Row, SqlitePool};
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::macros::format_description;
 use ulid::Ulid;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -635,7 +636,11 @@ fn new_id() -> String {
 }
 
 fn format_timestamp(value: OffsetDateTime) -> Result<String, StorageError> {
-    Ok(value.to_offset(time::UtcOffset::UTC).format(&Rfc3339)?)
+    Ok(value
+        .to_offset(time::UtcOffset::UTC)
+        .format(&format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z"
+        ))?)
 }
 
 fn parse_timestamp(value: String) -> Result<OffsetDateTime, StorageError> {

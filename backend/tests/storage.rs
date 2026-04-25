@@ -6,6 +6,8 @@ use oracy_backend::storage::{
 };
 use sqlx::Row;
 use tempfile::TempDir;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use time::macros::datetime;
 use tokio::time::{Duration, sleep};
 
@@ -324,6 +326,97 @@ async fn retry_waiting_jobs_are_not_eligible_for_transcript_completion() {
 }
 
 #[tokio::test]
+async fn persisted_timestamps_order_and_filter_chronologically_under_sql_text_comparisons() {
+    let (_tempdir, storage) = storage().await;
+    let cases = [
+        ("after-fraction", timestamp("2026-04-24T18:00:00.1Z")),
+        ("whole-second", timestamp("2026-04-24T18:00:00Z")),
+        (
+            "before-fraction",
+            timestamp("2026-04-24T17:59:59.999999999Z"),
+        ),
+        (
+            "after-nanosecond",
+            timestamp("2026-04-24T18:00:00.000000001Z"),
+        ),
+    ];
+
+    for (idempotency_key, now) in cases {
+        let mut input = new_job("owner-a", idempotency_key, idempotency_key);
+        input.now = now;
+        storage.accept_job(input).await.expect("accept job");
+    }
+
+    let ordered_keys: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT idempotency_key
+        FROM transcription_jobs
+        WHERE api_key_id = 'owner-a'
+        ORDER BY created_at ASC
+        "#,
+    )
+    .fetch_all(storage.pool())
+    .await
+    .expect("order jobs by stored timestamp");
+    assert_eq!(
+        ordered_keys,
+        vec![
+            "before-fraction",
+            "whole-second",
+            "after-nanosecond",
+            "after-fraction"
+        ]
+    );
+
+    let range_keys: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT idempotency_key
+        FROM transcription_jobs
+        WHERE api_key_id = 'owner-a'
+            AND created_at BETWEEN ? AND ?
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind("2026-04-24T18:00:00.000000000Z")
+    .bind("2026-04-24T18:00:00.100000000Z")
+    .fetch_all(storage.pool())
+    .await
+    .expect("filter jobs by stored timestamp range");
+    assert_eq!(
+        range_keys,
+        vec!["whole-second", "after-nanosecond", "after-fraction"]
+    );
+
+    let mut equivalent_whole = new_job("owner-a", "equivalent-whole", "equivalent-whole");
+    equivalent_whole.now = timestamp("2026-04-24T18:01:00Z");
+    storage
+        .accept_job(equivalent_whole)
+        .await
+        .expect("accept whole-second job");
+
+    let mut equivalent_fraction = new_job("owner-a", "equivalent-fraction", "equivalent-fraction");
+    equivalent_fraction.now = timestamp("2026-04-24T18:01:00.000000000Z");
+    storage
+        .accept_job(equivalent_fraction)
+        .await
+        .expect("accept equivalent fractional job");
+
+    let equivalent_values: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT created_at
+        FROM transcription_jobs
+        WHERE api_key_id = 'owner-a'
+            AND idempotency_key IN ('equivalent-whole', 'equivalent-fraction')
+        ORDER BY idempotency_key ASC
+        "#,
+    )
+    .fetch_all(storage.pool())
+    .await
+    .expect("read equivalent stored timestamps");
+    assert_eq!(equivalent_values[0], equivalent_values[1]);
+}
+
+#[tokio::test]
 async fn deleting_a_transcript_cascades_children_and_nulls_the_succeeded_job() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
@@ -556,4 +649,8 @@ fn materialization(transcript_id: &str) -> TranscriptMaterialization {
             created_at: datetime!(2026-04-24 18:00:31 UTC),
         },
     }
+}
+
+fn timestamp(value: &str) -> OffsetDateTime {
+    OffsetDateTime::parse(value, &Rfc3339).expect("valid RFC3339 timestamp")
 }
