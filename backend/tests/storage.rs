@@ -287,6 +287,43 @@ async fn duplicate_completion_fails_without_orphaning_materialized_rows() {
 }
 
 #[tokio::test]
+async fn retry_waiting_jobs_are_not_eligible_for_transcript_completion() {
+    let (_tempdir, storage) = storage().await;
+    let job = created_job(&storage, "owner-a", "attempt-1").await;
+    mark_job_retry_waiting(&storage, &job.id).await;
+
+    let error = storage
+        .complete_job_with_transcript("owner-a", &job.id, materialization("transcript-a"))
+        .await
+        .expect_err("retry-waiting completion should fail");
+    assert!(matches!(
+        error,
+        StorageError::JobNotCompletable { job_id } if job_id == job.id
+    ));
+
+    let job = storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(job.status, "retry_waiting");
+    assert_eq!(job.transcript_id, None);
+    assert_eq!(row_count(&storage, "transcripts", "transcript-a").await, 0);
+    assert_eq!(
+        child_row_count(&storage, "transcript_versions", "transcript-a").await,
+        0
+    );
+    assert_eq!(
+        child_row_count(&storage, "segments", "transcript-a").await,
+        0
+    );
+    assert_eq!(
+        child_row_count(&storage, "embeddings", "transcript-a").await,
+        0
+    );
+}
+
+#[tokio::test]
 async fn deleting_a_transcript_cascades_children_and_nulls_the_succeeded_job() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
@@ -408,6 +445,22 @@ async fn mark_job_processing(storage: &Storage, job_id: &str) {
     .execute(storage.pool())
     .await
     .expect("mark job processing");
+    assert_eq!(result.rows_affected(), 1);
+}
+
+async fn mark_job_retry_waiting(storage: &Storage, job_id: &str) {
+    let result = sqlx::query(
+        r#"
+        UPDATE transcription_jobs
+        SET status = 'retry_waiting',
+            next_attempt_at = '2026-04-24T18:05:00Z'
+        WHERE api_key_id = 'owner-a' AND id = ?
+        "#,
+    )
+    .bind(job_id)
+    .execute(storage.pool())
+    .await
+    .expect("mark job retry waiting");
     assert_eq!(result.rows_affected(), 1);
 }
 

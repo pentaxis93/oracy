@@ -342,7 +342,7 @@ impl Storage {
             SET updated_at = ?
             WHERE api_key_id = ?
                 AND id = ?
-                AND status IN ('processing', 'retry_waiting')
+                AND status = 'processing'
                 AND transcript_id IS NULL
             "#,
         )
@@ -438,7 +438,7 @@ impl Storage {
             SET status = 'succeeded', transcript_id = ?, updated_at = ?
             WHERE api_key_id = ?
                 AND id = ?
-                AND status IN ('processing', 'retry_waiting')
+                AND status = 'processing'
                 AND transcript_id IS NULL
             "#,
         )
