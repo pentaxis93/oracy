@@ -463,6 +463,74 @@ async fn deleting_a_transcript_cascades_children_and_nulls_the_succeeded_job() {
     assert_eq!(job.transcript_id, None);
 }
 
+#[tokio::test]
+async fn transcript_child_rows_must_match_the_parent_transcript_owner() {
+    let (_tempdir, storage) = storage().await;
+    insert_transcript_only(&storage, "owner-a", "transcript-a").await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO transcript_versions (
+            id, api_key_id, transcript_id, version_number, transcript, created_at
+        )
+        VALUES (
+            'owner-mismatched-version', 'owner-b', 'transcript-a', 1,
+            'cross-owner version', '2026-04-24T18:00:30.000000000Z'
+        )
+        "#,
+    )
+    .execute(storage.pool())
+    .await
+    .expect_err("mismatched transcript version owner should fail");
+
+    sqlx::query(
+        r#"
+        INSERT INTO segments (
+            id, api_key_id, transcript_id, position, start_ms, end_ms, text
+        )
+        VALUES (
+            'owner-mismatched-segment', 'owner-b', 'transcript-a', 0, 0, 1000,
+            'cross-owner segment'
+        )
+        "#,
+    )
+    .execute(storage.pool())
+    .await
+    .expect_err("mismatched segment owner should fail");
+
+    sqlx::query(
+        r#"
+        INSERT INTO embeddings (transcript_id, api_key_id, model, vector, created_at)
+        VALUES (
+            'transcript-a', 'owner-b', 'embedding-v1', x'010203',
+            '2026-04-24T18:00:31.000000000Z'
+        )
+        "#,
+    )
+    .execute(storage.pool())
+    .await
+    .expect_err("mismatched embedding owner should fail");
+}
+
+#[tokio::test]
+async fn completed_job_transcript_link_must_match_the_job_owner() {
+    let (_tempdir, storage) = storage().await;
+    insert_transcript_only(&storage, "owner-a", "transcript-a").await;
+    let job = created_job(&storage, "owner-b", "attempt-1").await;
+
+    sqlx::query(
+        r#"
+        UPDATE transcription_jobs
+        SET transcript_id = 'transcript-a'
+        WHERE id = ?
+        "#,
+    )
+    .bind(&job.id)
+    .execute(storage.pool())
+    .await
+    .expect_err("mismatched job transcript owner should fail");
+}
+
 async fn storage() -> (TempDir, Storage) {
     let tempdir = TempDir::new().expect("tempdir");
     let database_path = tempdir.path().join("oracy.sqlite");
@@ -524,6 +592,29 @@ async fn accept_while_uncommitted_row_exists(
     sleep(Duration::from_millis(100)).await;
     tx.commit().await.expect("commit accepted row");
     handle.await.expect("accept task should not panic")
+}
+
+async fn insert_transcript_only(storage: &Storage, owner: &str, transcript_id: &str) {
+    sqlx::query(
+        r#"
+        INSERT INTO transcripts (
+            id, api_key_id, audio_duration_seconds, audio_format, audio_size_bytes,
+            transcript_language, model, processing_time_ms, cost_cents,
+            created_at, recorded_at, session_id
+        )
+        VALUES (
+            ?, ?, 12.5, 'wav', 401280, 'en', 'general-transcription-v1', 1843, 1,
+            '2026-04-24T18:00:30.000000000Z',
+            '2026-04-24T17:59:00.000000000Z',
+            'session-a'
+        )
+        "#,
+    )
+    .bind(transcript_id)
+    .bind(owner)
+    .execute(storage.pool())
+    .await
+    .expect("insert transcript");
 }
 
 async fn mark_job_processing(storage: &Storage, job_id: &str) {

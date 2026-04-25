@@ -28,6 +28,7 @@ CREATE TABLE transcription_jobs (
     failure_message TEXT,
     retryable_by_client INTEGER CHECK (retryable_by_client IS NULL OR retryable_by_client IN (0, 1)),
     transcript_id TEXT REFERENCES transcripts(id) ON DELETE SET NULL,
+    FOREIGN KEY (api_key_id, transcript_id) REFERENCES transcripts(api_key_id, id),
     UNIQUE (api_key_id, idempotency_key)
 );
 
@@ -59,7 +60,7 @@ CREATE TABLE transcripts (
     session_id TEXT
 );
 
-CREATE INDEX transcripts_owner_id_idx
+CREATE UNIQUE INDEX transcripts_owner_id_idx
     ON transcripts (api_key_id, id);
 
 CREATE INDEX transcripts_history_idx
@@ -68,10 +69,11 @@ CREATE INDEX transcripts_history_idx
 CREATE TABLE transcript_versions (
     id TEXT PRIMARY KEY,
     api_key_id TEXT NOT NULL,
-    transcript_id TEXT NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE,
+    transcript_id TEXT NOT NULL,
     version_number INTEGER NOT NULL CHECK (version_number >= 1),
     transcript TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    FOREIGN KEY (api_key_id, transcript_id) REFERENCES transcripts(api_key_id, id) ON DELETE CASCADE,
     UNIQUE (transcript_id, version_number)
 );
 
@@ -81,11 +83,12 @@ CREATE INDEX transcript_versions_current_idx
 CREATE TABLE segments (
     id TEXT PRIMARY KEY,
     api_key_id TEXT NOT NULL,
-    transcript_id TEXT NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE,
+    transcript_id TEXT NOT NULL,
     position INTEGER NOT NULL CHECK (position >= 0),
     start_ms INTEGER NOT NULL CHECK (start_ms >= 0),
     end_ms INTEGER NOT NULL CHECK (end_ms >= start_ms),
     text TEXT NOT NULL,
+    FOREIGN KEY (api_key_id, transcript_id) REFERENCES transcripts(api_key_id, id) ON DELETE CASCADE,
     UNIQUE (transcript_id, position)
 );
 
@@ -93,11 +96,12 @@ CREATE INDEX segments_order_idx
     ON segments (transcript_id, position ASC);
 
 CREATE TABLE embeddings (
-    transcript_id TEXT PRIMARY KEY REFERENCES transcripts(id) ON DELETE CASCADE,
+    transcript_id TEXT PRIMARY KEY,
     api_key_id TEXT NOT NULL,
     model TEXT NOT NULL,
     vector BLOB NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (api_key_id, transcript_id) REFERENCES transcripts(api_key_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX embeddings_owner_idx
