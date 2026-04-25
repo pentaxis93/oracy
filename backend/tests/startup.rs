@@ -5,23 +5,25 @@ use tempfile::TempDir;
 
 mod support;
 
-#[test]
-fn startup_rejects_missing_oracy_config_env() {
+#[tokio::test]
+async fn startup_rejects_missing_oracy_config_env() {
     support::assert_ignored_test_passes_with_env_missing(
         "startup_rejects_missing_oracy_config_env_helper",
         "ORACY_CONFIG",
     );
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "helper subprocess only"]
-fn startup_rejects_missing_oracy_config_env_helper() {
-    let error = load_runtime_from_env().expect_err("missing env should fail");
+async fn startup_rejects_missing_oracy_config_env_helper() {
+    let error = load_runtime_from_env()
+        .await
+        .expect_err("missing env should fail");
     assert!(matches!(error, BootstrapError::MissingConfigEnv));
 }
 
-#[test]
-fn startup_rejects_when_no_api_keys_are_configured() {
+#[tokio::test]
+async fn startup_rejects_when_no_api_keys_are_configured() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
         &tempdir,
@@ -34,7 +36,9 @@ api_keys = []
         ),
     );
 
-    let error = load_runtime_from_path(&config_path).expect_err("empty key list should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("empty key list should fail");
     assert!(
         error
             .to_string()
@@ -42,8 +46,8 @@ api_keys = []
     );
 }
 
-#[test]
-fn startup_rejects_invalid_toml() {
+#[tokio::test]
+async fn startup_rejects_invalid_toml() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
         &tempdir,
@@ -60,12 +64,14 @@ key = "key-one"
         ),
     );
 
-    let error = load_runtime_from_path(&config_path).expect_err("invalid toml should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("invalid toml should fail");
     assert!(error.to_string().contains("failed to parse config file"));
 }
 
-#[test]
-fn startup_rejects_duplicate_api_key_ids() {
+#[tokio::test]
+async fn startup_rejects_duplicate_api_key_ids() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
         &tempdir,
@@ -85,12 +91,14 @@ key = "key-two"
         ),
     );
 
-    let error = load_runtime_from_path(&config_path).expect_err("duplicate ids should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("duplicate ids should fail");
     assert!(error.to_string().contains("duplicate api_key_id"));
 }
 
-#[test]
-fn startup_rejects_blank_api_key_ids() {
+#[tokio::test]
+async fn startup_rejects_blank_api_key_ids() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
         &tempdir,
@@ -106,12 +114,14 @@ key = "key-one"
         ),
     );
 
-    let error = load_runtime_from_path(&config_path).expect_err("blank ids should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("blank ids should fail");
     assert!(error.to_string().contains("api_key_id must not be blank"));
 }
 
-#[test]
-fn startup_rejects_api_key_id_with_surrounding_whitespace() {
+#[tokio::test]
+async fn startup_rejects_api_key_id_with_surrounding_whitespace() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
         &tempdir,
@@ -127,8 +137,9 @@ key = "key-one"
         ),
     );
 
-    let error =
-        load_runtime_from_path(&config_path).expect_err("whitespace-padded ids should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("whitespace-padded ids should fail");
     match error {
         BootstrapError::InvalidConfiguration(message) => {
             assert!(message.contains("default "));
@@ -138,8 +149,8 @@ key = "key-one"
     }
 }
 
-#[test]
-fn startup_rejects_blank_api_key_material() {
+#[tokio::test]
+async fn startup_rejects_blank_api_key_material() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
         &tempdir,
@@ -155,7 +166,9 @@ key = "   "
         ),
     );
 
-    let error = load_runtime_from_path(&config_path).expect_err("blank key material should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("blank key material should fail");
     match error {
         BootstrapError::InvalidConfiguration(message) => {
             assert!(message.contains("alpha"));
@@ -166,8 +179,8 @@ key = "   "
     }
 }
 
-#[test]
-fn startup_rejects_api_key_with_surrounding_whitespace() {
+#[tokio::test]
+async fn startup_rejects_api_key_with_surrounding_whitespace() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
         &tempdir,
@@ -183,8 +196,9 @@ key = "alpha-secret "
         ),
     );
 
-    let error =
-        load_runtime_from_path(&config_path).expect_err("whitespace-padded keys should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("whitespace-padded keys should fail");
     match error {
         BootstrapError::InvalidConfiguration(message) => {
             assert!(message.contains("default"));
@@ -195,8 +209,8 @@ key = "alpha-secret "
     }
 }
 
-#[test]
-fn startup_rejects_api_key_with_non_ascii_bytes() {
+#[tokio::test]
+async fn startup_rejects_api_key_with_non_ascii_bytes() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
         &tempdir,
@@ -212,7 +226,9 @@ key = "sëcret"
         ),
     );
 
-    let error = load_runtime_from_path(&config_path).expect_err("non-ascii keys should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("non-ascii keys should fail");
     match error {
         BootstrapError::InvalidConfiguration(message) => {
             assert!(message.contains("alpha"));
@@ -223,8 +239,8 @@ key = "sëcret"
     }
 }
 
-#[test]
-fn startup_rejects_api_key_with_control_characters() {
+#[tokio::test]
+async fn startup_rejects_api_key_with_control_characters() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
         &tempdir,
@@ -234,8 +250,9 @@ fn startup_rejects_api_key_with_control_characters() {
         ),
     );
 
-    let error =
-        load_runtime_from_path(&config_path).expect_err("control-character keys should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("control-character keys should fail");
     match error {
         BootstrapError::InvalidConfiguration(message) => {
             assert!(message.contains("alpha"));
@@ -246,8 +263,8 @@ fn startup_rejects_api_key_with_control_characters() {
     }
 }
 
-#[test]
-fn startup_rejects_duplicate_api_key_material() {
+#[tokio::test]
+async fn startup_rejects_duplicate_api_key_material() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
         &tempdir,
@@ -267,13 +284,14 @@ key = "shared-key"
         ),
     );
 
-    let error =
-        load_runtime_from_path(&config_path).expect_err("duplicate key material should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("duplicate key material should fail");
     assert!(error.to_string().contains("duplicate api key material"));
 }
 
-#[test]
-fn startup_rejects_missing_accepted_audio_directory() {
+#[tokio::test]
+async fn startup_rejects_missing_accepted_audio_directory() {
     let tempdir = TempDir::new().expect("tempdir");
     let missing_dir = tempdir.path().join("missing");
     let config_path = write_config(
@@ -290,7 +308,9 @@ key = "key-one"
         ),
     );
 
-    let error = load_runtime_from_path(&config_path).expect_err("missing storage should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("missing storage should fail");
     assert!(
         error
             .to_string()
@@ -298,8 +318,166 @@ key = "key-one"
     );
 }
 
-#[test]
-fn startup_accepts_relative_accepted_audio_dir_resolved_against_config() {
+#[tokio::test]
+async fn startup_rejects_missing_database_path() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config_without_database_path(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("missing database path should fail");
+    assert!(error.to_string().contains("missing field `database_path`"));
+}
+
+#[tokio::test]
+async fn startup_rejects_database_path_with_missing_parent() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let missing_parent = tempdir.path().join("missing");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+database_path = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display(),
+            missing_parent.join("oracy.sqlite").display()
+        ),
+    );
+
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("missing database parent should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("database parent directory does not exist")
+    );
+}
+
+#[tokio::test]
+async fn startup_rejects_database_path_that_is_a_directory() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let database_dir = tempdir.path().join("oracy.sqlite");
+    fs::create_dir(&database_dir).expect("create database dir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+database_path = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display(),
+            database_dir.display()
+        ),
+    );
+
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("directory database path should fail");
+    assert!(error.to_string().contains("database path is a directory"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_rejects_unwritable_database_parent_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(reason) = support::skip_reason_for_unwritable_directory_test() {
+        eprintln!("{reason}");
+        return;
+    }
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let database_parent = tempdir.path().join("database");
+    fs::create_dir(&database_parent).expect("create database parent");
+    let mut permissions = fs::metadata(&database_parent)
+        .expect("metadata")
+        .permissions();
+    permissions.set_mode(0o500);
+    fs::set_permissions(&database_parent, permissions).expect("chmod");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+database_path = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display(),
+            database_parent.join("oracy.sqlite").display()
+        ),
+    );
+
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("unwritable database parent should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("database parent directory is not writable")
+    );
+}
+
+#[tokio::test]
+async fn startup_creates_database_file_and_runs_migrations() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let database_path = tempdir.path().join("oracy.sqlite");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+database_path = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display(),
+            database_path.display()
+        ),
+    );
+
+    let (_, state) = load_runtime_from_path(&config_path)
+        .await
+        .expect("valid runtime");
+
+    assert!(database_path.exists());
+    let table_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transcription_jobs'",
+    )
+    .fetch_one(state.storage.pool())
+    .await
+    .expect("query migrated schema");
+    assert_eq!(table_count, 1);
+}
+
+#[tokio::test]
+async fn startup_accepts_relative_accepted_audio_dir_resolved_against_config() {
     let tempdir = TempDir::new().expect("tempdir");
     let expected_dir = tempdir.path().join("accepted-audio");
     fs::create_dir(&expected_dir).expect("create accepted audio dir");
@@ -315,13 +493,15 @@ key = "key-one"
         .to_owned(),
     );
 
-    let (_, state) = load_runtime_from_path(&config_path).expect("relative path should resolve");
+    let (_, state) = load_runtime_from_path(&config_path)
+        .await
+        .expect("relative path should resolve");
 
     assert_eq!(state.accepted_audio_dir, expected_dir);
 }
 
-#[test]
-fn startup_rejects_relative_accepted_audio_dir_when_target_missing() {
+#[tokio::test]
+async fn startup_rejects_relative_accepted_audio_dir_when_target_missing() {
     let tempdir = TempDir::new().expect("tempdir");
     let expected_dir = tempdir.path().join("accepted-audio");
     let config_path = write_config(
@@ -336,8 +516,9 @@ key = "key-one"
         .to_owned(),
     );
 
-    let error =
-        load_runtime_from_path(&config_path).expect_err("missing relative path should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("missing relative path should fail");
 
     match error {
         BootstrapError::MissingAcceptedAudioDir(path) => assert_eq!(path, expected_dir),
@@ -346,8 +527,8 @@ key = "key-one"
 }
 
 #[cfg(unix)]
-#[test]
-fn startup_resolves_relative_accepted_audio_dir_through_config_symlink() {
+#[tokio::test]
+async fn startup_resolves_relative_accepted_audio_dir_through_config_symlink() {
     use std::os::unix::fs::symlink;
 
     let tempdir = TempDir::new().expect("tempdir");
@@ -365,6 +546,7 @@ fn startup_resolves_relative_accepted_audio_dir_through_config_symlink() {
         &real_config_path,
         r#"
 accepted_audio_dir = "../accepted-audio"
+database_path = "../oracy.sqlite"
 
 [[api_keys]]
 api_key_id = "alpha"
@@ -376,6 +558,7 @@ key = "key-one"
 
     let symlinked_config_path = symlink_config_dir.join("oracy.toml");
     let (_, state) = load_runtime_from_path(&symlinked_config_path)
+        .await
         .expect("relative path should resolve through symlink target");
 
     let expected_dir =
@@ -390,8 +573,8 @@ key = "key-one"
 }
 
 #[cfg(unix)]
-#[test]
-fn startup_resolves_relative_accepted_audio_dir_from_real_config_file() {
+#[tokio::test]
+async fn startup_resolves_relative_accepted_audio_dir_from_real_config_file() {
     use std::os::unix::fs::symlink;
 
     let tempdir = TempDir::new().expect("tempdir");
@@ -409,6 +592,7 @@ fn startup_resolves_relative_accepted_audio_dir_from_real_config_file() {
         &real_config_path,
         r#"
 accepted_audio_dir = "accepted-audio"
+database_path = "oracy.sqlite"
 
 [[api_keys]]
 api_key_id = "alpha"
@@ -422,14 +606,15 @@ key = "key-one"
     symlink(&real_config_path, &symlinked_config_path).expect("create config file symlink");
 
     let (_, state) = load_runtime_from_path(&symlinked_config_path)
+        .await
         .expect("relative path should resolve through real config file");
 
     assert_eq!(state.accepted_audio_dir, real_accepted_audio_dir);
     assert_ne!(state.accepted_audio_dir, decoy_accepted_audio_dir);
 }
 
-#[test]
-fn startup_rejects_when_accepted_audio_path_is_a_file() {
+#[tokio::test]
+async fn startup_rejects_when_accepted_audio_path_is_a_file() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("accepted-audio");
     fs::write(&file_path, "not a directory").expect("write file");
@@ -447,7 +632,9 @@ key = "key-one"
         ),
     );
 
-    let error = load_runtime_from_path(&config_path).expect_err("file path should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("file path should fail");
     assert!(
         error
             .to_string()
@@ -456,8 +643,8 @@ key = "key-one"
 }
 
 #[cfg(unix)]
-#[test]
-fn startup_rejects_unwritable_accepted_audio_directory() {
+#[tokio::test]
+async fn startup_rejects_unwritable_accepted_audio_directory() {
     use std::os::unix::fs::PermissionsExt;
 
     if let Some(reason) = support::skip_reason_for_unwritable_directory_test() {
@@ -486,7 +673,9 @@ key = "key-one"
         ),
     );
 
-    let error = load_runtime_from_path(&config_path).expect_err("unwritable dir should fail");
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("unwritable dir should fail");
     match error {
         BootstrapError::AcceptedAudioDirNotWritable { path, .. } => assert_eq!(path, audio_dir),
         other => panic!("expected unwritable accepted audio dir error, got {other}"),
@@ -494,6 +683,21 @@ key = "key-one"
 }
 
 fn write_config(tempdir: &TempDir, contents: String) -> std::path::PathBuf {
+    let path = tempdir.path().join("oracy.toml");
+    let mut contents = contents.trim_start().to_owned();
+    if !contents.contains("database_path") {
+        let database_path = tempdir.path().join("oracy.sqlite");
+        contents = contents.replacen(
+            '\n',
+            &format!("\ndatabase_path = \"{}\"\n", database_path.display()),
+            1,
+        );
+    }
+    fs::write(&path, contents).expect("write config");
+    path
+}
+
+fn write_config_without_database_path(tempdir: &TempDir, contents: String) -> std::path::PathBuf {
     let path = tempdir.path().join("oracy.toml");
     fs::write(&path, contents.trim_start()).expect("write config");
     path

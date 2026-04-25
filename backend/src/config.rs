@@ -15,6 +15,7 @@ pub struct Settings {
     #[serde(default = "default_listen_addr")]
     pub listen_addr: SocketAddr,
     pub accepted_audio_dir: PathBuf,
+    pub database_path: PathBuf,
     pub api_keys: Vec<ApiKeyConfig>,
 }
 

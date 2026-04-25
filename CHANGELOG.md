@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add the durable backend SQLite substrate for accepted transcription jobs,
+  transcript versions, ordered segments, current embeddings, owner scoping, and
+  the required operator `database_path` setting.
 - Establish independent backend and frontend CI gates for v0.1.0 pull requests
   and pushes to `main`.
 - Add the initial Rust backend runtime with explicit startup validation for

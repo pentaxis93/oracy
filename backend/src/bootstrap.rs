@@ -9,6 +9,7 @@ use tracing::info;
 use crate::auth::AuthStore;
 use crate::config::Settings;
 use crate::state::AppState;
+use crate::storage::{Storage, StorageError};
 
 pub const CONFIG_ENV_VAR: &str = "ORACY_CONFIG";
 
@@ -40,14 +41,16 @@ pub enum BootstrapError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{0}")]
+    Storage(#[from] StorageError),
 }
 
-pub fn load_runtime_from_env() -> Result<(std::net::SocketAddr, AppState), BootstrapError> {
+pub async fn load_runtime_from_env() -> Result<(std::net::SocketAddr, AppState), BootstrapError> {
     let config_path = std::env::var_os(CONFIG_ENV_VAR).ok_or(BootstrapError::MissingConfigEnv)?;
-    load_runtime_from_path(Path::new(&config_path))
+    load_runtime_from_path(Path::new(&config_path)).await
 }
 
-pub fn load_runtime_from_path(
+pub async fn load_runtime_from_path(
     config_path: &Path,
 ) -> Result<(std::net::SocketAddr, AppState), BootstrapError> {
     let raw = fs::read_to_string(config_path).map_err(|source| BootstrapError::ReadConfig {
@@ -61,31 +64,38 @@ pub fn load_runtime_from_path(
         })?;
 
     settings.accepted_audio_dir =
-        resolve_accepted_audio_dir(config_path, &settings.accepted_audio_dir)?;
+        resolve_config_relative_path(config_path, &settings.accepted_audio_dir)?;
+    settings.database_path = resolve_config_relative_path(config_path, &settings.database_path)?;
     info!(
         "accepted audio storage directory resolved to {}",
         settings.accepted_audio_dir.display()
+    );
+    info!(
+        "database path resolved to {}",
+        settings.database_path.display()
     );
 
     validate_settings(&settings)?;
     ensure_writable_directory(&settings.accepted_audio_dir)?;
     let auth_store = AuthStore::try_from_configs(&settings.api_keys)
         .map_err(|error| BootstrapError::InvalidConfiguration(error.to_string()))?;
+    let storage = Storage::connect(&settings.database_path).await?;
 
     let state = AppState {
         accepted_audio_dir: settings.accepted_audio_dir.clone(),
         auth_store: Arc::new(auth_store),
+        storage,
     };
 
     Ok((settings.listen_addr, state))
 }
 
-fn resolve_accepted_audio_dir(
+fn resolve_config_relative_path(
     config_path: &Path,
-    accepted_audio_dir: &Path,
+    configured_path: &Path,
 ) -> Result<PathBuf, BootstrapError> {
-    if accepted_audio_dir.is_absolute() {
-        return Ok(accepted_audio_dir.to_path_buf());
+    if configured_path.is_absolute() {
+        return Ok(configured_path.to_path_buf());
     }
 
     let absolute_config_path = if config_path.is_absolute() {
@@ -113,7 +123,7 @@ fn resolve_accepted_audio_dir(
         ))
     })?;
 
-    Ok(config_dir.join(accepted_audio_dir))
+    Ok(config_dir.join(configured_path))
 }
 
 fn validate_settings(settings: &Settings) -> Result<(), BootstrapError> {

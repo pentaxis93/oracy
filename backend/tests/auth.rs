@@ -208,18 +208,22 @@ async fn protected_router() -> Router {
         format!(
             r#"
 accepted_audio_dir = "{}"
+database_path = "{}"
 
 [[api_keys]]
 api_key_id = "alpha"
 key = "alpha-secret"
 "#,
-            audio_dir.display()
+            audio_dir.display(),
+            tempdir.path().join("oracy.sqlite").display()
         )
         .trim_start(),
     )
     .expect("write config");
 
-    let (_, state) = load_runtime_from_path(&config_path).expect("valid runtime");
+    let (_, state) = load_runtime_from_path(&config_path)
+        .await
+        .expect("valid runtime");
 
     Router::new()
         .route("/protected", get(protected_handler))
