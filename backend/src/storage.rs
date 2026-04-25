@@ -62,6 +62,19 @@ pub enum AcceptJobOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateTagOutcome {
+    Created(TagRecord),
+    Existing(TagRecord),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameTagOutcome {
+    Renamed(TagRecord),
+    NotFound,
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmissionConflict {
     pub job_id: String,
 }
@@ -77,6 +90,22 @@ pub struct NewTranscriptionJob {
     pub accepted_audio_path: PathBuf,
     pub max_retries: i64,
     pub now: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewTag {
+    pub id: String,
+    pub api_key_id: String,
+    pub name: String,
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewSession {
+    pub id: String,
+    pub api_key_id: String,
+    pub name: String,
+    pub created_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +209,22 @@ pub struct EmbeddingRecord {
     pub transcript_id: String,
     pub model: String,
     pub vector: Vec<u8>,
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagRecord {
+    pub id: String,
+    pub api_key_id: String,
+    pub name: String,
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub id: String,
+    pub api_key_id: String,
+    pub name: String,
     pub created_at: OffsetDateTime,
 }
 
@@ -581,6 +626,299 @@ impl Storage {
 
         Ok(result.rows_affected() > 0)
     }
+
+    pub async fn create_tag(&self, input: NewTag) -> Result<CreateTagOutcome, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let name_folded = fold_tag_name(&input.name);
+        let created_at = format_timestamp(input.created_at)?;
+        let result = sqlx::query(
+            r#"
+            INSERT INTO tags (id, api_key_id, name, name_folded, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(api_key_id, name_folded) DO NOTHING
+            "#,
+        )
+        .bind(&input.id)
+        .bind(&input.api_key_id)
+        .bind(&input.name)
+        .bind(&name_folded)
+        .bind(&created_at)
+        .execute(&mut *tx)
+        .await?;
+
+        let row = if result.rows_affected() == 1 {
+            sqlx::query(
+                r#"
+                SELECT id, api_key_id, name, created_at
+                FROM tags
+                WHERE api_key_id = ? AND id = ?
+                "#,
+            )
+            .bind(&input.api_key_id)
+            .bind(&input.id)
+            .fetch_one(&mut *tx)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT id, api_key_id, name, created_at
+                FROM tags
+                WHERE api_key_id = ? AND name_folded = ?
+                "#,
+            )
+            .bind(&input.api_key_id)
+            .bind(&name_folded)
+            .fetch_one(&mut *tx)
+            .await?
+        };
+        let tag = tag_from_row(row)?;
+        tx.commit().await?;
+
+        if result.rows_affected() == 1 {
+            Ok(CreateTagOutcome::Created(tag))
+        } else {
+            Ok(CreateTagOutcome::Existing(tag))
+        }
+    }
+
+    pub async fn create_session(&self, input: NewSession) -> Result<SessionRecord, StorageError> {
+        let created_at = format_timestamp(input.created_at)?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO sessions (id, api_key_id, name, created_at)
+            VALUES (?, ?, ?, ?)
+            "#,
+        )
+        .bind(&input.id)
+        .bind(&input.api_key_id)
+        .bind(&input.name)
+        .bind(&created_at)
+        .execute(&mut *tx)
+        .await?;
+
+        let row = sqlx::query(
+            r#"
+            SELECT id, api_key_id, name, created_at
+            FROM sessions
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(&input.api_key_id)
+        .bind(&input.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let session = session_from_row(row)?;
+        tx.commit().await?;
+        Ok(session)
+    }
+
+    pub async fn delete_session(
+        &self,
+        api_key_id: &str,
+        session_id: &str,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM sessions
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn delete_tag(&self, api_key_id: &str, tag_id: &str) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM tags
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(tag_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn get_tag(
+        &self,
+        api_key_id: &str,
+        tag_id: &str,
+    ) -> Result<Option<TagRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, api_key_id, name, created_at
+            FROM tags
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(tag_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(tag_from_row).transpose()
+    }
+
+    pub async fn rename_tag(
+        &self,
+        api_key_id: &str,
+        tag_id: &str,
+        name: &str,
+    ) -> Result<RenameTagOutcome, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let name_folded = fold_tag_name(name);
+        let existing_id: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT id
+            FROM tags
+            WHERE api_key_id = ? AND name_folded = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(&name_folded)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing_id.as_deref().is_some_and(|id| id != tag_id) {
+            tx.commit().await?;
+            return Ok(RenameTagOutcome::Conflict);
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE tags
+            SET name = ?, name_folded = ?
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(name)
+        .bind(&name_folded)
+        .bind(api_key_id)
+        .bind(tag_id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            tx.commit().await?;
+            return Ok(RenameTagOutcome::NotFound);
+        }
+
+        let row = sqlx::query(
+            r#"
+            SELECT id, api_key_id, name, created_at
+            FROM tags
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(tag_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let tag = tag_from_row(row)?;
+        tx.commit().await?;
+        Ok(RenameTagOutcome::Renamed(tag))
+    }
+
+    pub async fn replace_transcript_tags(
+        &self,
+        api_key_id: &str,
+        transcript_id: &str,
+        tag_ids: &[String],
+    ) -> Result<bool, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let transcript_exists: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT 1
+            FROM transcripts
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(transcript_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if transcript_exists.is_none() {
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        for tag_id in tag_ids {
+            let tag_exists: Option<i64> = sqlx::query_scalar(
+                r#"
+                SELECT 1
+                FROM tags
+                WHERE api_key_id = ? AND id = ?
+                "#,
+            )
+            .bind(api_key_id)
+            .bind(tag_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if tag_exists.is_none() {
+                tx.commit().await?;
+                return Ok(false);
+            }
+        }
+
+        sqlx::query(
+            r#"
+            DELETE FROM transcript_tags
+            WHERE api_key_id = ? AND transcript_id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(transcript_id)
+        .execute(&mut *tx)
+        .await?;
+
+        for tag_id in tag_ids {
+            sqlx::query(
+                r#"
+                INSERT INTO transcript_tags (api_key_id, transcript_id, tag_id)
+                VALUES (?, ?, ?)
+                "#,
+            )
+            .bind(api_key_id)
+            .bind(transcript_id)
+            .bind(tag_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn list_transcript_tags(
+        &self,
+        api_key_id: &str,
+        transcript_id: &str,
+    ) -> Result<Vec<TagRecord>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT tags.id, tags.api_key_id, tags.name, tags.created_at
+            FROM tags
+            JOIN transcript_tags
+                ON transcript_tags.api_key_id = tags.api_key_id
+                AND transcript_tags.tag_id = tags.id
+            WHERE transcript_tags.api_key_id = ?
+                AND transcript_tags.transcript_id = ?
+            ORDER BY tags.created_at DESC, tags.id DESC
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(transcript_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(tag_from_row).collect()
+    }
 }
 
 impl TranscriptionJobRecord {
@@ -633,6 +971,10 @@ fn validate_database_path(database_path: &Path) -> Result<(), StorageError> {
 
 fn new_id() -> String {
     Ulid::new().to_string()
+}
+
+fn fold_tag_name(value: &str) -> String {
+    value.to_lowercase()
 }
 
 fn format_timestamp(value: OffsetDateTime) -> Result<String, StorageError> {
@@ -712,6 +1054,24 @@ fn embedding_from_row(row: sqlx::sqlite::SqliteRow) -> Result<EmbeddingRecord, S
         transcript_id: row.try_get("transcript_id")?,
         model: row.try_get("model")?,
         vector: row.try_get("vector")?,
+        created_at: parse_timestamp(row.try_get("created_at")?)?,
+    })
+}
+
+fn tag_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TagRecord, StorageError> {
+    Ok(TagRecord {
+        id: row.try_get("id")?,
+        api_key_id: row.try_get("api_key_id")?,
+        name: row.try_get("name")?,
+        created_at: parse_timestamp(row.try_get("created_at")?)?,
+    })
+}
+
+fn session_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SessionRecord, StorageError> {
+    Ok(SessionRecord {
+        id: row.try_get("id")?,
+        api_key_id: row.try_get("api_key_id")?,
+        name: row.try_get("name")?,
         created_at: parse_timestamp(row.try_get("created_at")?)?,
     })
 }
