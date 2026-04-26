@@ -159,7 +159,6 @@ pub struct NewTranscript {
     pub cost_cents: Option<i64>,
     pub created_at: OffsetDateTime,
     pub recorded_at: OffsetDateTime,
-    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -429,6 +428,23 @@ impl Storage {
             });
         }
 
+        let transcript_session_id: Option<String> = sqlx::query(
+            r#"
+            SELECT sessions.id AS transcript_session_id
+            FROM transcription_jobs
+            LEFT JOIN sessions
+                ON sessions.api_key_id = transcription_jobs.api_key_id
+                AND sessions.id = transcription_jobs.session_id
+            WHERE transcription_jobs.api_key_id = ?
+                AND transcription_jobs.id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(job_id)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get("transcript_session_id")?;
+
         sqlx::query(
             r#"
             INSERT INTO transcripts (
@@ -450,7 +466,7 @@ impl Storage {
         .bind(transcript.cost_cents)
         .bind(&now)
         .bind(format_timestamp(transcript.recorded_at)?)
-        .bind(&transcript.session_id)
+        .bind(&transcript_session_id)
         .execute(&mut *tx)
         .await?;
 

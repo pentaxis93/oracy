@@ -761,6 +761,54 @@ async fn transcript_tag_replacement_collapses_missing_transcript_and_tag_to_not_
 }
 
 #[tokio::test]
+async fn complete_job_with_transcript_nulls_deleted_accepted_session_without_mutating_job_tuple() {
+    let (_tempdir, storage) = storage().await;
+    let input = new_job("owner-a", "attempt-deleted-session", "hash-a");
+    let job = created_job(&storage, "owner-a", "attempt-deleted-session").await;
+    mark_job_processing(&storage, &job.id).await;
+
+    assert!(
+        storage
+            .delete_session("owner-a", "session-a")
+            .await
+            .expect("delete session")
+    );
+
+    storage
+        .complete_job_with_transcript(
+            "owner-a",
+            &job.id,
+            materialization("transcript-deleted-session"),
+        )
+        .await
+        .expect("materialize transcript after session deletion");
+
+    assert_eq!(
+        storage
+            .get_transcript("owner-a", "transcript-deleted-session")
+            .await
+            .expect("transcript lookup")
+            .expect("transcript exists")
+            .session_id,
+        None
+    );
+
+    let completed_job = storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(completed_job.session_id.as_deref(), Some("session-a"));
+
+    let replayed = match storage.accept_job(input).await.expect("replay job") {
+        AcceptJobOutcome::Replayed(job) => job,
+        other => panic!("expected replayed job, got {other:?}"),
+    };
+    assert_eq!(replayed.id, job.id);
+    assert_eq!(replayed.session_id.as_deref(), Some("session-a"));
+}
+
+#[tokio::test]
 async fn sessions_are_identities_that_null_transcripts_without_mutating_replay_tuples() {
     let (_tempdir, storage) = storage().await;
     let session = storage
@@ -1144,7 +1192,6 @@ fn materialization(transcript_id: &str) -> TranscriptMaterialization {
             cost_cents: Some(1),
             created_at: datetime!(2026-04-24 18:00:30 UTC),
             recorded_at: datetime!(2026-04-24 17:59:00 UTC),
-            session_id: Some("session-a".to_owned()),
         },
         initial_version: NewTranscriptVersion {
             id: format!("{transcript_id}-version-1"),
