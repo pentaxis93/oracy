@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use oracy_backend::storage::{
     AcceptJobOutcome, CreateTagOutcome, NewEmbedding, NewSegment, NewSession, NewTag,
-    NewTranscript, NewTranscriptVersion, NewTranscriptionJob, RenameTagOutcome, Storage,
-    StorageError, TranscriptMaterialization,
+    NewTranscript, NewTranscriptVersion, NewTranscriptionJob, RenameTagOutcome,
+    ReplaceTranscriptTagsOutcome, Storage, StorageError, TranscriptMaterialization,
 };
 use sqlx::Row;
 use tempfile::TempDir;
@@ -15,6 +15,8 @@ use tokio::time::{Duration, sleep};
 #[tokio::test]
 async fn accepted_jobs_replay_by_owner_and_reject_tuple_mismatches() {
     let (_tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-a", "session-a").await;
+    insert_session_row(&storage, "owner-b", "session-b").await;
     let input = new_job("owner-a", "attempt-1", "hash-a");
 
     let created = match storage.accept_job(input.clone()).await.expect("accept job") {
@@ -29,10 +31,9 @@ async fn accepted_jobs_replay_by_owner_and_reject_tuple_mismatches() {
     };
     assert_eq!(replayed.id, created.id);
 
-    let different_owner = match storage
-        .accept_job(new_job("owner-b", "attempt-1", "hash-a"))
-        .await
-    {
+    let mut owner_b_input = new_job("owner-b", "attempt-1", "hash-a");
+    owner_b_input.session_id = Some("session-b".to_owned());
+    let different_owner = match storage.accept_job(owner_b_input).await {
         Ok(AcceptJobOutcome::Created(job)) => job,
         other => panic!("expected owner-isolated creation, got {other:?}"),
     };
@@ -58,8 +59,74 @@ async fn accepted_jobs_replay_by_owner_and_reject_tuple_mismatches() {
 }
 
 #[tokio::test]
+async fn new_jobs_reject_missing_session_at_acceptance() {
+    let (_tempdir, storage) = storage().await;
+
+    let outcome = storage
+        .accept_job(new_job("owner-a", "attempt-missing-session", "hash-a"))
+        .await
+        .expect("session validation outcome");
+
+    assert_eq!(outcome, AcceptJobOutcome::SessionNotFound);
+    assert_eq!(
+        job_count_by_key(&storage, "owner-a", "attempt-missing-session").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn new_jobs_reject_other_owner_session_at_acceptance() {
+    let (_tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-b", "session-a").await;
+
+    let outcome = storage
+        .accept_job(new_job("owner-a", "attempt-other-owner-session", "hash-a"))
+        .await
+        .expect("session validation outcome");
+
+    assert_eq!(outcome, AcceptJobOutcome::SessionNotFound);
+    assert_eq!(
+        job_count_by_key(&storage, "owner-a", "attempt-other-owner-session").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn raw_job_rows_must_reference_owner_scoped_sessions() {
+    let (_tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-b", "session-a").await;
+
+    let error = sqlx::query(
+        r#"
+        INSERT INTO transcription_jobs (
+            id, api_key_id, idempotency_key, audio_sha256_hex, recorded_at,
+            session_id, language, accepted_audio_path, status, created_at,
+            updated_at, retry_count, max_retries
+        )
+        VALUES (
+            'job-invalid-session', 'owner-a', 'attempt-invalid-session',
+            'hash-a', '2026-04-24T17:59:00.000000000Z', 'session-a', 'en',
+            '/var/lib/oracy/accepted-audio/job-invalid-session', 'queued',
+            '2026-04-24T18:00:00.000000000Z',
+            '2026-04-24T18:00:00.000000000Z', 0, 3
+        )
+        "#,
+    )
+    .execute(storage.pool())
+    .await
+    .expect_err("mismatched job session owner should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("job session must belong to same owner")
+    );
+}
+
+#[tokio::test]
 async fn racing_acceptance_resolves_unique_conflicts_as_replay_or_submission_conflict() {
     let (_tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-a", "session-a").await;
     let input = new_job("owner-a", "attempt-1", "hash-a");
 
     let replayed = accept_while_uncommitted_row_exists(
@@ -97,6 +164,7 @@ async fn racing_acceptance_resolves_unique_conflicts_as_replay_or_submission_con
 #[tokio::test]
 async fn accepted_submission_tuple_is_immutable_in_storage() {
     let (_tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-a", "session-a").await;
     let created = match storage
         .accept_job(new_job("owner-a", "attempt-1", "hash-a"))
         .await
@@ -329,6 +397,7 @@ async fn retry_waiting_jobs_are_not_eligible_for_transcript_completion() {
 #[tokio::test]
 async fn persisted_timestamps_order_and_filter_chronologically_under_sql_text_comparisons() {
     let (_tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-a", "session-a").await;
     let cases = [
         ("after-fraction", timestamp("2026-04-24T18:00:00.1Z")),
         ("whole-second", timestamp("2026-04-24T18:00:00Z")),
@@ -568,23 +637,26 @@ async fn tags_are_owner_scoped_case_insensitive_and_many_to_many_with_transcript
     };
     assert_ne!(other_owner.id, meeting.id);
 
-    assert!(
+    assert_eq!(
         storage
             .replace_transcript_tags("owner-a", "transcript-a", &[meeting.id.clone()])
             .await
-            .expect("tag transcript")
+            .expect("tag transcript"),
+        ReplaceTranscriptTagsOutcome::Replaced
     );
-    assert!(
+    assert_eq!(
         storage
             .replace_transcript_tags("owner-a", "transcript-b", &[meeting.id.clone()])
             .await
-            .expect("tag second transcript")
+            .expect("tag second transcript"),
+        ReplaceTranscriptTagsOutcome::Replaced
     );
-    assert!(
-        !storage
+    assert_eq!(
+        storage
             .replace_transcript_tags("owner-b", "transcript-c", &[meeting.id.clone()])
             .await
-            .expect("wrong-owner tag is rejected")
+            .expect("wrong-owner tag is rejected"),
+        ReplaceTranscriptTagsOutcome::NotFound
     );
 
     assert_eq!(
@@ -610,6 +682,82 @@ async fn tags_are_owner_scoped_case_insensitive_and_many_to_many_with_transcript
     );
     assert_eq!(row_count(&storage, "transcripts", "transcript-a").await, 1);
     assert_eq!(row_count(&storage, "transcripts", "transcript-b").await, 1);
+}
+
+#[tokio::test]
+async fn duplicate_transcript_tag_ids_are_rejected_without_mutating_prior_tags() {
+    let (_tempdir, storage) = storage().await;
+    insert_transcript_only(&storage, "owner-a", "transcript-a").await;
+    let meeting = match storage
+        .create_tag(new_tag("owner-a", "tag-meeting", "Meeting"))
+        .await
+        .expect("create meeting tag")
+    {
+        CreateTagOutcome::Created(tag) => tag,
+        other => panic!("expected created tag, got {other:?}"),
+    };
+    let notes = match storage
+        .create_tag(new_tag("owner-a", "tag-notes", "Notes"))
+        .await
+        .expect("create notes tag")
+    {
+        CreateTagOutcome::Created(tag) => tag,
+        other => panic!("expected created tag, got {other:?}"),
+    };
+    assert_eq!(
+        storage
+            .replace_transcript_tags("owner-a", "transcript-a", &[notes.id.clone()])
+            .await
+            .expect("set prior tag"),
+        ReplaceTranscriptTagsOutcome::Replaced
+    );
+
+    let outcome = storage
+        .replace_transcript_tags(
+            "owner-a",
+            "transcript-a",
+            &[meeting.id.clone(), meeting.id.clone()],
+        )
+        .await
+        .expect("duplicate-input outcome");
+
+    assert_eq!(outcome, ReplaceTranscriptTagsOutcome::DuplicateTagIds);
+    assert_eq!(
+        storage
+            .list_transcript_tags("owner-a", "transcript-a")
+            .await
+            .expect("list transcript tags"),
+        vec![notes]
+    );
+}
+
+#[tokio::test]
+async fn transcript_tag_replacement_collapses_missing_transcript_and_tag_to_not_found() {
+    let (_tempdir, storage) = storage().await;
+    insert_transcript_only(&storage, "owner-a", "transcript-a").await;
+    let meeting = match storage
+        .create_tag(new_tag("owner-a", "tag-meeting", "Meeting"))
+        .await
+        .expect("create meeting tag")
+    {
+        CreateTagOutcome::Created(tag) => tag,
+        other => panic!("expected created tag, got {other:?}"),
+    };
+
+    assert_eq!(
+        storage
+            .replace_transcript_tags("owner-a", "transcript-missing", &[meeting.id])
+            .await
+            .expect("missing transcript outcome"),
+        ReplaceTranscriptTagsOutcome::NotFound
+    );
+    assert_eq!(
+        storage
+            .replace_transcript_tags("owner-a", "transcript-a", &["tag-missing".to_owned()])
+            .await
+            .expect("missing tag outcome"),
+        ReplaceTranscriptTagsOutcome::NotFound
+    );
 }
 
 #[tokio::test]
@@ -741,6 +889,46 @@ async fn tag_renames_preserve_latest_spelling_and_reject_case_insensitive_collis
             .name,
         "Notes"
     );
+}
+
+#[tokio::test]
+async fn missing_tag_rename_returns_not_found_before_name_conflict() {
+    let (_tempdir, storage) = storage().await;
+    storage
+        .create_tag(new_tag("owner-a", "tag-notes", "Notes"))
+        .await
+        .expect("create notes tag");
+
+    let outcome = storage
+        .rename_tag("owner-a", "tag-missing", "notes")
+        .await
+        .expect("rename missing tag");
+
+    assert_eq!(outcome, RenameTagOutcome::NotFound);
+}
+
+#[tokio::test]
+async fn other_owner_tag_rename_returns_not_found_before_name_conflict() {
+    let (_tempdir, storage) = storage().await;
+    storage
+        .create_tag(new_tag("owner-a", "tag-notes", "Notes"))
+        .await
+        .expect("create notes tag");
+    let other_owner = match storage
+        .create_tag(new_tag("owner-b", "tag-other-owner", "Other"))
+        .await
+        .expect("create other-owner tag")
+    {
+        CreateTagOutcome::Created(tag) => tag,
+        other => panic!("expected created tag, got {other:?}"),
+    };
+
+    let outcome = storage
+        .rename_tag("owner-a", &other_owner.id, "notes")
+        .await
+        .expect("rename other-owner tag");
+
+    assert_eq!(outcome, RenameTagOutcome::NotFound);
 }
 
 async fn storage() -> (TempDir, Storage) {

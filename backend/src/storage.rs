@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use sqlx::migrate::Migrator;
@@ -59,6 +60,7 @@ pub enum AcceptJobOutcome {
     Created(TranscriptionJobRecord),
     Replayed(TranscriptionJobRecord),
     Conflict(SubmissionConflict),
+    SessionNotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +74,13 @@ pub enum RenameTagOutcome {
     Renamed(TagRecord),
     NotFound,
     Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplaceTranscriptTagsOutcome {
+    Replaced,
+    NotFound,
+    DuplicateTagIds,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,7 +287,12 @@ impl Storage {
                 session_id, language, accepted_audio_path, status, created_at,
                 updated_at, retry_count, max_retries
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?
+            WHERE ? IS NULL
+                OR EXISTS (
+                    SELECT 1 FROM sessions
+                    WHERE api_key_id = ? AND id = ?
+                )
             ON CONFLICT(api_key_id, idempotency_key) DO NOTHING
             "#,
         )
@@ -293,11 +307,14 @@ impl Storage {
         .bind(&now)
         .bind(&now)
         .bind(input.max_retries)
+        .bind(&input.session_id)
+        .bind(&input.api_key_id)
+        .bind(&input.session_id)
         .execute(&mut *tx)
         .await?;
 
-        let row = if result.rows_affected() == 1 {
-            sqlx::query(
+        let job = if result.rows_affected() == 1 {
+            let row = sqlx::query(
                 r#"
                 SELECT * FROM transcription_jobs
                 WHERE api_key_id = ? AND id = ?
@@ -306,9 +323,10 @@ impl Storage {
             .bind(&input.api_key_id)
             .bind(&id)
             .fetch_one(&mut *tx)
-            .await?
+            .await?;
+            job_from_row(row)?
         } else {
-            sqlx::query(
+            let row = sqlx::query(
                 r#"
                 SELECT * FROM transcription_jobs
                 WHERE api_key_id = ? AND idempotency_key = ?
@@ -316,10 +334,18 @@ impl Storage {
             )
             .bind(&input.api_key_id)
             .bind(&input.idempotency_key)
-            .fetch_one(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?
+            .map(job_from_row)
+            .transpose()?;
+            match row {
+                Some(job) => job,
+                None => {
+                    tx.commit().await?;
+                    return Ok(AcceptJobOutcome::SessionNotFound);
+                }
+            }
         };
-        let job = job_from_row(row)?;
         tx.commit().await?;
 
         if result.rows_affected() == 1 {
@@ -775,6 +801,22 @@ impl Storage {
     ) -> Result<RenameTagOutcome, StorageError> {
         let mut tx = self.pool.begin().await?;
         let name_folded = fold_tag_name(name);
+        let current: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT id
+            FROM tags
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(tag_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if current.is_none() {
+            tx.commit().await?;
+            return Ok(RenameTagOutcome::NotFound);
+        }
+
         let existing_id: Option<String> = sqlx::query_scalar(
             r#"
             SELECT id
@@ -791,7 +833,7 @@ impl Storage {
             return Ok(RenameTagOutcome::Conflict);
         }
 
-        let result = sqlx::query(
+        sqlx::query(
             r#"
             UPDATE tags
             SET name = ?, name_folded = ?
@@ -804,10 +846,6 @@ impl Storage {
         .bind(tag_id)
         .execute(&mut *tx)
         .await?;
-        if result.rows_affected() == 0 {
-            tx.commit().await?;
-            return Ok(RenameTagOutcome::NotFound);
-        }
 
         let row = sqlx::query(
             r#"
@@ -830,7 +868,14 @@ impl Storage {
         api_key_id: &str,
         transcript_id: &str,
         tag_ids: &[String],
-    ) -> Result<bool, StorageError> {
+    ) -> Result<ReplaceTranscriptTagsOutcome, StorageError> {
+        let mut seen = HashSet::with_capacity(tag_ids.len());
+        for tag_id in tag_ids {
+            if !seen.insert(tag_id) {
+                return Ok(ReplaceTranscriptTagsOutcome::DuplicateTagIds);
+            }
+        }
+
         let mut tx = self.pool.begin().await?;
         let transcript_exists: Option<i64> = sqlx::query_scalar(
             r#"
@@ -845,7 +890,7 @@ impl Storage {
         .await?;
         if transcript_exists.is_none() {
             tx.commit().await?;
-            return Ok(false);
+            return Ok(ReplaceTranscriptTagsOutcome::NotFound);
         }
 
         for tag_id in tag_ids {
@@ -862,7 +907,7 @@ impl Storage {
             .await?;
             if tag_exists.is_none() {
                 tx.commit().await?;
-                return Ok(false);
+                return Ok(ReplaceTranscriptTagsOutcome::NotFound);
             }
         }
 
@@ -892,7 +937,7 @@ impl Storage {
         }
 
         tx.commit().await?;
-        Ok(true)
+        Ok(ReplaceTranscriptTagsOutcome::Replaced)
     }
 
     pub async fn list_transcript_tags(

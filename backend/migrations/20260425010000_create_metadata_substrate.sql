@@ -40,6 +40,17 @@ CREATE TABLE transcript_tags (
 CREATE INDEX transcript_tags_tag_idx
     ON transcript_tags (api_key_id, tag_id, transcript_id);
 
+CREATE TRIGGER transcription_jobs_session_owner_insert
+BEFORE INSERT ON transcription_jobs
+WHEN NEW.session_id IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'job session must belong to same owner')
+    WHERE NOT EXISTS (
+        SELECT 1 FROM sessions
+        WHERE api_key_id = NEW.api_key_id AND id = NEW.session_id
+    );
+END;
+
 CREATE TRIGGER transcripts_session_owner_insert
 BEFORE INSERT ON transcripts
 WHEN NEW.session_id IS NOT NULL
