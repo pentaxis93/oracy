@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use oracy_backend::storage::{
     AcceptJobOutcome, CreateTagOutcome, NewEmbedding, NewSegment, NewSession, NewTag,
@@ -10,6 +11,7 @@ use tempfile::TempDir;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use time::macros::datetime;
+use tokio::sync::Barrier;
 use tokio::time::{Duration, sleep};
 
 #[tokio::test]
@@ -685,6 +687,37 @@ async fn tags_are_owner_scoped_case_insensitive_and_many_to_many_with_transcript
 }
 
 #[tokio::test]
+async fn unicode_case_equivalent_tag_names_share_one_owner_scoped_identity() {
+    let (_tempdir, storage) = storage().await;
+
+    for (created_name, replayed_name, created_id, replayed_id) in [
+        ("Straße", "STRASSE", "tag-strasse-a", "tag-strasse-b"),
+        ("Teſt", "test", "tag-long-s-a", "tag-long-s-b"),
+    ] {
+        let created = match storage
+            .create_tag(new_tag("owner-a", created_id, created_name))
+            .await
+            .expect("create unicode tag")
+        {
+            CreateTagOutcome::Created(tag) => tag,
+            other => panic!("expected created tag, got {other:?}"),
+        };
+
+        let replayed = match storage
+            .create_tag(new_tag("owner-a", replayed_id, replayed_name))
+            .await
+            .expect("reuse unicode case-equivalent tag")
+        {
+            CreateTagOutcome::Existing(tag) => tag,
+            other => panic!("expected existing tag, got {other:?}"),
+        };
+
+        assert_eq!(replayed.id, created.id);
+        assert_eq!(replayed.name, created_name);
+    }
+}
+
+#[tokio::test]
 async fn duplicate_transcript_tag_ids_are_rejected_without_mutating_prior_tags() {
     let (_tempdir, storage) = storage().await;
     insert_transcript_only(&storage, "owner-a", "transcript-a").await;
@@ -937,6 +970,122 @@ async fn tag_renames_preserve_latest_spelling_and_reject_case_insensitive_collis
             .name,
         "Notes"
     );
+}
+
+#[tokio::test]
+async fn unicode_case_equivalent_tag_rename_targets_conflict() {
+    let (_tempdir, storage) = storage().await;
+    let strasse = match storage
+        .create_tag(new_tag("owner-a", "tag-strasse", "Straße"))
+        .await
+        .expect("create unicode tag")
+    {
+        CreateTagOutcome::Created(tag) => tag,
+        other => panic!("expected created tag, got {other:?}"),
+    };
+    let notes = match storage
+        .create_tag(new_tag("owner-a", "tag-notes", "Notes"))
+        .await
+        .expect("create notes tag")
+    {
+        CreateTagOutcome::Created(tag) => tag,
+        other => panic!("expected created tag, got {other:?}"),
+    };
+
+    assert_eq!(
+        storage
+            .rename_tag("owner-a", &notes.id, "STRASSE")
+            .await
+            .expect("unicode conflicting rename"),
+        RenameTagOutcome::Conflict
+    );
+    assert_eq!(
+        storage
+            .get_tag("owner-a", &strasse.id)
+            .await
+            .expect("tag lookup")
+            .expect("unicode tag exists")
+            .name,
+        "Straße"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_tag_renames_to_one_unused_case_folded_name_return_success_and_conflict() {
+    let (_tempdir, storage) = storage().await;
+
+    for iteration in 0..25 {
+        let alpha = match storage
+            .create_tag(new_tag(
+                "owner-a",
+                &format!("tag-alpha-{iteration}"),
+                &format!("Alpha {iteration}"),
+            ))
+            .await
+            .expect("create alpha tag")
+        {
+            CreateTagOutcome::Created(tag) => tag,
+            other => panic!("expected created tag, got {other:?}"),
+        };
+        let beta = match storage
+            .create_tag(new_tag(
+                "owner-a",
+                &format!("tag-beta-{iteration}"),
+                &format!("Beta {iteration}"),
+            ))
+            .await
+            .expect("create beta tag")
+        {
+            CreateTagOutcome::Created(tag) => tag,
+            other => panic!("expected created tag, got {other:?}"),
+        };
+
+        let barrier = Arc::new(Barrier::new(3));
+        let alpha_storage = storage.clone();
+        let alpha_barrier = Arc::clone(&barrier);
+        let alpha_id = alpha.id.clone();
+        let alpha_handle = tokio::spawn(async move {
+            alpha_barrier.wait().await;
+            alpha_storage
+                .rename_tag("owner-a", &alpha_id, &format!("Shared {iteration}"))
+                .await
+        });
+
+        let beta_storage = storage.clone();
+        let beta_barrier = Arc::clone(&barrier);
+        let beta_id = beta.id.clone();
+        let beta_handle = tokio::spawn(async move {
+            beta_barrier.wait().await;
+            beta_storage
+                .rename_tag("owner-a", &beta_id, &format!("SHARED {iteration}"))
+                .await
+        });
+
+        barrier.wait().await;
+        let outcomes = [
+            alpha_handle
+                .await
+                .expect("alpha rename task should not panic"),
+            beta_handle
+                .await
+                .expect("beta rename task should not panic"),
+        ];
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Ok(RenameTagOutcome::Renamed(_))))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Ok(RenameTagOutcome::Conflict)))
+                .count(),
+            1
+        );
+    }
 }
 
 #[tokio::test]

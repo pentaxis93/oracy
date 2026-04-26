@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use caseless::Caseless;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -9,6 +10,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use ulid::Ulid;
+use unicode_normalization::UnicodeNormalization;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -817,6 +819,42 @@ impl Storage {
     ) -> Result<RenameTagOutcome, StorageError> {
         let mut tx = self.pool.begin().await?;
         let name_folded = fold_tag_name(name);
+        let update = sqlx::query(
+            r#"
+            UPDATE tags
+            SET name = ?, name_folded = ?
+            WHERE api_key_id = ? AND id = ?
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM tags AS existing
+                    WHERE existing.api_key_id = ?
+                        AND existing.name_folded = ?
+                        AND existing.id <> ?
+                )
+            RETURNING id, api_key_id, name, created_at
+            "#,
+        )
+        .bind(name)
+        .bind(&name_folded)
+        .bind(api_key_id)
+        .bind(tag_id)
+        .bind(api_key_id)
+        .bind(&name_folded)
+        .bind(tag_id)
+        .fetch_optional(&mut *tx)
+        .await;
+
+        match update {
+            Ok(Some(row)) => {
+                let tag = tag_from_row(row)?;
+                tx.commit().await?;
+                return Ok(RenameTagOutcome::Renamed(tag));
+            }
+            Ok(None) => {}
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {}
+            Err(error) => return Err(error.into()),
+        }
+
         let current: Option<String> = sqlx::query_scalar(
             r#"
             SELECT id
@@ -828,55 +866,13 @@ impl Storage {
         .bind(tag_id)
         .fetch_optional(&mut *tx)
         .await?;
-        if current.is_none() {
-            tx.commit().await?;
-            return Ok(RenameTagOutcome::NotFound);
-        }
 
-        let existing_id: Option<String> = sqlx::query_scalar(
-            r#"
-            SELECT id
-            FROM tags
-            WHERE api_key_id = ? AND name_folded = ?
-            "#,
-        )
-        .bind(api_key_id)
-        .bind(&name_folded)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if existing_id.as_deref().is_some_and(|id| id != tag_id) {
-            tx.commit().await?;
-            return Ok(RenameTagOutcome::Conflict);
-        }
-
-        sqlx::query(
-            r#"
-            UPDATE tags
-            SET name = ?, name_folded = ?
-            WHERE api_key_id = ? AND id = ?
-            "#,
-        )
-        .bind(name)
-        .bind(&name_folded)
-        .bind(api_key_id)
-        .bind(tag_id)
-        .execute(&mut *tx)
-        .await?;
-
-        let row = sqlx::query(
-            r#"
-            SELECT id, api_key_id, name, created_at
-            FROM tags
-            WHERE api_key_id = ? AND id = ?
-            "#,
-        )
-        .bind(api_key_id)
-        .bind(tag_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let tag = tag_from_row(row)?;
         tx.commit().await?;
-        Ok(RenameTagOutcome::Renamed(tag))
+        if current.is_some() {
+            Ok(RenameTagOutcome::Conflict)
+        } else {
+            Ok(RenameTagOutcome::NotFound)
+        }
     }
 
     pub async fn replace_transcript_tags(
@@ -1035,7 +1031,7 @@ fn new_id() -> String {
 }
 
 fn fold_tag_name(value: &str) -> String {
-    value.to_lowercase()
+    value.chars().nfd().default_case_fold().nfd().collect()
 }
 
 fn format_timestamp(value: OffsetDateTime) -> Result<String, StorageError> {
