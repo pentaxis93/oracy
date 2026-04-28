@@ -25,3 +25,8 @@
 - Clarify that `cost_cents` is always present on transcript resources but may be
   `null` when the backend cannot derive a stable estimate from fixed-rate
   pricing inputs.
+- Rewrite the v0.1.0 spec around the durable voice-note artifact: rename the
+  `Transcript` family to `VoiceNote`, replace single-multipart audio upload with
+  the chunked open/push/finalize protocol (with `accepting_chunks` as a
+  contract-visible job status), and add the per-API-key `transcription_model`
+  settings surface enumerating the OpenAI transcription engine identifiers.
