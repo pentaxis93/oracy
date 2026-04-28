@@ -223,6 +223,14 @@ chunks into the job's input.
   any open-call dimension (before finalize) or any accepted submission
   dimension (after finalize) is a client conflict and must return
   `409 Conflict`.
+- When a new open call arrives under the same
+  `(API key, Idempotency-Key)` as an already-finalized attempt, replay
+  matching compares the new open-call body's `recorded_at`,
+  `chunk_count`, `audio_format`, `session_id`, and `language` against
+  the original open-call values. All match returns the original
+  finalized job. Any mismatch is a client conflict and must return
+  `409 Conflict`. The accepted audio content hash does not participate
+  in this comparison because a fresh open call carries no audio bytes.
 - Chunk pushes are idempotent on `(chunk_index, chunk_sha256)`.
 - Deletion of a session referenced by an accepted `session_id` does
   not mutate the stored tuple or invalidate replay of that accepted
@@ -268,6 +276,14 @@ Constraints on transitions:
 - A job enters `failed` only for a terminal classification, after
   exhausting backend-managed retries, or — from `accepting_chunks` —
   for a terminal pre-finalize failure.
+- The backend enforces a bounded abandonment window on jobs in
+  `accepting_chunks`. A job that has not been finalized within that
+  window transitions to terminal `failed` and is no longer eligible
+  to receive chunks or finalize. This bounds the lifetime of
+  unfinalized submission state. The specific window value and the
+  precise abandonment definition are implementation-tunable and not
+  contract-visible; clients observe only the eventual state
+  transition through the `TranscriptionJob` resource.
 - `processing` is leased work, not a terminal assumption. A crashed
   worker or backend restart must allow the job to be reclaimed and
   resumed.
@@ -537,6 +553,9 @@ following are true:
 - A finalize call after every declared chunk has been accepted
   returns `202 Accepted` and durably commits the job, the composed
   audio, and the accepted submission tuple before returning.
+- An `accepting_chunks` job that is not finalized within the
+  backend's abandonment window transitions to terminal `failed`
+  rather than persisting indefinitely.
 - Replaying a submission with the same API key, `Idempotency-Key`,
   and accepted submission tuple returns the same job in every state.
 - Reusing an accepted `Idempotency-Key` with a mismatch on any

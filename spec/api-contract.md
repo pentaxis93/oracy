@@ -139,7 +139,6 @@ Responses:
   any open-call dimension (`recorded_at`, `chunk_count`,
   `audio_format`, `session_id`, `language`) relative to the prior
   attempt
-- `415 Unsupported Media Type`: unsupported `audio_format`
 
 Response body is a `TranscriptionJob` resource. New attempts are in
 status `accepting_chunks`.
@@ -951,6 +950,14 @@ Fields:
 - Same API key + same `Idempotency-Key` + a mismatch on any open-call
   dimension (before finalize) or any accepted submission dimension
   (after finalize) returns `409 Conflict`.
+- For a new open call against an already-finalized attempt under the
+  same `(API key, Idempotency-Key)`, replay matching compares the new
+  open-call body's `recorded_at`, `chunk_count`, `audio_format`,
+  `session_id`, and `language` against the original open-call values.
+  All match returns the original finalized `TranscriptionJob` with
+  `200 OK`. Any mismatch returns `409 Conflict`. The accepted audio
+  content hash does not participate in this comparison because a
+  fresh open call carries no audio bytes.
 - Chunk pushes are idempotent on `(chunk_index, chunk_sha256)`.
 - If the session referenced by an accepted `session_id` is later
   deleted, idempotent replays still return the original
