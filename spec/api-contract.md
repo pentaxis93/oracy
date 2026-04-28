@@ -82,9 +82,11 @@ from one recording regardless of how many chunks the client sent.
 The supported audio formats for `v0.1.0` are `m4a`, `mp3`, `wav`, and
 `webm`. The per-chunk size ceiling is the per-call ceiling of the
 configured transcription engine; `v0.1.0` documents this as
-`25 MiB` per chunk. The `language` parameter, when supplied, is an
-ISO 639-1 hint that constrains transcription to the supplied language
-and disables engine-side auto-detection for the affected job.
+`25 MiB` per chunk (`26,214,400` bytes — the actual server-enforced
+limit, which OpenAI's documentation describes loosely as "25 MB").
+The `language` parameter, when supplied, is an ISO 639-1 hint that
+constrains transcription to the supplied language and disables
+engine-side auto-detection for the affected job.
 
 ### POST `/api/v1/transcription-jobs`
 
@@ -698,6 +700,9 @@ Validation:
 
 - `transcription_model`, when present, must be one of the supported
   transcription model identifiers documented under the engine surface.
+- Field values must be of the documented type. Explicit `null` is not
+  a valid value for any setting field; to leave a setting unchanged,
+  omit the field.
 
 Responses:
 

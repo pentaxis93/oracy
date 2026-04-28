@@ -106,7 +106,9 @@ required, not optional.
   not alter the shape of any endpoint or resource.
 - Per-call audio size is an engine-imposed ceiling. The backend
   enforces the same per-chunk ceiling on each accepted chunk;
-  `v0.1.0` documents this as `25 MiB` per chunk.
+  `v0.1.0` documents this as `25 MiB` per chunk (`26,214,400` bytes
+  — the actual server-enforced limit, which OpenAI's documentation
+  describes loosely as "25 MB").
 
 ### Transcription Pipeline
 
@@ -175,6 +177,10 @@ chunks into the job's input.
   for a `chunk_index` that already has a different accepted hash is a
   conflict and returns `409 Conflict`, leaving the previously
   accepted chunk in place.
+- The `audio_format` declared at open time applies uniformly to all
+  chunks. Per-chunk format integrity is not separately validated; the
+  engine validates the assembled audio and surfaces inconsistency as
+  `audio_invalid`.
 
 **Finalize**
 
@@ -197,6 +203,9 @@ chunks into the job's input.
   continue progressing toward a terminal state. The semantic layer
   requires eventual recovery; it does not commit a numeric recovery-
   time bound.
+- Session deletion between open and finalize does not block finalize.
+  The resulting voice note's `session_id` is `null`, consistent with
+  the standard session-deletion cascade.
 
 #### Idempotency
 
@@ -241,6 +250,11 @@ chunks into the job's input.
 - One `Idempotency-Key` names one attempt forever. An intentional
   fresh attempt after terminal failure requires a new key; reusing
   the original key returns the same terminated job.
+- The composition function used to derive the accepted audio content
+  hash from the accepted chunk hashes is durably pinned within a
+  backend deployment so replay matching survives restart. The exact
+  function is implementation-owned; the persistence property is
+  contract-relevant.
 
 #### Job State Machine
 
