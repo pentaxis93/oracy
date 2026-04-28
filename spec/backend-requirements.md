@@ -104,11 +104,14 @@ required, not optional.
   internal structure carries no contract meaning. Adding or removing
   engines in future releases extends or contracts the enum but does
   not alter the shape of any endpoint or resource.
-- Per-call audio size is an engine-imposed ceiling. The backend
-  enforces the same per-chunk ceiling on each accepted chunk;
-  `v0.1.0` documents this as `25 MiB` per chunk (`26,214,400` bytes
-  — the actual server-enforced limit, which OpenAI's documentation
-  describes loosely as "25 MB").
+- Per-call audio size is an engine-imposed ceiling. Both `v0.1.0`
+  engines share the same per-call ceiling of `25 MiB`
+  (`26,214,400` bytes — the actual server-enforced limit, which
+  OpenAI's documentation describes loosely as "25 MB"). The backend
+  enforces this ceiling on each accepted chunk. The per-chunk
+  ceiling is therefore fixed for `v0.1.0` and does not vary by
+  configured `transcription_model`. A future engine with a different
+  per-call ceiling would require an explicit contract change.
 
 ### Transcription Pipeline
 
@@ -221,6 +224,12 @@ chunks into the job's input.
   finalize time.
 - The accepted submission tuple is an immutable acceptance-time
   record, not a live reference to current resource state.
+- The backend stores the original open-call `chunk_count` and
+  `audio_format` durably alongside the accepted submission tuple for
+  the lifetime of the replay record. These fields participate in
+  pre-finalize replay matching and in terminal-replay matching for a
+  fresh open call under the same `(API key, Idempotency-Key)`, and
+  must survive backend restart.
 - For `recorded_at`, replay matching compares the parsed instant
   normalized to UTC, not the raw wire-format string. Any RFC 3339 UTC
   representation of the same instant is a match.
@@ -244,6 +253,11 @@ chunks into the job's input.
   hash does not participate in this comparison because a fresh open
   call carries no audio bytes.
 - Chunk pushes are idempotent on `(chunk_index, chunk_sha256)`.
+- Idempotency replay takes precedence over session-existence
+  validation on the open call. When a replay match exists under the
+  same `(API key, Idempotency-Key)`, the backend returns the original
+  job even if the supplied `session_id` no longer identifies an
+  existing session for the authenticated API key.
 - Deletion of a session referenced by an accepted `session_id` does
   not mutate the stored tuple or invalidate replay of that accepted
   submission attempt.

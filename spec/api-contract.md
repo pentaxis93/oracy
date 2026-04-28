@@ -74,18 +74,24 @@ Fields:
 
 A voice note is created through a three-step submission protocol: open
 a transcription job, push audio chunks against it, finalize. Audio is
-chunked client-side so each chunk fits the per-call ceiling of the
-configured transcription engine; the server composes the chunks into
-the job's input. The user-facing artifact is one voice note resulting
-from one recording regardless of how many chunks the client sent.
+chunked client-side so each chunk fits within the per-chunk size
+ceiling defined below; the server composes the chunks into the job's
+input. The user-facing artifact is one voice note resulting from one
+recording regardless of how many chunks the client sent.
+
+The `Idempotency-Key` is supplied on the open call only. Subsequent
+chunk and finalize calls scope idempotency through the `{job_id}` in
+the path; they do not carry their own `Idempotency-Key` headers.
 
 The supported audio formats for `v0.1.0` are `m4a`, `mp3`, `wav`, and
-`webm`. The per-chunk size ceiling is the per-call ceiling of the
-configured transcription engine; `v0.1.0` documents this as
-`25 MiB` per chunk (`26,214,400` bytes — the actual server-enforced
-limit, which OpenAI's documentation describes loosely as "25 MB").
-The `language` parameter, when supplied, is an ISO 639-1 hint that
-constrains transcription to the supplied language and disables
+`webm`. The per-chunk size ceiling is `25 MiB` (`26,214,400` bytes —
+the actual server-enforced limit, which OpenAI's documentation
+describes loosely as "25 MB"). Both `v0.1.0` engines share this
+per-call ceiling, so the per-chunk ceiling is fixed for `v0.1.0` and
+does not vary by configured `transcription_model`. A future engine
+with a different per-call ceiling would require an explicit contract
+change. The `language` parameter, when supplied, is an ISO 639-1 hint
+that constrains transcription to the supplied language and disables
 engine-side auto-detection for the affected job.
 
 ### POST `/api/v1/transcription-jobs`
@@ -206,6 +212,8 @@ Responses:
 - `404 Not Found`
 - `409 Conflict`: job is not in `accepting_chunks`, or one or more
   declared chunk indexes have not been accepted
+- `5xx`: synchronous persistence failure during finalize; the job
+  remains in `accepting_chunks` and may be retried
 
 Response body is a `TranscriptionJob` resource.
 
@@ -947,6 +955,10 @@ Fields:
   `chunk_index` order.
 - The accepted submission tuple is an immutable acceptance-time
   record, not a live reference to current resource state.
+- The original open-call body's `chunk_count` and `audio_format` are
+  durably stored alongside the accepted submission tuple for the
+  lifetime of the replay record so that terminal-replay matching
+  against a fresh open call survives backend restart.
 - For `recorded_at`, replay matching compares the parsed instant
   normalized to UTC, not the raw wire-format string. Any RFC 3339 UTC
   representation of the same instant is a match.
@@ -967,6 +979,11 @@ Fields:
   participate in this comparison because a fresh open call carries no
   audio bytes.
 - Chunk pushes are idempotent on `(chunk_index, chunk_sha256)`.
+- Idempotency replay takes precedence over session-existence
+  validation on the open call. When a replay match exists under the
+  same `(API key, Idempotency-Key)`, the backend returns the original
+  `TranscriptionJob` even if the supplied `session_id` no longer
+  identifies an existing session for the authenticated API key.
 - If the session referenced by an accepted `session_id` is later
   deleted, idempotent replays still return the original
   `TranscriptionJob` matched by the stored accepted tuple.
