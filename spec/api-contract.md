@@ -2,13 +2,29 @@
 
 Target release: `v0.1.0`
 
-This document captures the public HTTP contract required by the coordinated
-Flutter client and Rust backend. Polling cadence guidance, rate limits, and
-long-poll versus short-poll behavior are deferred to a later revision.
+## Exigence
+
+A person speaks. The words matter, but the speaking is fleeting. Oracy
+is the system that catches voice and keeps what was said: the user
+records audio, and the system produces a **voice note** — a durable
+text artifact derived from that audio that the user can search, edit,
+organize, and return to later. The voice note is what survives. Audio
+is the input that produces it; once a voice note exists and its
+embedding is stored, the audio's job on the server is done.
+
+This contract is the wire surface between the Oracy client and the
+Oracy backend. It encodes how voice notes are created (chunked audio
+upload composed into a transcription job), how they are read and
+mutated, how they are organized (free-text tags and optional
+sessions), how they are searched (keyword, semantic, hybrid against
+the current voice-note text and its current embedding), and how the
+user configures the transcription engine that produces them. Polling
+cadence guidance, rate limits, and long-poll versus short-poll
+behavior are deferred to a later revision.
 
 ## Authentication
 
-- All endpoints below require `Authorization: Bearer <api_key>`.
+- All endpoints require `Authorization: Bearer <api_key>`.
 - The `Bearer` auth scheme is matched case-insensitively.
 - API keys are provisioned out-of-band by the operator.
 - Idempotency is scoped per authenticated API key.
@@ -54,77 +70,173 @@ Fields:
 - `message`: human-readable summary
 - `details`: optional structured context for validation or conflict errors
 
-## Endpoint Inventory
+## Voice Note Submission
 
-### POST `/api/v1/transcriptions`
+A voice note is created through a three-step submission protocol: open
+a transcription job, push audio chunks against it, finalize. Audio is
+chunked client-side so each chunk fits the per-call ceiling of the
+configured transcription engine; the server composes the chunks into
+the job's input. The user-facing artifact is one voice note resulting
+from one recording regardless of how many chunks the client sent.
 
-Submit audio for asynchronous transcription.
+The supported audio formats for `v0.1.0` are `m4a`, `mp3`, `wav`, and
+`webm`. The per-chunk size ceiling is the per-call ceiling of the
+configured transcription engine; `v0.1.0` documents this as
+`25 MiB` per chunk. The `language` parameter, when supplied, is an
+ISO 639-1 hint that constrains transcription to the supplied language
+and disables engine-side auto-detection for the affected job.
+
+### POST `/api/v1/transcription-jobs`
+
+Open a submission attempt. No audio bytes cross this endpoint.
+
+Request:
+
+- Content type: `application/json`
+- Headers:
+  - `Idempotency-Key` required
+- Body:
+
+```json
+{
+  "recorded_at": "2026-04-21T18:29:55Z",
+  "chunk_count": 3,
+  "audio_format": "m4a",
+  "session_id": "01JS9P0X3NM4Q5R6S7T8U9V0W1",
+  "language": "en"
+}
+```
+
+Fields:
+
+- `recorded_at` required: RFC 3339 UTC timestamp describing when the
+  audio was recorded
+- `chunk_count` required: number of chunks the client will push;
+  integer in `1..256`
+- `audio_format` required: one of the supported audio formats
+- `session_id` optional: existing session identifier owned by the
+  authenticated API key
+- `language` optional: ISO 639-1 language hint
+
+Validation:
+
+- `chunk_count` must be a positive integer not exceeding `256`.
+- `session_id`, when present, must identify an existing session owned
+  by the authenticated API key.
+
+Responses:
+
+- `201 Created`: new submission attempt opened, or replay of an
+  already-open attempt under the same `(API key, Idempotency-Key)`
+  with a matching open-call body
+- `200 OK`: replay of an already-finalized attempt under the same
+  `(API key, Idempotency-Key)`
+- `400 Bad Request`: invalid idempotency header or invalid body fields
+- `401 Unauthorized`: missing or invalid API key
+- `404 Not Found`: supplied `session_id` does not exist for the
+  authenticated API key
+- `409 Conflict`: same `(API key, Idempotency-Key)` with a mismatch on
+  any open-call dimension (`recorded_at`, `chunk_count`,
+  `audio_format`, `session_id`, `language`) relative to the prior
+  attempt
+- `415 Unsupported Media Type`: unsupported `audio_format`
+
+Response body is a `TranscriptionJob` resource. New attempts are in
+status `accepting_chunks`.
+
+### POST `/api/v1/transcription-jobs/{job_id}/chunks`
+
+Push one chunk of audio against an open submission attempt.
 
 Request:
 
 - Content type: `multipart/form-data`
 - Fields:
-  - `file` required: uploaded audio file
-  - `recorded_at` required: RFC 3339 UTC timestamp describing when the audio
-    was recorded
-  - `session_id` optional: existing session identifier owned by the
-    authenticated API key
-  - `language` optional: ISO 639-1 language hint
-- Headers:
-  - `Idempotency-Key` required
+  - `chunk_index` required: zero-based chunk position, integer in
+    `0..chunk_count-1`
+  - `chunk_sha256` required: lowercase hex SHA-256 of the chunk bytes
+  - `file` required: the chunk's audio bytes
 
 Validation:
 
-- Accepted file formats are `m4a`, `mp3`, `wav`, and `webm`.
-- Maximum upload size is `25 MiB`.
-- `session_id`, when present on a new submission attempt, must identify an
-  existing session owned by the authenticated API key.
-- `language`, when present, constrains transcription to the supplied language.
-  The backend does not auto-detect language for that submission.
+- The job must exist and be in status `accepting_chunks`.
+- `chunk_index` must fall within `0..chunk_count-1`.
+- The chunk bytes must not exceed the per-chunk size ceiling.
+- The supplied `chunk_sha256` must match the SHA-256 of the received
+  chunk bytes.
+
+Idempotency at chunk granularity: re-submitting the same
+`(chunk_index, chunk_sha256)` pair against the same job is a no-op
+that returns `204 No Content`. A chunk push for a `chunk_index` that
+already has a different accepted hash returns `409 Conflict` and
+leaves the previously accepted chunk in place.
 
 Responses:
 
-- `202 Accepted`: new durable job accepted, or replay of an existing
-  nonterminal job
-- `200 OK`: replay of an existing terminal job
-- `400 Bad Request`: invalid idempotency header or invalid request fields
-- `401 Unauthorized`: missing or invalid API key
-- `404 Not Found`: on a new submission attempt, supplied `session_id` does not
-  exist for the authenticated API key
-- `413 Payload Too Large`: file exceeds allowed size
-- `415 Unsupported Media Type`: unsupported audio format
-- `409 Conflict`: same API key and `Idempotency-Key`, but a mismatch on audio
-  content, `recorded_at`, `session_id`, or `language` relative to the accepted
-  submission
-- `5xx`: synchronous failure before durable acceptance
+- `204 No Content`: chunk accepted, or idempotent replay of an
+  already-accepted chunk
+- `400 Bad Request`: malformed multipart, missing fields, or
+  `chunk_sha256` does not match the chunk bytes
+- `401 Unauthorized`
+- `404 Not Found`: no such job for the authenticated API key
+- `409 Conflict`: job is not in `accepting_chunks`, or the
+  `chunk_index` already has a different accepted hash
+- `413 Payload Too Large`: chunk bytes exceed the per-chunk ceiling
 
-Response body for `200` and `202` is a `TranscriptionJob` resource.
+### POST `/api/v1/transcription-jobs/{job_id}/finalize`
 
-### GET `/api/v1/transcriptions/{job_id}`
+Seal a submission attempt and commit it to durable acceptance.
+
+Request body is empty.
+
+The backend composes the accepted chunks (in `chunk_index` order) into
+a single accepted audio content hash and persists the composed audio
+artifact. Durable acceptance commits at this moment, not on the
+per-chunk pushes. The job transitions `accepting_chunks → queued`.
+
+Responses:
+
+- `202 Accepted`: new finalization, durable acceptance committed
+- `200 OK`: replay of an already-finalized job
+- `400 Bad Request`: declared/observed chunk set is internally
+  inconsistent
+- `401 Unauthorized`
+- `404 Not Found`
+- `409 Conflict`: job is not in `accepting_chunks`, or one or more
+  declared chunk indexes have not been accepted
+
+Response body is a `TranscriptionJob` resource.
+
+### GET `/api/v1/transcription-jobs/{job_id}`
 
 Fetch the current state of a transcription job.
 
 Responses:
 
 - `200 OK`: job found and owned by the authenticated API key
-- `401 Unauthorized`: missing or invalid API key
-- `404 Not Found`: no such job for the authenticated API key
+- `401 Unauthorized`
+- `404 Not Found`
 
 Response body is a `TranscriptionJob` resource.
 
-### GET `/api/v1/transcripts`
+## Voice Notes
 
-List completed transcripts for the authenticated API key.
+### GET `/api/v1/voice-notes`
+
+List voice notes for the authenticated API key. This endpoint is the
+unified collection for both history and search. `v0.1.0` does not
+duplicate the collection surface: history with no `q` and search with
+`q` share the same shape, filters, and ordering rules.
 
 Query parameters:
 
 - `cursor` optional
 - `limit` optional
 - `q` optional: search query text
-- `search_mode` optional when `q` is present: one of `keyword`, `semantic`,
-  `hybrid`; defaults to `hybrid` when omitted
-- `tag_id` optional and repeatable; repeated values combine by intersection
-  (`AND`)
+- `search_mode` optional when `q` is present: one of `keyword`,
+  `semantic`, `hybrid`; defaults to `hybrid` when omitted
+- `tag_id` optional and repeatable; repeated values combine by
+  intersection (`AND`)
 - `session_id` optional
 - `recorded_after` optional: exclusive lower bound on `recorded_at`
 - `recorded_before` optional: inclusive upper bound on `recorded_at`
@@ -134,41 +246,39 @@ Query parameters:
 Responses:
 
 - `200 OK`
-- `400 Bad Request`: invalid query parameter values, or `search_mode` supplied
-  without `q`
+- `400 Bad Request`: invalid query parameter values, or `search_mode`
+  supplied without `q`
 - `401 Unauthorized`
 
 Notes:
 
-- This endpoint is the unified transcript collection for both history and
-  search.
-- Without `q`, the endpoint returns transcript history ordered newest-first by
-  transcript `created_at`, with descending `id` as the deterministic
-  tiebreaker for cursor pagination.
-- With `q`, the endpoint returns transcript search results using the same
-  `Transcript` resource shape, filters, and collection envelope. This is an
-  explicit `v0.1.0` governance decision to avoid duplicating transcript
-  collection surface with no semantic gain.
-- If `q` is present and `search_mode` is omitted, the backend uses `hybrid`.
-- Search results are always transcript resources.
-- Keyword search may match current transcript text and historical
-  `TranscriptVersion` text, but the returned item is always the parent
-  `Transcript`.
-- Semantic and hybrid search use the current embedding. After a transcript
-  text edit, semantic freshness is eventual rather than immediate.
-- Search results are ordered by backend relevance score descending, then by
-  transcript `created_at` descending, then by descending `id` as the final
-  deterministic tiebreaker for cursor pagination.
-- Repeated `tag_id` filters combine by intersection: a transcript matches only
-  if it is associated with all supplied tags.
-- Failed jobs and in-flight jobs are not listed.
+- Without `q`, the endpoint returns voice-note history ordered
+  newest-first by voice-note `created_at`, with descending `id` as
+  the deterministic tiebreaker for cursor pagination.
+- With `q`, the endpoint returns voice-note search results using the
+  same `VoiceNote` resource shape, filters, and collection envelope.
+- If `q` is present and `search_mode` is omitted, the backend uses
+  `hybrid`.
+- Search results are always voice-note resources.
+- Keyword search may match current voice-note text and historical
+  `VoiceNoteVersion` text, but the returned item is always the parent
+  `VoiceNote`.
+- Semantic and hybrid search use the current embedding. After a
+  voice-note text edit, semantic freshness is eventual rather than
+  immediate.
+- Search results are ordered by backend relevance score descending,
+  then by voice-note `created_at` descending, then by descending `id`
+  as the final deterministic tiebreaker for cursor pagination.
+- Repeated `tag_id` filters combine by intersection: a voice note
+  matches only if it is associated with all supplied tags.
+- Failed and in-flight transcription jobs are not listed here.
 
-Response body is a transcript collection envelope whose `items` are
-`Transcript` resources.
+Response body is a voice-note collection envelope whose `items` are
+`VoiceNote` resources.
 
-### GET `/api/v1/transcripts/{transcript_id}`
+### GET `/api/v1/voice-notes/{voice_note_id}`
 
-Fetch one completed transcript for the authenticated API key.
+Fetch one voice note for the authenticated API key.
 
 Responses:
 
@@ -178,20 +288,20 @@ Responses:
 
 Notes:
 
-- Only completed transcripts are addressable here.
-- A job ID is never valid on this endpoint.
+- Only completed voice notes are addressable here. A
+  `TranscriptionJob` ID is never valid on this endpoint.
 
-Response body is a `Transcript` resource.
+Response body is a `VoiceNote` resource.
 
-### PATCH `/api/v1/transcripts/{transcript_id}`
+### PATCH `/api/v1/voice-notes/{voice_note_id}`
 
-Replace the current transcript text.
+Replace the current voice-note text.
 
 Request body:
 
 ```json
 {
-  "transcript": "Updated transcript text."
+  "text": "Updated voice note text."
 }
 ```
 
@@ -204,20 +314,22 @@ Responses:
 
 Notes:
 
-- The request changes transcript text only.
-- A successful edit creates one new `TranscriptVersion` and moves
-  `Transcript.current_version_id` to the new version.
+- The request changes voice-note text only.
+- Editing is the only adjustment path for an existing voice note. The
+  backend does not re-transcribe audio against an existing voice note.
+- A successful edit creates one new `VoiceNoteVersion` and moves
+  `VoiceNote.current_version_id` to the new version.
 - Prior versions remain available through the version-history endpoint.
 - Segment timing remains unchanged by text edits.
-- Embedding regeneration is asynchronous. Full-text reads return the edited
-  text immediately; semantic and hybrid search may lag until regeneration
-  completes.
+- Embedding regeneration is asynchronous. Full-text reads return the
+  edited text immediately; semantic and hybrid search may lag until
+  regeneration completes.
 
-Response body is the updated `Transcript` resource.
+Response body is the updated `VoiceNote` resource.
 
-### DELETE `/api/v1/transcripts/{transcript_id}`
+### DELETE `/api/v1/voice-notes/{voice_note_id}`
 
-Hard-delete a transcript.
+Hard-delete a voice note.
 
 Responses:
 
@@ -227,15 +339,15 @@ Responses:
 
 Notes:
 
-- Deletion cascades to transcript versions, segments, the current embedding,
-  and tag associations.
-- The originating succeeded `TranscriptionJob` survives as the durable replay
-  record for the accepted submission attempt, and its `transcript_id` becomes
-  `null`.
+- Deletion cascades to voice-note versions, segments, the current
+  embedding, and tag associations.
+- The originating succeeded `TranscriptionJob` survives as the durable
+  replay record for the accepted submission attempt, and its
+  `voice_note_id` becomes `null`.
 
-### GET `/api/v1/transcripts/{transcript_id}/versions`
+### GET `/api/v1/voice-notes/{voice_note_id}/versions`
 
-List transcript versions for one transcript.
+List voice-note versions for one voice note.
 
 Query parameters:
 
@@ -251,16 +363,16 @@ Responses:
 
 Notes:
 
-- Versions are returned newest-first by `created_at`, with descending `id` as
-  the deterministic tiebreaker for cursor pagination.
+- Versions are returned newest-first by `created_at`, with descending
+  `id` as the deterministic tiebreaker for cursor pagination.
 - Version history is linear and append-only.
 
 Response body is a collection envelope whose `items` are
-`TranscriptVersion` resources.
+`VoiceNoteVersion` resources.
 
-### GET `/api/v1/transcripts/{transcript_id}/segments`
+### GET `/api/v1/voice-notes/{voice_note_id}/segments`
 
-List timing segments for one transcript.
+List timing segments for one voice note.
 
 Query parameters:
 
@@ -277,13 +389,14 @@ Responses:
 Notes:
 
 - Segments are returned in ascending `position` order.
-- Segment content is stable across transcript text edits.
+- Segment content is stable across voice-note text edits.
 
-Response body is a collection envelope whose `items` are `Segment` resources.
+Response body is a collection envelope whose `items` are `Segment`
+resources.
 
-### PUT `/api/v1/transcripts/{transcript_id}/tags`
+### PUT `/api/v1/voice-notes/{voice_note_id}/tags`
 
-Replace the transcript's entire tag set.
+Replace the voice note's entire tag set.
 
 Request body:
 
@@ -298,17 +411,19 @@ Responses:
 - `200 OK`
 - `400 Bad Request`
 - `401 Unauthorized`
-- `404 Not Found`: transcript or one or more referenced tags not found for the
-  authenticated API key
+- `404 Not Found`: voice note or one or more referenced tags not found
+  for the authenticated API key
 
 Notes:
 
-- `PUT` replaces the transcript's entire tag set. The request body is the full
-  desired set.
+- `PUT` replaces the voice note's entire tag set. The request body is
+  the full desired set.
 - Duplicate `tag_ids` are invalid.
-- Replacing tags does not create a new `TranscriptVersion`.
+- Replacing tags does not create a new `VoiceNoteVersion`.
 
-Response body is the updated `Transcript` resource.
+Response body is the updated `VoiceNote` resource.
+
+## Tags
 
 ### GET `/api/v1/tags`
 
@@ -327,14 +442,16 @@ Responses:
 
 Notes:
 
-- Tags are returned newest-first by `created_at`, with descending `id` as the
-  deterministic tiebreaker for cursor pagination.
+- Tags are returned newest-first by `created_at`, with descending `id`
+  as the deterministic tiebreaker for cursor pagination.
 
-Response body is a collection envelope whose `items` are `Tag` resources.
+Response body is a collection envelope whose `items` are `Tag`
+resources.
 
 ### POST `/api/v1/tags`
 
-Create a tag, or return the existing tag with the same case-insensitive name.
+Create a tag, or return the existing tag with the same case-insensitive
+name.
 
 Request body:
 
@@ -347,8 +464,8 @@ Request body:
 Responses:
 
 - `201 Created`: new tag created
-- `200 OK`: a tag with the same case-insensitive name already exists for the
-  authenticated API key
+- `200 OK`: a tag with the same case-insensitive name already exists
+  for the authenticated API key
 - `400 Bad Request`
 - `401 Unauthorized`
 
@@ -389,12 +506,12 @@ Responses:
 - `400 Bad Request`
 - `401 Unauthorized`
 - `404 Not Found`
-- `409 Conflict`: another tag with the same case-insensitive name already
-  exists for the authenticated API key
+- `409 Conflict`: another tag with the same case-insensitive name
+  already exists for the authenticated API key
 
 Notes:
 
-- A successful rename updates the visible tag name on every transcript
+- A successful rename updates the visible tag name on every voice note
   associated with that tag.
 
 Response body is the updated `Tag` resource.
@@ -411,8 +528,10 @@ Responses:
 
 Notes:
 
-- Deleting a tag removes its transcript associations but does not delete any
-  transcript.
+- Deleting a tag removes its voice-note associations but does not
+  delete any voice note.
+
+## Sessions
 
 ### GET `/api/v1/sessions`
 
@@ -431,10 +550,11 @@ Responses:
 
 Notes:
 
-- Sessions are returned newest-first by `created_at`, with descending `id` as
-  the deterministic tiebreaker for cursor pagination.
+- Sessions are returned newest-first by `created_at`, with descending
+  `id` as the deterministic tiebreaker for cursor pagination.
 
-Response body is a collection envelope whose `items` are `Session` resources.
+Response body is a collection envelope whose `items` are `Session`
+resources.
 
 ### POST `/api/v1/sessions`
 
@@ -501,24 +621,24 @@ Responses:
 
 Notes:
 
-- Deleting a session preserves contained transcripts and sets their
+- Deleting a session preserves contained voice notes and sets their
   `session_id` to `null`.
-- Deleting a session does not invalidate previously accepted replay records
-  whose stored submission tuple referenced that session.
+- Deleting a session does not invalidate previously accepted replay
+  records whose stored submission tuple referenced that session.
 
-### GET `/api/v1/sessions/{session_id}/transcripts`
+### GET `/api/v1/sessions/{session_id}/voice-notes`
 
-List completed transcripts that belong to one session.
+List voice notes that belong to one session.
 
 Query parameters:
 
 - `cursor` optional
 - `limit` optional
 - `q` optional
-- `search_mode` optional when `q` is present: one of `keyword`, `semantic`,
-  `hybrid`; defaults to `hybrid` when omitted
-- `tag_id` optional and repeatable; repeated values combine by intersection
-  (`AND`)
+- `search_mode` optional when `q` is present: one of `keyword`,
+  `semantic`, `hybrid`; defaults to `hybrid` when omitted
+- `tag_id` optional and repeatable; repeated values combine by
+  intersection (`AND`)
 - `recorded_after` optional
 - `recorded_before` optional
 - `created_after` optional
@@ -533,15 +653,83 @@ Responses:
 
 Notes:
 
-- This endpoint applies the same collection semantics as `GET /api/v1/transcripts`
-  but with the session scope fixed by the path, including the same ordering
-  and time-bound semantics.
-- If `q` is present and `search_mode` is omitted, the backend uses `hybrid`.
-- Repeated `tag_id` filters combine by intersection: a transcript matches only
-  if it is associated with all supplied tags.
+- This endpoint applies the same collection semantics as
+  `GET /api/v1/voice-notes` but with the session scope fixed by the
+  path, including the same ordering and time-bound semantics.
+- If `q` is present and `search_mode` is omitted, the backend uses
+  `hybrid`.
+- Repeated `tag_id` filters combine by intersection.
 
-Response body is a transcript collection envelope whose `items` are
-`Transcript` resources.
+Response body is a voice-note collection envelope whose `items` are
+`VoiceNote` resources.
+
+## Settings
+
+The settings resource carries user-level configuration scoped to the
+authenticated API key. `v0.1.0` exposes one setting:
+`transcription_model`.
+
+### GET `/api/v1/settings`
+
+Fetch the authenticated API key's settings.
+
+Responses:
+
+- `200 OK`
+- `401 Unauthorized`
+
+Response body is a `Settings` resource. On first read for an API key
+that has never updated settings, the response carries the documented
+defaults.
+
+### PATCH `/api/v1/settings`
+
+Partial update of settings. Omitted fields are left unchanged.
+
+Request body:
+
+```json
+{
+  "transcription_model": "gpt-4o-transcribe"
+}
+```
+
+Validation:
+
+- `transcription_model`, when present, must be one of the supported
+  transcription model identifiers documented under the engine surface.
+
+Responses:
+
+- `200 OK`
+- `400 Bad Request`: unknown field or unsupported model identifier
+- `401 Unauthorized`
+
+Notes:
+
+- The selected `transcription_model` applies to every transcription job
+  that reaches `queued` after the update. Jobs already past `queued`
+  are unaffected.
+
+Response body is the updated `Settings` resource.
+
+### Engine Surface
+
+The `v0.1.x` engine family is OpenAI's transcription models. `v0.1.0`
+ships two model identifiers:
+
+- `gpt-4o-mini-transcribe` — default. Fast, low-cost, accuracy
+  suitable for typical voice notes.
+- `gpt-4o-transcribe` — quality upgrade. Higher accuracy at higher
+  cost, suitable for difficult audio (accents, noise, technical
+  vocabulary).
+
+The default `transcription_model` for an API key that has never
+updated settings is `gpt-4o-mini-transcribe`.
+
+Engine identifiers in the contract are opaque strings. Adding or
+removing engines in future releases does not alter the shape of any
+endpoint or resource.
 
 ## Resource Schemas
 
@@ -550,44 +738,150 @@ Response body is a transcript collection envelope whose `items` are
 ```json
 {
   "id": "01JS8D2PR4W8VW6TQZ0N8M1T0K",
-  "status": "retry_waiting",
+  "status": "accepting_chunks",
   "created_at": "2026-04-21T18:30:00Z",
-  "updated_at": "2026-04-21T18:31:12Z",
-  "retry_count": 1,
+  "updated_at": "2026-04-21T18:30:14Z",
+  "chunk_count": 3,
+  "chunks_received": 1,
+  "retry_count": 0,
   "max_retries": 3,
-  "next_attempt_at": "2026-04-21T18:32:12Z",
-  "failure_code": "engine_timeout",
-  "failure_message": "The transcription attempt timed out while processing audio.",
-  "retryable_by_client": true,
-  "transcript_id": null
+  "next_attempt_at": null,
+  "failure_code": null,
+  "failure_message": null,
+  "retryable_by_client": null,
+  "voice_note_id": null
 }
 ```
 
 Fields:
 
 - `id`: job identifier
-- `status`: one of `queued`, `processing`, `retry_waiting`, `succeeded`,
-  `failed`
-- `created_at`: acceptance timestamp
-- `updated_at`: last state-transition timestamp
-- `retry_count`: number of backend retry attempts already consumed; always
-  returned
+- `status`: one of `accepting_chunks`, `queued`, `processing`,
+  `retry_waiting`, `succeeded`, `failed`
+- `created_at`: open-call timestamp
+- `updated_at`: last state-transition or chunk-acceptance timestamp
+- `chunk_count`: declared chunk count from the open call
+- `chunks_received`: number of distinct accepted chunks; reaches
+  `chunk_count` before finalize succeeds
+- `retry_count`: number of backend retry attempts already consumed;
+  always returned
 - `max_retries`: maximum backend retry attempts for this job
-- `next_attempt_at`: returned when `status=retry_waiting`, otherwise omitted or
-  `null`
+- `next_attempt_at`: returned when `status=retry_waiting`, otherwise
+  omitted or `null`
 - `failure_code`: present when a failure classification exists
-- `failure_message`: human-readable explanation aligned with `failure_code`
-- `retryable_by_client`: whether a terminal failed job should be retried by
-  creating a fresh submission with a new `Idempotency-Key`
-- `transcript_id`: present when `status=succeeded` and the transcript is still
-  addressable; `null` for non-succeeded jobs and for succeeded jobs whose
-  transcript has been deleted
+- `failure_message`: human-readable explanation aligned with
+  `failure_code`
+- `retryable_by_client`: whether a terminal failed job should be
+  retried by creating a fresh submission with a new `Idempotency-Key`
+- `voice_note_id`: present when `status=succeeded` and the voice note
+  is still addressable; `null` for non-succeeded jobs and for
+  succeeded jobs whose voice note has been deleted
 
 Semantics:
 
-- `retry_count` and `next_attempt_at` are part of the job resource because the
-  client uses them for UX and polling suppression.
-- The same `TranscriptionJob` resource is returned for idempotent replays.
+- `chunk_count` and `chunks_received` are part of the job resource so
+  the client can render upload progress and decide when to call
+  `finalize`.
+- `retry_count` and `next_attempt_at` are part of the job resource
+  because the client uses them for UX and polling suppression.
+- The same `TranscriptionJob` resource is returned for idempotent
+  replays.
+
+### `VoiceNote`
+
+```json
+{
+  "id": "01JS8D6E2S3T1J7H9J2Q2N4P5R",
+  "current_version_id": "01JS9P1D6CK9M0N1P2Q3R4S5T6",
+  "text": "Hello, this is a voice note.",
+  "audio_duration_seconds": 12.5,
+  "audio_format": "m4a",
+  "audio_size_bytes": 401280,
+  "language": "en",
+  "model": "gpt-4o-mini-transcribe",
+  "processing_time_ms": 1843,
+  "cost_cents": 1,
+  "created_at": "2026-04-21T18:31:19Z",
+  "recorded_at": "2026-04-21T18:29:55Z",
+  "session_id": "01JS9P0X3NM4Q5R6S7T8U9V0W1",
+  "tags": [
+    {
+      "id": "01JS9P0Q0THR2X3E4A5B6C7D8E",
+      "name": "Meeting",
+      "created_at": "2026-04-21T18:31:30Z"
+    }
+  ]
+}
+```
+
+Fields:
+
+- `id`: voice-note identifier
+- `current_version_id`: identifier of the current voice-note version
+- `text`: current voice-note text
+- `audio_duration_seconds`: composed audio duration
+- `audio_format`: accepted audio format
+- `audio_size_bytes`: composed audio size in bytes
+- `language`: the language hint or detected language for the
+  transcription
+- `model`: transcription engine identifier in use when the voice note
+  was produced
+- `processing_time_ms`: total server-side processing time
+- `cost_cents`: backend cost estimate in cents; always present and
+  nullable
+- `created_at`: voice-note creation timestamp
+- `recorded_at`: client-supplied audio capture timestamp
+- `session_id`: associated session identifier, or `null`
+- `tags`: associated `Tag` resources
+
+Semantics:
+
+- `audio_duration_seconds`, `audio_format`, and `audio_size_bytes` are
+  durable provenance properties of the voice note. The composed audio
+  bytes are released from the server once the originating job reaches
+  a terminal state; these fields persist regardless.
+
+### `VoiceNoteVersion`
+
+```json
+{
+  "id": "01JS9P1D6CK9M0N1P2Q3R4S5T6",
+  "voice_note_id": "01JS8D6E2S3T1J7H9J2Q2N4P5R",
+  "text": "Hello, this is a voice note.",
+  "created_at": "2026-04-21T18:31:19Z"
+}
+```
+
+Fields:
+
+- `id`: voice-note-version identifier
+- `voice_note_id`: parent voice-note identifier
+- `text`: voice-note text captured in this version
+- `created_at`: version creation timestamp
+
+### `Segment`
+
+```json
+{
+  "id": "01JS9P1K2AQ3B4C5D6E7F8G9H0",
+  "voice_note_id": "01JS8D6E2S3T1J7H9J2Q2N4P5R",
+  "position": 0,
+  "start_ms": 0,
+  "end_ms": 1480,
+  "text": "Hello, this is a voice note."
+}
+```
+
+Fields:
+
+- `id`: segment identifier
+- `voice_note_id`: parent voice-note identifier
+- `position`: zero-based segment order
+- `start_ms`: segment start offset in milliseconds, measured from the
+  start of the composed audio
+- `end_ms`: segment end offset in milliseconds, measured from the
+  start of the composed audio
+- `text`: segment text captured from the transcription result
 
 ### `Tag`
 
@@ -621,121 +915,64 @@ Fields:
 - `name`: session display name
 - `created_at`: session creation timestamp
 
-### `Transcript`
+### `Settings`
 
 ```json
 {
-  "id": "01JS8D6E2S3T1J7H9J2Q2N4P5R",
-  "current_version_id": "01JS9P1D6CK9M0N1P2Q3R4S5T6",
-  "transcript": "Hello, this is a test recording.",
-  "audio_duration_seconds": 12.5,
-  "audio_format": "wav",
-  "audio_size_bytes": 401280,
-  "transcript_language": "en",
-  "model": "general-transcription-v1",
-  "processing_time_ms": 1843,
-  "cost_cents": 1,
-  "created_at": "2026-04-21T18:31:19Z",
-  "recorded_at": "2026-04-21T18:29:55Z",
-  "session_id": "01JS9P0X3NM4Q5R6S7T8U9V0W1",
-  "tags": [
-    {
-      "id": "01JS9P0Q0THR2X3E4A5B6C7D8E",
-      "name": "Meeting",
-      "created_at": "2026-04-21T18:31:30Z"
-    }
-  ]
+  "transcription_model": "gpt-4o-mini-transcribe"
 }
 ```
 
 Fields:
 
-- `id`: transcript identifier
-- `current_version_id`: identifier of the current transcript version
-- `transcript`: current transcript text
-- `audio_duration_seconds`: source audio duration
-- `audio_format`: accepted audio format
-- `audio_size_bytes`: original uploaded size
-- `transcript_language`: detected or hinted language
-- `model`: transcription engine identifier
-- `processing_time_ms`: total server-side processing time
-- `cost_cents`: backend cost estimate in cents; always present and nullable
-- `created_at`: transcript creation timestamp
-- `recorded_at`: client-supplied audio capture timestamp
-- `session_id`: associated session identifier, or `null`
-- `tags`: associated `Tag` resources
-
-### `TranscriptVersion`
-
-```json
-{
-  "id": "01JS9P1D6CK9M0N1P2Q3R4S5T6",
-  "transcript_id": "01JS8D6E2S3T1J7H9J2Q2N4P5R",
-  "transcript": "Hello, this is a test recording.",
-  "created_at": "2026-04-21T18:31:19Z"
-}
-```
-
-Fields:
-
-- `id`: transcript-version identifier
-- `transcript_id`: parent transcript identifier
-- `transcript`: transcript text captured in this version
-- `created_at`: version creation timestamp
-
-### `Segment`
-
-```json
-{
-  "id": "01JS9P1K2AQ3B4C5D6E7F8G9H0",
-  "transcript_id": "01JS8D6E2S3T1J7H9J2Q2N4P5R",
-  "position": 0,
-  "start_ms": 0,
-  "end_ms": 1480,
-  "text": "Hello, this is a test recording."
-}
-```
-
-Fields:
-
-- `id`: segment identifier
-- `transcript_id`: parent transcript identifier
-- `position`: zero-based segment order
-- `start_ms`: segment start offset in milliseconds
-- `end_ms`: segment end offset in milliseconds
-- `text`: segment text captured from the transcription result
+- `transcription_model`: the engine identifier used for every
+  transcription job that reaches `queued` after the most recent update
 
 ## Idempotency Rules
 
-- The backend matches a replay by `API key + Idempotency-Key + accepted audio
-content hash + recorded_at + session_id + language`.
-- The accepted submission tuple is an immutable acceptance-time record, not a
-  live reference to current resource state.
-- For `recorded_at`, replay matching compares the parsed instant normalized to
-  UTC, not the raw wire-format string. Any RFC 3339 UTC representation of the
-  same instant is a match.
-- Omitted optional `session_id` and `language` values participate as `null`.
-- Same API key + same `Idempotency-Key` + same accepted submission tuple
-  returns the same `TranscriptionJob`.
-- Same API key + same `Idempotency-Key` + a mismatch on any accepted
-  submission dimension returns `409 Conflict`.
-- If the session referenced by an accepted `session_id` is later deleted,
-  idempotent replays still return the original `TranscriptionJob` matched by
-  the stored accepted tuple.
-- If the transcript created by a succeeded job is later deleted, idempotent
-  replays still return the original succeeded `TranscriptionJob` with
-  `transcript_id=null`.
+- A submission attempt is identified by
+  `API key + Idempotency-Key + accepted audio content hash +
+  recorded_at + session_id + language`.
+- The `Idempotency-Key` is supplied on the open call
+  (`POST /api/v1/transcription-jobs`) and governs replay matching for
+  the entire submission attempt.
+- The accepted audio content hash is computed at finalize time as a
+  hash composed deterministically from the accepted chunk hashes in
+  `chunk_index` order.
+- The accepted submission tuple is an immutable acceptance-time
+  record, not a live reference to current resource state.
+- For `recorded_at`, replay matching compares the parsed instant
+  normalized to UTC, not the raw wire-format string. Any RFC 3339 UTC
+  representation of the same instant is a match.
+- Omitted optional `session_id` and `language` values participate as
+  `null`.
+- Same API key + same `Idempotency-Key` + same accepted submission
+  tuple returns the same `TranscriptionJob`.
+- Same API key + same `Idempotency-Key` + a mismatch on any open-call
+  dimension (before finalize) or any accepted submission dimension
+  (after finalize) returns `409 Conflict`.
+- Chunk pushes are idempotent on `(chunk_index, chunk_sha256)`.
+- If the session referenced by an accepted `session_id` is later
+  deleted, idempotent replays still return the original
+  `TranscriptionJob` matched by the stored accepted tuple.
+- If the voice note created by a succeeded job is later deleted,
+  idempotent replays still return the original succeeded
+  `TranscriptionJob` with `voice_note_id=null`.
 - A new submission attempt after terminal failure must use a new
   `Idempotency-Key`.
 
 ## Contract Notes
 
-- This contract intentionally omits a synchronous transcript-returning upload
-  endpoint.
+- This contract intentionally omits a synchronous voice-note-returning
+  upload endpoint.
 - This contract intentionally omits `prompt` from `v0.1.0`.
-- This contract intentionally omits public API-key management endpoints.
-- Speaker diarization, branching edit history, transcript-to-session
-  reassignment after submission, and embedding export are deferred beyond
-  `v0.1.0`.
-- Polling cadence, rate limits, and backoff advice are deferred to a later API
-  contract revision.
+- This contract intentionally omits public API-key management
+  endpoints.
+- This contract intentionally omits a runtime engine-discovery
+  endpoint; the supported transcription model identifiers are
+  enumerated in this document.
+- This contract intentionally omits embedding-vector export.
+- Speaker diarization, branching edit history, and voice-note-to-
+  session reassignment after submission are deferred beyond `v0.1.0`.
+- Polling cadence, rate limits, and backoff advice are deferred to a
+  later API contract revision.
