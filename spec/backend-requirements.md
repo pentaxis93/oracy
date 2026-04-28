@@ -100,8 +100,10 @@ required, not optional.
     cost, suitable for difficult audio.
 - The backend records the engine identifier in use on each `VoiceNote`
   via the `model` field, carrying the OpenAI model identifier.
-- Engine identifiers in the contract are opaque strings. Adding or
-  removing models in future releases does not alter contract shape.
+- Engine identifiers in the contract are closed-enum strings whose
+  internal structure carries no contract meaning. Adding or removing
+  engines in future releases extends or contracts the enum but does
+  not alter the shape of any endpoint or resource.
 - Per-call audio size is an engine-imposed ceiling. The backend
   enforces the same per-chunk ceiling on each accepted chunk;
   `v0.1.0` documents this as `25 MiB` per chunk.
@@ -224,20 +226,21 @@ chunks into the job's input.
   dimension (after finalize) is a client conflict and must return
   `409 Conflict`.
 - When a new open call arrives under the same
-  `(API key, Idempotency-Key)` as an already-finalized attempt, replay
-  matching compares the new open-call body's `recorded_at`,
-  `chunk_count`, `audio_format`, `session_id`, and `language` against
-  the original open-call values. All match returns the original
-  finalized job. Any mismatch is a client conflict and must return
-  `409 Conflict`. The accepted audio content hash does not participate
-  in this comparison because a fresh open call carries no audio bytes.
+  `(API key, Idempotency-Key)` as an already-terminated attempt
+  (succeeded or failed), replay matching compares the new open-call
+  body's `recorded_at`, `chunk_count`, `audio_format`, `session_id`,
+  and `language` against the original open-call values. All match
+  returns the original terminated job. Any mismatch is a client
+  conflict and must return `409 Conflict`. The accepted audio content
+  hash does not participate in this comparison because a fresh open
+  call carries no audio bytes.
 - Chunk pushes are idempotent on `(chunk_index, chunk_sha256)`.
 - Deletion of a session referenced by an accepted `session_id` does
   not mutate the stored tuple or invalidate replay of that accepted
   submission attempt.
-- One `Idempotency-Key` names one attempt forever. Reusing it after
-  terminal failure returns the same failed job. An intentional fresh
-  attempt requires a new key.
+- One `Idempotency-Key` names one attempt forever. An intentional
+  fresh attempt after terminal failure requires a new key; reusing
+  the original key returns the same terminated job.
 
 #### Job State Machine
 
@@ -311,6 +314,7 @@ Terminal failure codes:
 - `engine_error`
 - `storage_error`
 - `internal_error`
+- `submission_abandoned`
 
 Semantics:
 
@@ -320,9 +324,14 @@ Semantics:
   `storage_error`, and `internal_error` are retryable classes during
   backend-owned retry, but may still become terminal after retry
   exhaustion.
+- `submission_abandoned` means the submission attempt was opened but
+  was not finalized within the backend's abandonment window; the
+  partial submission has been released and the job is terminal.
 - `retryable_by_client=false` only for `audio_invalid`.
-- `retryable_by_client=true` for the other terminal classes after
-  backend retries have been exhausted.
+- `retryable_by_client=true` for the other terminal classes
+  (including `submission_abandoned`) after backend retries have been
+  exhausted; for `submission_abandoned`, the user's path forward is
+  to record again with a new `Idempotency-Key`.
 
 #### Ordering and Visibility
 

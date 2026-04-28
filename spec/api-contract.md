@@ -129,8 +129,9 @@ Responses:
 - `201 Created`: new submission attempt opened, or replay of an
   already-open attempt under the same `(API key, Idempotency-Key)`
   with a matching open-call body
-- `200 OK`: replay of an already-finalized attempt under the same
-  `(API key, Idempotency-Key)`
+- `200 OK`: replay against an already-terminated attempt (succeeded
+  or failed) under the same `(API key, Idempotency-Key)` with a
+  matching open-call body
 - `400 Bad Request`: invalid idempotency header or invalid body fields
 - `401 Unauthorized`: missing or invalid API key
 - `404 Not Found`: supplied `session_id` does not exist for the
@@ -726,9 +727,10 @@ ships two model identifiers:
 The default `transcription_model` for an API key that has never
 updated settings is `gpt-4o-mini-transcribe`.
 
-Engine identifiers in the contract are opaque strings. Adding or
-removing engines in future releases does not alter the shape of any
-endpoint or resource.
+Engine identifiers in the contract are closed-enum strings whose
+internal structure carries no contract meaning. Adding or removing
+engines in future releases extends or contracts the enum but does
+not alter the shape of any endpoint or resource.
 
 ## Resource Schemas
 
@@ -950,14 +952,15 @@ Fields:
 - Same API key + same `Idempotency-Key` + a mismatch on any open-call
   dimension (before finalize) or any accepted submission dimension
   (after finalize) returns `409 Conflict`.
-- For a new open call against an already-finalized attempt under the
-  same `(API key, Idempotency-Key)`, replay matching compares the new
-  open-call body's `recorded_at`, `chunk_count`, `audio_format`,
-  `session_id`, and `language` against the original open-call values.
-  All match returns the original finalized `TranscriptionJob` with
-  `200 OK`. Any mismatch returns `409 Conflict`. The accepted audio
-  content hash does not participate in this comparison because a
-  fresh open call carries no audio bytes.
+- For a new open call against an already-terminated attempt
+  (succeeded or failed) under the same `(API key, Idempotency-Key)`,
+  replay matching compares the new open-call body's `recorded_at`,
+  `chunk_count`, `audio_format`, `session_id`, and `language` against
+  the original open-call values. All match returns the original
+  terminated `TranscriptionJob` with `200 OK`. Any mismatch returns
+  `409 Conflict`. The accepted audio content hash does not
+  participate in this comparison because a fresh open call carries no
+  audio bytes.
 - Chunk pushes are idempotent on `(chunk_index, chunk_sha256)`.
 - If the session referenced by an accepted `session_id` is later
   deleted, idempotent replays still return the original
@@ -965,8 +968,9 @@ Fields:
 - If the voice note created by a succeeded job is later deleted,
   idempotent replays still return the original succeeded
   `TranscriptionJob` with `voice_note_id=null`.
-- A new submission attempt after terminal failure must use a new
-  `Idempotency-Key`.
+- An intentional fresh submission attempt after terminal failure
+  must use a new `Idempotency-Key`. Reusing the original key returns
+  the same terminated job rather than starting a new attempt.
 
 ## Contract Notes
 
