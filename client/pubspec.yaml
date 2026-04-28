@@ -1,5 +1,5 @@
 name: oracy
-description: "A new Flutter project."
+description: "Oracy's Flutter client: capturing voice and returning to it as durable voice notes."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev

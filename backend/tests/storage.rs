@@ -641,21 +641,21 @@ async fn tags_are_owner_scoped_case_insensitive_and_many_to_many_with_transcript
 
     assert_eq!(
         storage
-            .replace_transcript_tags("owner-a", "transcript-a", &[meeting.id.clone()])
+            .replace_transcript_tags("owner-a", "transcript-a", std::slice::from_ref(&meeting.id))
             .await
             .expect("tag transcript"),
         ReplaceTranscriptTagsOutcome::Replaced
     );
     assert_eq!(
         storage
-            .replace_transcript_tags("owner-a", "transcript-b", &[meeting.id.clone()])
+            .replace_transcript_tags("owner-a", "transcript-b", std::slice::from_ref(&meeting.id))
             .await
             .expect("tag second transcript"),
         ReplaceTranscriptTagsOutcome::Replaced
     );
     assert_eq!(
         storage
-            .replace_transcript_tags("owner-b", "transcript-c", &[meeting.id.clone()])
+            .replace_transcript_tags("owner-b", "transcript-c", std::slice::from_ref(&meeting.id))
             .await
             .expect("wrong-owner tag is rejected"),
         ReplaceTranscriptTagsOutcome::NotFound
@@ -739,7 +739,7 @@ async fn duplicate_transcript_tag_ids_are_rejected_without_mutating_prior_tags()
     };
     assert_eq!(
         storage
-            .replace_transcript_tags("owner-a", "transcript-a", &[notes.id.clone()])
+            .replace_transcript_tags("owner-a", "transcript-a", std::slice::from_ref(&notes.id))
             .await
             .expect("set prior tag"),
         ReplaceTranscriptTagsOutcome::Replaced
@@ -929,7 +929,7 @@ async fn tag_renames_preserve_latest_spelling_and_reject_case_insensitive_collis
         other => panic!("expected created tag, got {other:?}"),
     };
     storage
-        .replace_transcript_tags("owner-a", "transcript-a", &[meeting.id.clone()])
+        .replace_transcript_tags("owner-a", "transcript-a", std::slice::from_ref(&meeting.id))
         .await
         .expect("tag transcript");
 
