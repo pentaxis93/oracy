@@ -2,6 +2,9 @@
 name = "oracy-backend"
 version = "0.1.0"
 edition = "2024"
+description = "Oracy backend: the Rust service that catches voice and keeps it as durable voice notes."
+license = "MIT"
+repository = "https://github.com/pentaxis93/oracy"
 
 [dependencies]
 axum = "0.8.9"
