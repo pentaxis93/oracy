@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+pub mod audio_hash;
 pub mod auth;
 pub mod bootstrap;
 pub mod config;
