@@ -20,15 +20,23 @@ class _FakeConnectivityPlatform extends ConnectivityPlatform {
   _FakeConnectivityPlatform(this._results);
 
   final List<ConnectivityResult> _results;
+  final Completer<void> _checkConnectivityCalled = Completer<void>();
   final StreamController<List<ConnectivityResult>> _controller =
       StreamController<List<ConnectivityResult>>.broadcast();
 
   @override
-  Future<List<ConnectivityResult>> checkConnectivity() async => _results;
+  Future<List<ConnectivityResult>> checkConnectivity() async {
+    if (!_checkConnectivityCalled.isCompleted) {
+      _checkConnectivityCalled.complete();
+    }
+    return _results;
+  }
 
   @override
   Stream<List<ConnectivityResult>> get onConnectivityChanged =>
       _controller.stream;
+
+  Future<void> get checkConnectivityCalled => _checkConnectivityCalled.future;
 
   Future<void> dispose() async {
     await _controller.close();
@@ -125,7 +133,8 @@ void main() {
   }
 
   Future<void> settleStartupWork() async {
-    for (var i = 0; i < 10; i++) {
+    await fakeConnectivityPlatform.checkConnectivityCalled;
+    for (var i = 0; i < 3; i++) {
       await Future<void>.delayed(Duration.zero);
     }
   }
@@ -182,15 +191,20 @@ void main() {
       );
       addTearDown(container.dispose);
 
-      container.read(uploadQueueServiceProvider);
+      final service = container.read(uploadQueueServiceProvider);
       await settleStartupWork();
 
       expect(transcriptionService.callCount, 0);
 
       await storage.setApiKey('oracy_sk_test');
       container.invalidate(hasApiKeyProvider);
-      container.read(uploadQueueServiceProvider);
-      await settleStartupWork();
+      final serviceAfterApiKeyRefresh = container.read(
+        uploadQueueServiceProvider,
+      );
+
+      expect(serviceAfterApiKeyRefresh, same(service));
+
+      await service!.processQueue();
 
       expect(transcriptionService.callCount, 1);
       expect(await db.getUploadByAudioPath(audioFile.path), isNull);

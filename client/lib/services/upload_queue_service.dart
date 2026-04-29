@@ -238,7 +238,6 @@ final uploadQueueServiceProvider = Provider<UploadQueueService?>((ref) {
 
   final db = ref.watch(appDatabaseProvider);
   final storage = ref.watch(secureStorageProvider);
-  ref.watch(hasApiKeyProvider);
   final transcriptionService = ref.watch(transcriptionServiceProvider);
 
   final service = UploadQueueService(
