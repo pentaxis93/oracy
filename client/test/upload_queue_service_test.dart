@@ -6,9 +6,11 @@ import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_
 import 'package:dio/dio.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:oracy/db/database.dart';
+import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/services/upload_queue_service.dart';
 
@@ -133,6 +135,68 @@ void main() {
     fakeConnectivityPlatform = _FakeConnectivityPlatform(results);
     ConnectivityPlatform.instance = fakeConnectivityPlatform;
   }
+
+  test(
+    'Given no API key is configured, When the foreground upload queue starts, Then pending audio is not uploaded',
+    () async {
+      final audioFile = await createAudioFile('missing_api_key.wav');
+      await db.ensurePendingUpload(audioPath: audioFile.path);
+      final storage = MockSecureStorage();
+      final transcriptionService = _CountingTranscriptionService();
+      final container = ProviderContainer(
+        overrides: [
+          secureStorageProvider.overrideWith((_) => storage),
+          appDatabaseProvider.overrideWithValue(db),
+          transcriptionServiceProvider.overrideWith(
+            (_) => transcriptionService,
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final service = container.read(uploadQueueServiceProvider);
+      await settleStartupWork();
+
+      expect(service, isNotNull);
+      expect(transcriptionService.callCount, 0);
+      expect(await db.getUploadByAudioPath(audioFile.path), isNotNull);
+      expect(await audioFile.exists(), isTrue);
+    },
+  );
+
+  test(
+    'Given queued audio was held for configuration, When an API key becomes configured, Then the foreground upload queue resumes',
+    () async {
+      final audioFile = await createAudioFile('configured_later.wav');
+      await db.ensurePendingUpload(audioPath: audioFile.path);
+      final storage = MockSecureStorage();
+      final transcriptionService = _CountingTranscriptionService();
+      final container = ProviderContainer(
+        overrides: [
+          secureStorageProvider.overrideWith((_) => storage),
+          appDatabaseProvider.overrideWithValue(db),
+          transcriptionServiceProvider.overrideWith(
+            (_) => transcriptionService,
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.read(uploadQueueServiceProvider);
+      await settleStartupWork();
+
+      expect(transcriptionService.callCount, 0);
+
+      await storage.setApiKey('oracy_sk_test');
+      container.invalidate(hasApiKeyProvider);
+      container.read(uploadQueueServiceProvider);
+      await settleStartupWork();
+
+      expect(transcriptionService.callCount, 1);
+      expect(await db.getUploadByAudioPath(audioFile.path), isNull);
+      expect(await audioFile.exists(), isFalse);
+    },
+  );
 
   test(
     'Given an existing queued row is missing its idempotency key, When the same upload is queued again, Then queueing fails loudly instead of silently backfilling it',

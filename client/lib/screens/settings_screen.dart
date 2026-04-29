@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/preferences_service.dart';
+import 'package:oracy/services/upload_queue_service.dart';
 
 /// Provider for the current API key value (for display purposes).
 /// Returns masked version if key exists, null otherwise.
@@ -63,6 +66,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       // Invalidate the hasApiKey provider to refresh state
       ref.invalidate(hasApiKeyProvider);
       ref.invalidate(apiKeyDisplayProvider);
+      unawaited(ref.read(uploadQueueServiceProvider)?.processQueue());
 
       if (mounted) {
         setState(() {
