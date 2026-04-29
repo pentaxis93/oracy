@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use oracy_backend::audio_hash::{AUDIO_CONTENT_HASH_ALGORITHM_ID, compose_audio_content_hash_hex};
 use oracy_backend::storage::{
     AcceptJobOutcome, CreateTagOutcome, NewEmbedding, NewSegment, NewSession, NewTag,
     NewTranscript, NewTranscriptVersion, NewTranscriptionJob, RenameTagOutcome,
@@ -57,6 +58,120 @@ async fn accepted_jobs_replay_by_owner_and_reject_tuple_mismatches() {
         AcceptJobOutcome::Conflict(oracy_backend::storage::SubmissionConflict {
             job_id: created.id
         })
+    );
+}
+
+#[tokio::test]
+async fn accepted_audio_hash_algorithm_survives_restart_with_rederived_hash() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let database_path = tempdir.path().join("oracy.sqlite");
+    let chunk_hashes = [
+        "b18efa847f7a3fa48fe0aafd4a6250aa5129740e05126859377af20cedafdeee",
+        "2725aea2d2dea736fbe38e41ecb518f6098cb68ac77362c5e34faafb356567c5",
+        "b6f3c15844fe12f966ad90db59da8332a9a6d9dfd198ac83949be2045ec6dc1e",
+    ];
+    let composed_hash =
+        compose_audio_content_hash_hex(chunk_hashes).expect("compose accepted audio hash");
+    let accepted_job_id = {
+        let storage = Storage::connect(&database_path)
+            .await
+            .expect("connect storage");
+        insert_session_row(&storage, "owner-a", "session-a").await;
+        let job = match storage
+            .accept_job(new_job("owner-a", "attempt-1", &composed_hash))
+            .await
+            .expect("accept job")
+        {
+            AcceptJobOutcome::Created(job) => job,
+            other => panic!("expected created job, got {other:?}"),
+        };
+
+        assert_eq!(
+            job.audio_content_hash_algorithm,
+            AUDIO_CONTENT_HASH_ALGORITHM_ID
+        );
+        job.id
+    };
+
+    let restarted = Storage::connect(&database_path)
+        .await
+        .expect("reconnect storage");
+    let stored = restarted
+        .get_job("owner-a", &accepted_job_id)
+        .await
+        .expect("read job")
+        .expect("job survives restart");
+
+    assert_eq!(stored.audio_sha256_hex, composed_hash);
+    assert_eq!(
+        stored.audio_content_hash_algorithm,
+        AUDIO_CONTENT_HASH_ALGORITHM_ID
+    );
+    assert_eq!(
+        compose_audio_content_hash_hex(chunk_hashes).expect("rederive accepted audio hash"),
+        stored.audio_sha256_hex
+    );
+}
+
+#[tokio::test]
+async fn storage_owns_the_accepted_audio_hash_algorithm_pin() {
+    let (_tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-a", "session-a").await;
+
+    let created = match storage
+        .accept_job(new_job("owner-a", "attempt-1", "hash-a"))
+        .await
+        .expect("accept job")
+    {
+        AcceptJobOutcome::Created(job) => job,
+        other => panic!("expected created job, got {other:?}"),
+    };
+
+    assert_eq!(
+        created.audio_content_hash_algorithm,
+        AUDIO_CONTENT_HASH_ALGORITHM_ID
+    );
+}
+
+#[tokio::test]
+async fn storage_rejects_restart_when_stored_audio_hash_algorithm_drifted() {
+    let (tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-a", "session-a").await;
+    match storage
+        .accept_job(new_job("owner-a", "attempt-1", "hash-a"))
+        .await
+        .expect("accept job")
+    {
+        AcceptJobOutcome::Created(_) => {}
+        other => panic!("expected created job, got {other:?}"),
+    };
+
+    sqlx::query("DROP TRIGGER transcription_jobs_accepted_tuple_immutable")
+        .execute(storage.pool())
+        .await
+        .expect("drop immutability trigger for drift fixture");
+    sqlx::query(
+        r#"
+        UPDATE transcription_jobs
+        SET audio_content_hash_algorithm = 'sha256:chunk-sha256-raw-concat:v2'
+        WHERE api_key_id = 'owner-a' AND idempotency_key = 'attempt-1'
+        "#,
+    )
+    .execute(storage.pool())
+    .await
+    .expect("write drifted algorithm fixture");
+    drop(storage);
+
+    let error = Storage::connect(&tempdir.path().join("oracy.sqlite"))
+        .await
+        .expect_err("algorithm drift should reject startup");
+
+    assert!(error.to_string().contains("audio content hash algorithm"));
+    assert!(error.to_string().contains(AUDIO_CONTENT_HASH_ALGORITHM_ID));
+    assert!(
+        error
+            .to_string()
+            .contains("sha256:chunk-sha256-raw-concat:v2")
     );
 }
 
@@ -179,7 +294,7 @@ async fn accepted_submission_tuple_is_immutable_in_storage() {
     let error = sqlx::query(
         r#"
         UPDATE transcription_jobs
-        SET recorded_at = '2026-04-25T00:00:00Z'
+        SET audio_content_hash_algorithm = 'sha256:chunk-sha256-raw-concat:v2'
         WHERE id = ?
         "#,
     )
@@ -198,7 +313,10 @@ async fn accepted_submission_tuple_is_immutable_in_storage() {
         .await
         .expect("lookup")
         .expect("job exists");
-    assert_eq!(unchanged.recorded_at, created.recorded_at);
+    assert_eq!(
+        unchanged.audio_content_hash_algorithm,
+        created.audio_content_hash_algorithm
+    );
 }
 
 #[tokio::test]

@@ -12,6 +12,8 @@ use time::macros::format_description;
 use ulid::Ulid;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::audio_hash::AUDIO_CONTENT_HASH_ALGORITHM_ID;
+
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone, Debug)]
@@ -46,6 +48,13 @@ pub enum StorageError {
         path: PathBuf,
         #[source]
         source: sqlx::migrate::MigrateError,
+    },
+    #[error(
+        "unsupported audio content hash algorithm in database: expected {expected}, found {found}"
+    )]
+    UnsupportedAudioContentHashAlgorithm {
+        expected: &'static str,
+        found: String,
     },
     #[error("storage query failed: {0}")]
     Query(#[from] sqlx::Error),
@@ -125,6 +134,7 @@ pub struct TranscriptionJobRecord {
     pub api_key_id: String,
     pub idempotency_key: String,
     pub audio_sha256_hex: String,
+    pub audio_content_hash_algorithm: String,
     pub recorded_at: OffsetDateTime,
     pub session_id: Option<String>,
     pub language: Option<String>,
@@ -263,6 +273,7 @@ impl Storage {
                 path: database_path.to_path_buf(),
                 source,
             })?;
+        ensure_supported_audio_content_hash_algorithm(&pool).await?;
 
         Ok(Self { pool })
     }
@@ -284,11 +295,12 @@ impl Storage {
         let result = sqlx::query(
             r#"
             INSERT INTO transcription_jobs (
-                id, api_key_id, idempotency_key, audio_sha256_hex, recorded_at,
-                session_id, language, accepted_audio_path, status, created_at,
-                updated_at, retry_count, max_retries
+                id, api_key_id, idempotency_key, audio_sha256_hex,
+                audio_content_hash_algorithm, recorded_at, session_id, language,
+                accepted_audio_path, status, created_at, updated_at, retry_count,
+                max_retries
             )
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?
             WHERE ? IS NULL
                 OR EXISTS (
                     SELECT 1 FROM sessions
@@ -301,6 +313,7 @@ impl Storage {
         .bind(&input.api_key_id)
         .bind(&input.idempotency_key)
         .bind(&input.audio_sha256_hex)
+        .bind(AUDIO_CONTENT_HASH_ALGORITHM_ID)
         .bind(recorded_at)
         .bind(&input.session_id)
         .bind(&input.language)
@@ -1030,6 +1043,31 @@ fn new_id() -> String {
     Ulid::new().to_string()
 }
 
+async fn ensure_supported_audio_content_hash_algorithm(
+    pool: &SqlitePool,
+) -> Result<(), StorageError> {
+    let unsupported = sqlx::query(
+        r#"
+        SELECT audio_content_hash_algorithm
+        FROM transcription_jobs
+        WHERE audio_content_hash_algorithm != ?
+        LIMIT 1
+        "#,
+    )
+    .bind(AUDIO_CONTENT_HASH_ALGORITHM_ID)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = unsupported {
+        return Err(StorageError::UnsupportedAudioContentHashAlgorithm {
+            expected: AUDIO_CONTENT_HASH_ALGORITHM_ID,
+            found: row.try_get("audio_content_hash_algorithm")?,
+        });
+    }
+
+    Ok(())
+}
+
 fn fold_tag_name(value: &str) -> String {
     value.chars().nfd().default_case_fold().nfd().collect()
 }
@@ -1056,6 +1094,7 @@ fn job_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TranscriptionJobRecord, 
         api_key_id: row.try_get("api_key_id")?,
         idempotency_key: row.try_get("idempotency_key")?,
         audio_sha256_hex: row.try_get("audio_sha256_hex")?,
+        audio_content_hash_algorithm: row.try_get("audio_content_hash_algorithm")?,
         recorded_at: parse_timestamp(row.try_get("recorded_at")?)?,
         session_id: row.try_get("session_id")?,
         language: row.try_get("language")?,
