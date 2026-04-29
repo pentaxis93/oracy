@@ -3,16 +3,27 @@ use std::process::Command;
 #[cfg(unix)]
 const CAP_DAC_OVERRIDE_MASK: u64 = 1 << 1;
 
-pub fn assert_ignored_test_passes_with_env_missing(test_name: &str, env_name: &str) {
-    let output = Command::new(std::env::current_exe().expect("resolve current test binary"))
+pub fn assert_ignored_test_passes_with_env(
+    test_name: &str,
+    envs: &[(&str, &std::ffi::OsStr)],
+    missing_envs: &[&str],
+) {
+    let mut command = Command::new(std::env::current_exe().expect("resolve current test binary"));
+    command
         .arg("--ignored")
         .arg("--exact")
         .arg(test_name)
-        .arg("--nocapture")
-        .env(env_name, "/tmp/oracy-config-should-have-been-removed")
-        .env_remove(env_name)
-        .output()
-        .expect("spawn helper test");
+        .arg("--nocapture");
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    for name in missing_envs {
+        command
+            .env(name, "/tmp/oracy-config-should-have-been-removed")
+            .env_remove(name);
+    }
+
+    let output = command.output().expect("spawn helper test");
 
     assert!(
         output.status.success(),
@@ -20,6 +31,10 @@ pub fn assert_ignored_test_passes_with_env_missing(test_name: &str, env_name: &s
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+pub fn assert_ignored_test_passes_with_env_missing(test_name: &str, env_name: &str) {
+    assert_ignored_test_passes_with_env(test_name, &[], &[env_name]);
 }
 
 #[cfg(unix)]

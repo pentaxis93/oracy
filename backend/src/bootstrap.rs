@@ -12,11 +12,16 @@ use crate::state::AppState;
 use crate::storage::{Storage, StorageError};
 
 pub const CONFIG_ENV_VAR: &str = "ORACY_CONFIG";
+pub const OPENAI_API_KEY_ENV_VAR: &str = "OPENAI_API_KEY";
 
 #[derive(Debug, Error)]
 pub enum BootstrapError {
     #[error("{CONFIG_ENV_VAR} is not set")]
     MissingConfigEnv,
+    #[error("{OPENAI_API_KEY_ENV_VAR} is not set")]
+    MissingOpenAiApiKeyEnv,
+    #[error("{OPENAI_API_KEY_ENV_VAR} must not be empty")]
+    EmptyOpenAiApiKeyEnv,
     #[error("failed to read config file {path}: {source}")]
     ReadConfig {
         path: PathBuf,
@@ -47,6 +52,12 @@ pub enum BootstrapError {
 
 pub async fn load_runtime_from_env() -> Result<(std::net::SocketAddr, AppState), BootstrapError> {
     let config_path = std::env::var_os(CONFIG_ENV_VAR).ok_or(BootstrapError::MissingConfigEnv)?;
+    let openai_api_key =
+        std::env::var_os(OPENAI_API_KEY_ENV_VAR).ok_or(BootstrapError::MissingOpenAiApiKeyEnv)?;
+    if openai_api_key.is_empty() {
+        return Err(BootstrapError::EmptyOpenAiApiKeyEnv);
+    }
+
     load_runtime_from_path(Path::new(&config_path)).await
 }
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Require a non-empty `OPENAI_API_KEY` during backend startup so the service does
+  not advertise transcription capability without its operator-provisioned engine
+  credential.
 - Document the `TranscriptionJob.failure_code` wire enum in the API
   contract while keeping per-code failure semantics in backend
   requirements.
