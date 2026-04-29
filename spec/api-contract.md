@@ -48,6 +48,18 @@ behavior are deferred to a later revision.
 - `next_cursor` is `null` when no additional page exists.
 - `limit` defaults to `50` and must not exceed `100`.
 - All `4xx` and `5xx` responses use the same `ErrorResponse` envelope.
+- A request to an existing route with an unsupported method returns
+  `405 Method Not Allowed` with `error_code: "method_not_allowed"`.
+- JSON request body parsing preserves transport-level statuses in the
+  envelope: malformed JSON returns `400 Bad Request` with
+  `error_code: "malformed_json"`; unsupported JSON content type returns
+  `415 Unsupported Media Type` with
+  `error_code: "unsupported_content_type"`; a valid JSON body that
+  cannot be deserialized into the endpoint's typed request schema
+  returns `422 Unprocessable Entity` with
+  `error_code: "invalid_request_shape"`; a JSON body exceeding the
+  configured body limit returns `413 Payload Too Large` with
+  `error_code: "payload_too_large"`.
 
 ### `ErrorResponse`
 
@@ -140,7 +152,8 @@ Responses:
 - `200 OK`: replay against an already-terminated attempt (succeeded
   or failed) under the same `(API key, Idempotency-Key)` with a
   matching open-call body
-- `400 Bad Request`: invalid idempotency header or invalid body fields
+- `400 Bad Request`: invalid idempotency header, malformed JSON, or
+  invalid body fields
 - `401 Unauthorized`: missing or invalid API key
 - `404 Not Found`: supplied `session_id` does not exist for the
   authenticated API key
@@ -148,6 +161,11 @@ Responses:
   any open-call dimension (`recorded_at`, `chunk_count`,
   `audio_format`, `session_id`, `language`) relative to the prior
   attempt
+- `413 Payload Too Large`: JSON request body exceeds the configured
+  body limit
+- `415 Unsupported Media Type`: request body is not sent as JSON
+- `422 Unprocessable Entity`: valid JSON does not match the typed
+  request schema
 
 Response body is a `TranscriptionJob` resource. New attempts are in
 status `accepting_chunks`.
@@ -318,9 +336,14 @@ Request body:
 Responses:
 
 - `200 OK`
-- `400 Bad Request`
+- `400 Bad Request`: malformed JSON or invalid body fields
 - `401 Unauthorized`
 - `404 Not Found`
+- `413 Payload Too Large`: JSON request body exceeds the configured
+  body limit
+- `415 Unsupported Media Type`: request body is not sent as JSON
+- `422 Unprocessable Entity`: valid JSON does not match the typed
+  request schema
 
 Notes:
 
@@ -419,10 +442,15 @@ Request body:
 Responses:
 
 - `200 OK`
-- `400 Bad Request`
+- `400 Bad Request`: malformed JSON or invalid body fields
 - `401 Unauthorized`
 - `404 Not Found`: voice note or one or more referenced tags not found
   for the authenticated API key
+- `413 Payload Too Large`: JSON request body exceeds the configured
+  body limit
+- `415 Unsupported Media Type`: request body is not sent as JSON
+- `422 Unprocessable Entity`: valid JSON does not match the typed
+  request schema
 
 Notes:
 
@@ -476,8 +504,13 @@ Responses:
 - `201 Created`: new tag created
 - `200 OK`: a tag with the same case-insensitive name already exists
   for the authenticated API key
-- `400 Bad Request`
+- `400 Bad Request`: malformed JSON or invalid body fields
 - `401 Unauthorized`
+- `413 Payload Too Large`: JSON request body exceeds the configured
+  body limit
+- `415 Unsupported Media Type`: request body is not sent as JSON
+- `422 Unprocessable Entity`: valid JSON does not match the typed
+  request schema
 
 Notes:
 
@@ -513,11 +546,16 @@ Request body:
 Responses:
 
 - `200 OK`
-- `400 Bad Request`
+- `400 Bad Request`: malformed JSON or invalid body fields
 - `401 Unauthorized`
 - `404 Not Found`
 - `409 Conflict`: another tag with the same case-insensitive name
   already exists for the authenticated API key
+- `413 Payload Too Large`: JSON request body exceeds the configured
+  body limit
+- `415 Unsupported Media Type`: request body is not sent as JSON
+- `422 Unprocessable Entity`: valid JSON does not match the typed
+  request schema
 
 Notes:
 
@@ -581,8 +619,13 @@ Request body:
 Responses:
 
 - `201 Created`
-- `400 Bad Request`
+- `400 Bad Request`: malformed JSON or invalid body fields
 - `401 Unauthorized`
+- `413 Payload Too Large`: JSON request body exceeds the configured
+  body limit
+- `415 Unsupported Media Type`: request body is not sent as JSON
+- `422 Unprocessable Entity`: valid JSON does not match the typed
+  request schema
 
 Response body is a `Session` resource.
 
@@ -613,9 +656,14 @@ Request body:
 Responses:
 
 - `200 OK`
-- `400 Bad Request`
+- `400 Bad Request`: malformed JSON or invalid body fields
 - `401 Unauthorized`
 - `404 Not Found`
+- `413 Payload Too Large`: JSON request body exceeds the configured
+  body limit
+- `415 Unsupported Media Type`: request body is not sent as JSON
+- `422 Unprocessable Entity`: valid JSON does not match the typed
+  request schema
 
 Response body is the updated `Session` resource.
 
@@ -716,8 +764,12 @@ Validation:
 Responses:
 
 - `200 OK`
-- `400 Bad Request`: unknown field or unsupported model identifier
+- `400 Bad Request`: malformed JSON, unknown field, invalid setting
+  field value, or unsupported model identifier
 - `401 Unauthorized`
+- `413 Payload Too Large`: JSON request body exceeds the configured
+  body limit
+- `415 Unsupported Media Type`: request body is not sent as JSON
 
 Notes:
 

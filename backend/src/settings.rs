@@ -6,6 +6,7 @@ use time::OffsetDateTime;
 
 use crate::auth::AuthenticatedKey;
 use crate::errors::{ApiError, ErrorDetail};
+use crate::json::JsonBody;
 use crate::state::AppState;
 use crate::storage::{SettingsPatch, SettingsRecord};
 
@@ -34,7 +35,7 @@ pub async fn get_settings(
 pub async fn patch_settings(
     authenticated_key: AuthenticatedKey,
     State(state): State<AppState>,
-    Json(body): Json<Value>,
+    JsonBody(body): JsonBody<Value>,
 ) -> Result<Json<SettingsResource>, ApiError> {
     let patch = parse_patch(body)?;
     let settings = state

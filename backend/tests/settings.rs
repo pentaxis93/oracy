@@ -162,6 +162,89 @@ async fn settings_routes_require_valid_authentication() {
 }
 
 #[tokio::test]
+async fn unsupported_settings_method_returns_shared_error_envelope() {
+    let fixture = SettingsFixture::new().await;
+    let app = fixture.app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/settings")
+                .header("Authorization", "Bearer alpha-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        json_body(response).await,
+        json!({
+            "error_code": "method_not_allowed",
+            "message": "Method not allowed."
+        })
+    );
+}
+
+#[tokio::test]
+async fn malformed_settings_patch_json_returns_shared_error_envelope() {
+    let fixture = SettingsFixture::new().await;
+    let app = fixture.app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/settings")
+                .header("Authorization", "Bearer alpha-secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"transcription_model":"#))
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(response).await,
+        json!({
+            "error_code": "malformed_json",
+            "message": "Request body must be valid JSON."
+        })
+    );
+}
+
+#[tokio::test]
+async fn non_json_settings_patch_returns_shared_error_envelope() {
+    let fixture = SettingsFixture::new().await;
+    let app = fixture.app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/settings")
+                .header("Authorization", "Bearer alpha-secret")
+                .header("Content-Type", "text/plain")
+                .body(Body::from(r#"{"transcription_model":"gpt-4o-transcribe"}"#))
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(
+        json_body(response).await,
+        json!({
+            "error_code": "unsupported_content_type",
+            "message": "Request content type must be application/json."
+        })
+    );
+}
+
+#[tokio::test]
 async fn settings_persist_across_backend_restart() {
     let fixture = SettingsFixture::new().await;
     let app = fixture.app().await;
