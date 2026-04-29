@@ -1,7 +1,12 @@
+use axum::body::Body;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{Request, StatusCode};
+use axum::routing::post;
 use oracy_backend::bootstrap::load_runtime_from_path;
 use oracy_backend::errors::{CollectionEnvelope, ErrorDetail, ErrorResponse};
+use oracy_backend::json::JsonBody;
 use oracy_backend::router::build_router;
+use serde::Deserialize;
 use serde_json::json;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
@@ -113,6 +118,82 @@ key = "alpha-secret"
         json!({
             "error_code": "not_found",
             "message": "Resource not found."
+        })
+    );
+}
+
+#[tokio::test]
+async fn typed_json_shape_rejection_returns_shared_error_envelope() {
+    #[derive(Deserialize)]
+    struct RequestBody {
+        name: String,
+    }
+
+    async fn handler(JsonBody(body): JsonBody<RequestBody>) -> String {
+        body.name
+    }
+
+    let app = axum::Router::new().route("/typed", post(handler));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/typed")
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({ "name": 1 }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("json"),
+        json!({
+            "error_code": "invalid_request_shape",
+            "message": "Request JSON shape is invalid."
+        })
+    );
+}
+
+#[tokio::test]
+async fn oversized_json_body_returns_shared_error_envelope() {
+    #[derive(Deserialize)]
+    struct RequestBody {
+        name: String,
+    }
+
+    async fn handler(JsonBody(body): JsonBody<RequestBody>) -> String {
+        body.name
+    }
+
+    let app = axum::Router::new()
+        .route("/typed", post(handler))
+        .layer(DefaultBodyLimit::max(8));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/typed")
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({ "name": "too large" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("json"),
+        json!({
+            "error_code": "payload_too_large",
+            "message": "Request body is too large."
         })
     );
 }

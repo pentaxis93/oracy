@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Preserve the shared `ErrorResponse` envelope for framework-owned API
+  rejections, including unsupported methods and JSON body parse, content-type,
+  shape, and size failures.
+- Add authenticated `GET /api/v1/settings` and `PATCH /api/v1/settings`
+  endpoints for durable per-API-key transcription model settings.
 - Require a non-empty `OPENAI_API_KEY` during backend startup so the service does
   not advertise transcription capability without its operator-provisioned engine
   credential.
