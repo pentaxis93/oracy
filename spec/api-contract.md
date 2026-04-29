@@ -695,6 +695,7 @@ defaults.
 ### PATCH `/api/v1/settings`
 
 Partial update of settings. Omitted fields are left unchanged.
+An empty object is valid and returns the current settings unchanged.
 
 Request body:
 

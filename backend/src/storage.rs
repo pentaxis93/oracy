@@ -13,6 +13,7 @@ use ulid::Ulid;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::audio_hash::AUDIO_CONTENT_HASH_ALGORITHM_ID;
+use crate::settings::DEFAULT_TRANSCRIPTION_MODEL;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -97,6 +98,16 @@ pub enum ReplaceTranscriptTagsOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmissionConflict {
     pub job_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsPatch {
+    pub transcription_model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsRecord {
+    pub transcription_model: String,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +291,55 @@ impl Storage {
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub async fn get_settings(&self, api_key_id: &str) -> Result<SettingsRecord, StorageError> {
+        let row = sqlx::query(
+            r#"
+            SELECT transcription_model
+            FROM api_key_settings
+            WHERE api_key_id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(row) => Ok(settings_from_row(row)?),
+            None => Ok(SettingsRecord {
+                transcription_model: DEFAULT_TRANSCRIPTION_MODEL.to_owned(),
+            }),
+        }
+    }
+
+    pub async fn update_settings(
+        &self,
+        api_key_id: &str,
+        patch: SettingsPatch,
+        now: OffsetDateTime,
+    ) -> Result<SettingsRecord, StorageError> {
+        let Some(transcription_model) = patch.transcription_model else {
+            return self.get_settings(api_key_id).await;
+        };
+
+        let updated_at = format_timestamp(now)?;
+        sqlx::query(
+            r#"
+            INSERT INTO api_key_settings (api_key_id, transcription_model, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(api_key_id) DO UPDATE SET
+                transcription_model = excluded.transcription_model,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(transcription_model)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await?;
+
+        self.get_settings(api_key_id).await
     }
 
     pub async fn accept_job(
@@ -1112,6 +1172,12 @@ fn job_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TranscriptionJobRecord, 
         failure_message: row.try_get("failure_message")?,
         retryable_by_client,
         transcript_id: row.try_get("transcript_id")?,
+    })
+}
+
+fn settings_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SettingsRecord, StorageError> {
+    Ok(SettingsRecord {
+        transcription_model: row.try_get("transcription_model")?,
     })
 }
 
