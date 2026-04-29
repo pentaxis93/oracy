@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix the foreground upload queue so pending recordings wait for a configured
+  API key and resume after one is saved.
 - Add the durable backend SQLite substrate for accepted transcription jobs,
   transcript versions, ordered segments, current embeddings, owner scoping, and
   the required operator `database_path` setting.

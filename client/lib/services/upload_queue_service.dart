@@ -6,6 +6,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/db/database.dart';
+import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/background_sync_service.dart';
 import 'package:oracy/services/recording_recovery_service.dart';
 import 'package:oracy/services/transcription_service.dart';
@@ -19,6 +20,9 @@ const int maxBackoffDelayMs = 5 * 60 * 1000;
 
 typedef TerminalFailureDeleteAction =
     Future<void> Function(PendingUpload upload);
+typedef ApiKeyAvailabilityCheck = Future<bool> Function();
+
+Future<bool> _apiKeyAlwaysConfigured() async => true;
 
 /// Service for managing the offline upload queue.
 ///
@@ -32,6 +36,7 @@ class UploadQueueService {
   final TranscriptionService _transcriptionService;
   final Connectivity _connectivity;
   final LocalFileDeleter _deleteLocalFile;
+  final ApiKeyAvailabilityCheck _hasApiKey;
 
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   Timer? _processingTimer;
@@ -42,10 +47,12 @@ class UploadQueueService {
     required TranscriptionService transcriptionService,
     Connectivity? connectivity,
     LocalFileDeleter deleteLocalFile = defaultLocalFileDeleter,
+    ApiKeyAvailabilityCheck hasApiKey = _apiKeyAlwaysConfigured,
   }) : _db = db,
        _transcriptionService = transcriptionService,
        _connectivity = connectivity ?? Connectivity(),
-       _deleteLocalFile = deleteLocalFile;
+       _deleteLocalFile = deleteLocalFile,
+       _hasApiKey = hasApiKey;
 
   /// Start monitoring connectivity and processing queue.
   Future<void> start() async {
@@ -81,6 +88,10 @@ class UploadQueueService {
 
     try {
       await retryPendingUploadCleanup(_db, deleteLocalFile: _deleteLocalFile);
+
+      if (!await _hasApiKey()) {
+        return;
+      }
 
       final pendingUploads = await _db.getPendingUploads(
         maxRetries: maxRetryAttempts,
@@ -226,11 +237,13 @@ final uploadQueueServiceProvider = Provider<UploadQueueService?>((ref) {
   }
 
   final db = ref.watch(appDatabaseProvider);
+  final storage = ref.watch(secureStorageProvider);
   final transcriptionService = ref.watch(transcriptionServiceProvider);
 
   final service = UploadQueueService(
     db: db,
     transcriptionService: transcriptionService,
+    hasApiKey: storage.hasApiKey,
   );
 
   // Start the service
