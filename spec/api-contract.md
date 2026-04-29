@@ -782,7 +782,12 @@ Fields:
 - `max_retries`: maximum backend retry attempts for this job
 - `next_attempt_at`: returned when `status=retry_waiting`, otherwise
   omitted or `null`
-- `failure_code`: present when a failure classification exists
+- `failure_code`: nullable closed-enum string present when a failure
+  classification exists. Supported values are `audio_invalid`,
+  `engine_timeout`, `engine_rate_limited`, `engine_error`,
+  `storage_error`, `internal_error`, and `submission_abandoned`.
+  `spec/backend-requirements.md` Failure Semantics defines what each
+  code means.
 - `failure_message`: human-readable explanation aligned with
   `failure_code`
 - `retryable_by_client`: whether a terminal failed job should be

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Document the `TranscriptionJob.failure_code` wire enum in the API
+  contract while keeping per-code failure semantics in backend
+  requirements.
 - Fix the foreground upload queue so pending recordings wait for a configured
   API key and resume after one is saved.
 - Add the durable backend SQLite substrate for accepted transcription jobs,
