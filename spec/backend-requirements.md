@@ -334,6 +334,10 @@ Constraints on transitions:
 
 #### Failure Semantics
 
+This section defines the backend behavior represented by each failure
+code. `spec/api-contract.md` `TranscriptionJob` defines the wire enum
+values exposed to clients.
+
 Terminal failure codes:
 
 - `audio_invalid`
