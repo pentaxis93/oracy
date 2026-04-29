@@ -114,6 +114,26 @@ async fn accepted_audio_hash_algorithm_survives_restart_with_rederived_hash() {
 }
 
 #[tokio::test]
+async fn storage_owns_the_accepted_audio_hash_algorithm_pin() {
+    let (_tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-a", "session-a").await;
+
+    let created = match storage
+        .accept_job(new_job("owner-a", "attempt-1", "hash-a"))
+        .await
+        .expect("accept job")
+    {
+        AcceptJobOutcome::Created(job) => job,
+        other => panic!("expected created job, got {other:?}"),
+    };
+
+    assert_eq!(
+        created.audio_content_hash_algorithm,
+        AUDIO_CONTENT_HASH_ALGORITHM_ID
+    );
+}
+
+#[tokio::test]
 async fn storage_rejects_restart_when_stored_audio_hash_algorithm_drifted() {
     let (tempdir, storage) = storage().await;
     insert_session_row(&storage, "owner-a", "session-a").await;
@@ -1399,7 +1419,6 @@ fn new_job(owner: &str, idempotency_key: &str, hash: &str) -> NewTranscriptionJo
         api_key_id: owner.to_owned(),
         idempotency_key: idempotency_key.to_owned(),
         audio_sha256_hex: hash.to_owned(),
-        audio_content_hash_algorithm: AUDIO_CONTENT_HASH_ALGORITHM_ID.to_owned(),
         recorded_at: datetime!(2026-04-24 17:59:00 UTC),
         session_id: Some("session-a".to_owned()),
         language: Some("en".to_owned()),

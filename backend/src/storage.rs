@@ -104,7 +104,6 @@ pub struct NewTranscriptionJob {
     pub api_key_id: String,
     pub idempotency_key: String,
     pub audio_sha256_hex: String,
-    pub audio_content_hash_algorithm: String,
     pub recorded_at: OffsetDateTime,
     pub session_id: Option<String>,
     pub language: Option<String>,
@@ -314,7 +313,7 @@ impl Storage {
         .bind(&input.api_key_id)
         .bind(&input.idempotency_key)
         .bind(&input.audio_sha256_hex)
-        .bind(&input.audio_content_hash_algorithm)
+        .bind(AUDIO_CONTENT_HASH_ALGORITHM_ID)
         .bind(recorded_at)
         .bind(&input.session_id)
         .bind(&input.language)
@@ -995,7 +994,6 @@ impl Storage {
 impl TranscriptionJobRecord {
     fn matches_submission(&self, input: &NewTranscriptionJob) -> bool {
         self.audio_sha256_hex == input.audio_sha256_hex
-            && self.audio_content_hash_algorithm == input.audio_content_hash_algorithm
             && self.recorded_at == input.recorded_at
             && self.session_id == input.session_id
             && self.language == input.language
