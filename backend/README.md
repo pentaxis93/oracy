@@ -19,11 +19,9 @@ key = "operator-issued-secret"
 Startup fails unless `api_keys` contains at least one valid operator-provisioned
 key, `accepted_audio_dir` already exists as a writable directory, and
 `database_path` points to a SQLite database file whose parent directory exists
-and is writable. Relative storage paths resolve from the real configuration
-file directory.
-
-Transcription requires `OPENAI_API_KEY` to be set in the environment; without
-it, transcription jobs cannot succeed.
+and is writable. `OPENAI_API_KEY` must also be set to a non-empty environment
+value. Relative storage paths resolve from the real configuration file
+directory.
 
 Every API route requires `Authorization: Bearer <api_key>`. The bearer scheme is
 case-insensitive, and missing or invalid keys return the shared JSON

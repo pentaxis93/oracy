@@ -23,6 +23,114 @@ async fn startup_rejects_missing_oracy_config_env_helper() {
 }
 
 #[tokio::test]
+async fn startup_rejects_missing_openai_api_key_env() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    support::assert_ignored_test_passes_with_env(
+        "startup_rejects_missing_openai_api_key_env_helper",
+        &[("ORACY_CONFIG", config_path.as_os_str())],
+        &["OPENAI_API_KEY"],
+    );
+}
+
+#[tokio::test]
+#[ignore = "helper subprocess only"]
+async fn startup_rejects_missing_openai_api_key_env_helper() {
+    let error = load_runtime_from_env()
+        .await
+        .expect_err("missing OpenAI API key should fail");
+    assert!(error.to_string().contains("OPENAI_API_KEY is not set"));
+}
+
+#[tokio::test]
+async fn startup_rejects_empty_openai_api_key_env() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    support::assert_ignored_test_passes_with_env(
+        "startup_rejects_empty_openai_api_key_env_helper",
+        &[
+            ("ORACY_CONFIG", config_path.as_os_str()),
+            ("OPENAI_API_KEY", std::ffi::OsStr::new("")),
+        ],
+        &[],
+    );
+}
+
+#[tokio::test]
+#[ignore = "helper subprocess only"]
+async fn startup_rejects_empty_openai_api_key_env_helper() {
+    let error = load_runtime_from_env()
+        .await
+        .expect_err("empty OpenAI API key should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("OPENAI_API_KEY must not be empty")
+    );
+}
+
+#[tokio::test]
+async fn startup_accepts_non_empty_openai_api_key_env() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    support::assert_ignored_test_passes_with_env(
+        "startup_accepts_non_empty_openai_api_key_env_helper",
+        &[
+            ("ORACY_CONFIG", config_path.as_os_str()),
+            ("OPENAI_API_KEY", std::ffi::OsStr::new("test-openai-key")),
+        ],
+        &[],
+    );
+}
+
+#[tokio::test]
+#[ignore = "helper subprocess only"]
+async fn startup_accepts_non_empty_openai_api_key_env_helper() {
+    load_runtime_from_env()
+        .await
+        .expect("non-empty OpenAI API key should allow startup");
+}
+
+#[tokio::test]
 async fn startup_rejects_when_no_api_keys_are_configured() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
