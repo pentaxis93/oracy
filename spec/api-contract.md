@@ -35,7 +35,8 @@ behavior are deferred to a later revision.
 ## Shared Conventions
 
 - Timestamps use RFC 3339 UTC strings.
-- Resource IDs are opaque strings.
+- Resource IDs are ULID-formatted strings: Crockford base32 encoding,
+  26 characters, lexicographically sortable.
 - Collection endpoints return the same envelope shape:
 
 ```json
@@ -122,7 +123,7 @@ Request:
   "recorded_at": "2026-04-21T18:29:55Z",
   "chunk_count": 3,
   "audio_format": "m4a",
-  "session_id": "01JS9P0X3NM4Q5R6S7T8U9V0W1",
+  "session_id": "01JS9P0X3NM4Q5R6S7T8V9W0X1",
   "language": "en"
 }
 ```
@@ -875,7 +876,7 @@ Semantics:
   "cost_cents": 1,
   "created_at": "2026-04-21T18:31:19Z",
   "recorded_at": "2026-04-21T18:29:55Z",
-  "session_id": "01JS9P0X3NM4Q5R6S7T8U9V0W1",
+  "session_id": "01JS9P0X3NM4Q5R6S7T8V9W0X1",
   "tags": [
     {
       "id": "01JS9P0Q0THR2X3E4A5B6C7D8E",
@@ -975,7 +976,7 @@ Fields:
 
 ```json
 {
-  "id": "01JS9P0X3NM4Q5R6S7T8U9V0W1",
+  "id": "01JS9P0X3NM4Q5R6S7T8V9W0X1",
   "name": "Q2 Planning",
   "created_at": "2026-04-21T18:31:35Z"
 }

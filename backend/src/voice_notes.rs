@@ -1,12 +1,11 @@
-use std::collections::HashMap;
-
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, RawQuery, State};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::{OffsetDateTime, UtcOffset};
+use ulid::Ulid;
 
 use crate::auth::AuthenticatedKey;
 use crate::errors::{ApiError, CollectionEnvelope, ErrorDetail};
@@ -92,8 +91,9 @@ struct PositionCursor {
 pub async fn list_voice_notes(
     authenticated_key: AuthenticatedKey,
     State(state): State<AppState>,
-    Query(params): Query<HashMap<String, String>>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<CollectionEnvelope<VoiceNoteResource>>, ApiError> {
+    let params = parse_query_params(raw_query.as_deref());
     let page = parse_time_page_query(&params, CursorKind::VoiceNoteHistory)?;
     let rows = state
         .storage
@@ -120,6 +120,7 @@ pub async fn get_voice_note(
     State(state): State<AppState>,
     Path(voice_note_id): Path<String>,
 ) -> Result<Json<VoiceNoteResource>, ApiError> {
+    validate_ulid_field("voice_note_id", &voice_note_id)?;
     let Some(record) = state
         .storage
         .get_transcript(authenticated_key.api_key_id.as_str(), &voice_note_id)
@@ -141,8 +142,10 @@ pub async fn list_voice_note_versions(
     authenticated_key: AuthenticatedKey,
     State(state): State<AppState>,
     Path(voice_note_id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<CollectionEnvelope<VoiceNoteVersionResource>>, ApiError> {
+    validate_ulid_field("voice_note_id", &voice_note_id)?;
+    let params = parse_query_params(raw_query.as_deref());
     ensure_voice_note_exists(
         &state,
         authenticated_key.api_key_id.as_str(),
@@ -189,8 +192,10 @@ pub async fn list_voice_note_segments(
     authenticated_key: AuthenticatedKey,
     State(state): State<AppState>,
     Path(voice_note_id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<CollectionEnvelope<SegmentResource>>, ApiError> {
+    validate_ulid_field("voice_note_id", &voice_note_id)?;
+    let params = parse_query_params(raw_query.as_deref());
     ensure_voice_note_exists(
         &state,
         authenticated_key.api_key_id.as_str(),
@@ -228,8 +233,10 @@ pub async fn list_session_voice_notes(
     authenticated_key: AuthenticatedKey,
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<CollectionEnvelope<VoiceNoteResource>>, ApiError> {
+    validate_ulid_field("session_id", &session_id)?;
+    let params = parse_query_params(raw_query.as_deref());
     if !state
         .storage
         .session_exists(authenticated_key.api_key_id.as_str(), &session_id)
@@ -315,52 +322,79 @@ async fn render_voice_note_page(
 }
 
 fn parse_time_page_query(
-    params: &HashMap<String, String>,
+    params: &[(String, String)],
     cursor_kind: CursorKind,
 ) -> Result<PageQuery<(OffsetDateTime, String)>, ApiError> {
     validate_transitional_query(params, cursor_kind)?;
     Ok(PageQuery {
         limit: parse_limit(params)?,
-        cursor: params
-            .get("cursor")
+        cursor: query_first(params, "cursor")
             .map(|cursor| parse_time_cursor(cursor, cursor_kind))
             .transpose()?,
     })
 }
 
 fn parse_position_page_query(
-    params: &HashMap<String, String>,
+    params: &[(String, String)],
     cursor_kind: CursorKind,
 ) -> Result<PageQuery<i64>, ApiError> {
     validate_transitional_query(params, cursor_kind)?;
     Ok(PageQuery {
         limit: parse_limit(params)?,
-        cursor: params
-            .get("cursor")
+        cursor: query_first(params, "cursor")
             .map(|cursor| parse_position_cursor(cursor, cursor_kind))
             .transpose()?,
     })
 }
 
 fn validate_transitional_query(
-    params: &HashMap<String, String>,
+    params: &[(String, String)],
     cursor_kind: CursorKind,
 ) -> Result<(), ApiError> {
-    if cursor_kind.is_voice_note_collection()
-        && params.contains_key("search_mode")
-        && !params.contains_key("q")
-    {
-        return Err(validation_error(
-            "search_mode",
-            "Must be supplied only when q is present.",
-        ));
+    if cursor_kind.is_voice_note_collection() {
+        let has_q = query_any(params, "q");
+        for search_mode in query_values(params, "search_mode") {
+            if !has_q {
+                return Err(validation_error(
+                    "search_mode",
+                    "Must be supplied only when q is present.",
+                ));
+            }
+            if !matches!(search_mode, "keyword" | "semantic" | "hybrid") {
+                return Err(validation_error(
+                    "search_mode",
+                    "Must be one of keyword, semantic, hybrid.",
+                ));
+            }
+        }
+
+        for tag_id in query_values(params, "tag_id") {
+            validate_ulid_field("tag_id", tag_id)?;
+        }
+
+        if cursor_kind == CursorKind::VoiceNoteHistory {
+            for session_id in query_values(params, "session_id") {
+                validate_ulid_field("session_id", session_id)?;
+            }
+        }
+
+        for field in [
+            "recorded_after",
+            "recorded_before",
+            "created_after",
+            "created_before",
+        ] {
+            for value in query_values(params, field) {
+                validate_rfc3339_field(field, value)?;
+            }
+        }
     }
 
     Ok(())
 }
 
-fn parse_limit(params: &HashMap<String, String>) -> Result<i64, ApiError> {
-    let Some(raw_limit) = params.get("limit") else {
+fn parse_limit(params: &[(String, String)]) -> Result<i64, ApiError> {
+    let Some(raw_limit) = query_first(params, "limit") else {
         return Ok(DEFAULT_LIMIT);
     };
     let limit = raw_limit
@@ -371,6 +405,37 @@ fn parse_limit(params: &HashMap<String, String>) -> Result<i64, ApiError> {
     }
 
     Ok(limit)
+}
+
+fn parse_query_params(raw_query: Option<&str>) -> Vec<(String, String)> {
+    raw_query
+        .map(|query| {
+            form_urlencoded::parse(query.as_bytes())
+                .into_owned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn query_first<'a>(params: &'a [(String, String)], field: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|(name, _)| name == field)
+        .map(|(_, value)| value.as_str())
+}
+
+fn query_any(params: &[(String, String)], field: &str) -> bool {
+    query_first(params, field).is_some()
+}
+
+fn query_values<'a>(
+    params: &'a [(String, String)],
+    field: &'a str,
+) -> impl Iterator<Item = &'a str> {
+    params
+        .iter()
+        .filter(move |(name, _)| name == field)
+        .map(|(_, value)| value.as_str())
 }
 
 fn parse_time_cursor(
@@ -500,6 +565,29 @@ fn validation_error(field: &str, message: &str) -> ApiError {
             message: message.to_owned(),
         }]),
     )
+}
+
+fn validate_ulid_field(field: &str, value: &str) -> Result<(), ApiError> {
+    let parsed =
+        Ulid::from_string(value).map_err(|_| validation_error(field, "Must be a valid ULID."))?;
+    if parsed.to_string() != value {
+        return Err(validation_error(field, "Must be a valid ULID."));
+    }
+
+    Ok(())
+}
+
+fn validate_rfc3339_field(field: &str, value: &str) -> Result<(), ApiError> {
+    let parsed = OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|_| validation_error(field, "Must be an RFC 3339 UTC timestamp."))?;
+    if parsed.offset() != UtcOffset::UTC {
+        return Err(validation_error(
+            field,
+            "Must be an RFC 3339 UTC timestamp.",
+        ));
+    }
+
+    Ok(())
 }
 
 fn malformed_cursor() -> ApiError {
