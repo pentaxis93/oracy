@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Define the backend runtime commitment not to emit the literal
+  `OPENAI_API_KEY` value through backend-controlled logs, diagnostics, or error
+  surfaces.
 - Add the operator-facing deployment contract for backend accepted-audio
   storage, SQLite persistence, and `OPENAI_API_KEY` provisioning.
 - Preserve the shared `ErrorResponse` envelope for framework-owned API

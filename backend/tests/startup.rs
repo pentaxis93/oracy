@@ -131,6 +131,45 @@ async fn startup_accepts_non_empty_openai_api_key_env_helper() {
 }
 
 #[tokio::test]
+async fn startup_error_diagnostics_do_not_emit_openai_api_key_value() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        r#"
+accepted_audio_dir = "missing"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#
+        .to_owned(),
+    );
+
+    support::assert_ignored_test_passes_with_env(
+        "startup_error_diagnostics_do_not_emit_openai_api_key_value_helper",
+        &[
+            ("ORACY_CONFIG", config_path.as_os_str()),
+            (
+                "OPENAI_API_KEY",
+                std::ffi::OsStr::new("sentinel-openai-key-value"),
+            ),
+        ],
+        &[],
+    );
+}
+
+#[tokio::test]
+#[ignore = "helper subprocess only"]
+async fn startup_error_diagnostics_do_not_emit_openai_api_key_value_helper() {
+    let error = load_runtime_from_env()
+        .await
+        .expect_err("invalid runtime should fail");
+    let diagnostic = error.to_string();
+
+    assert!(!diagnostic.contains("sentinel-openai-key-value"));
+}
+
+#[tokio::test]
 async fn startup_rejects_when_no_api_keys_are_configured() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = write_config(
