@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add the operator-facing deployment contract for backend accepted-audio
+  storage, SQLite persistence, and `OPENAI_API_KEY` provisioning.
 - Preserve the shared `ErrorResponse` envelope for framework-owned API
   rejections, including unsupported methods and JSON body parse, content-type,
   shape, and size failures.

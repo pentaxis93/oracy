@@ -48,9 +48,9 @@ required, not optional.
   deployment optimization.
 - The backend must not advertise durable acceptance semantics when
   this location is unavailable or not writable.
-- `spec/deployment.md` must later define the operator's persistent-
-  storage responsibilities, including path provisioning, persistence
-  across restart, and capacity implications.
+- `spec/deployment.md` defines the operator's persistent-storage
+  responsibilities, including path provisioning, persistence across
+  restart, filesystem semantics, and capacity implications.
 
 ### `OPENAI_API_KEY`
 
@@ -60,8 +60,8 @@ required, not optional.
   variable.
 - The backend must not advertise transcription capability when
   `OPENAI_API_KEY` is unset or empty.
-- `spec/deployment.md` must later define the operator's responsibility
-  for provisioning, rotating, and protecting this credential.
+- `spec/deployment.md` defines the operator's responsibility for
+  provisioning, rotating, and protecting this credential.
 
 ## Constraints
 
