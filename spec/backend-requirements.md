@@ -60,8 +60,19 @@ required, not optional.
   variable.
 - The backend must not advertise transcription capability when
   `OPENAI_API_KEY` is unset or empty.
+- Backend-controlled output must not emit the literal
+  `OPENAI_API_KEY` value. This includes logs, startup diagnostics,
+  HTTP error bodies, backend error messages, and other diagnostics
+  produced by backend code.
+- Backend-controlled output may name the `OPENAI_API_KEY` environment
+  variable and may report that it is missing or empty.
 - `spec/deployment.md` defines the operator's responsibility for
-  provisioning, rotating, and protecting this credential.
+  provisioning, rotating, and protecting this credential. Operator-
+  controlled provisioning surfaces are outside the backend-side
+  non-emission commitment, including environment files, service
+  manager configuration, secret-store tooling, copied configuration,
+  shell history, and diagnostics produced by deployment tooling
+  outside the backend.
 
 ## Constraints
 
@@ -586,6 +597,8 @@ following are true:
 - The operator's persistent storage location and `OPENAI_API_KEY` are
   named as required prerequisites, and the backend refuses to
   advertise the dependent capabilities when either is missing.
+- The backend-side `OPENAI_API_KEY` non-emission commitment and its
+  boundary with operator-controlled provisioning surfaces are explicit.
 - A valid open call returns a `TranscriptionJob` in
   `accepting_chunks` with the declared `chunk_count`.
 - Each accepted chunk push moves `chunks_received` toward
