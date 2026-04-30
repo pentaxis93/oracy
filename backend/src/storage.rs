@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use caseless::Caseless;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, SqlitePool};
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -223,6 +223,14 @@ pub struct TranscriptRecord {
     pub created_at: OffsetDateTime,
     pub recorded_at: OffsetDateTime,
     pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptVersionRecord {
+    pub id: String,
+    pub transcript_id: String,
+    pub transcript: String,
+    pub created_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -652,6 +660,118 @@ impl Storage {
         row.map(transcript_from_row).transpose()
     }
 
+    pub async fn list_transcripts(
+        &self,
+        api_key_id: &str,
+        cursor: Option<(OffsetDateTime, String)>,
+        limit: i64,
+    ) -> Result<Vec<TranscriptRecord>, StorageError> {
+        self.list_transcripts_in_session(api_key_id, None, cursor, limit)
+            .await
+    }
+
+    pub async fn list_session_transcripts(
+        &self,
+        api_key_id: &str,
+        session_id: &str,
+        cursor: Option<(OffsetDateTime, String)>,
+        limit: i64,
+    ) -> Result<Vec<TranscriptRecord>, StorageError> {
+        self.list_transcripts_in_session(api_key_id, Some(session_id), cursor, limit)
+            .await
+    }
+
+    async fn list_transcripts_in_session(
+        &self,
+        api_key_id: &str,
+        session_id: Option<&str>,
+        cursor: Option<(OffsetDateTime, String)>,
+        limit: i64,
+    ) -> Result<Vec<TranscriptRecord>, StorageError> {
+        let cursor_created_at = cursor
+            .as_ref()
+            .map(|(created_at, _)| format_timestamp(*created_at))
+            .transpose()?;
+        let cursor_id = cursor.as_ref().map(|(_, id)| id.as_str());
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                transcripts.*,
+                transcript_versions.id AS current_version_id,
+                transcript_versions.transcript AS current_transcript
+            FROM transcripts
+            JOIN transcript_versions
+                ON transcript_versions.transcript_id = transcripts.id
+            WHERE transcripts.api_key_id = ?
+                AND (? IS NULL OR transcripts.session_id = ?)
+                AND transcript_versions.version_number = (
+                    SELECT MAX(version_number)
+                    FROM transcript_versions
+                    WHERE transcript_id = transcripts.id
+                )
+                AND (
+                    ? IS NULL
+                    OR transcripts.created_at < ?
+                    OR (transcripts.created_at = ? AND transcripts.id < ?)
+                )
+            ORDER BY transcripts.created_at DESC, transcripts.id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(session_id)
+        .bind(session_id)
+        .bind(&cursor_created_at)
+        .bind(&cursor_created_at)
+        .bind(&cursor_created_at)
+        .bind(cursor_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(transcript_from_row).collect()
+    }
+
+    pub async fn list_transcript_versions(
+        &self,
+        api_key_id: &str,
+        transcript_id: &str,
+        cursor: Option<(OffsetDateTime, String)>,
+        limit: i64,
+    ) -> Result<Vec<TranscriptVersionRecord>, StorageError> {
+        let cursor_created_at = cursor
+            .as_ref()
+            .map(|(created_at, _)| format_timestamp(*created_at))
+            .transpose()?;
+        let cursor_id = cursor.as_ref().map(|(_, id)| id.as_str());
+        let rows = sqlx::query(
+            r#"
+            SELECT id, transcript_id, transcript, created_at
+            FROM transcript_versions
+            WHERE api_key_id = ?
+                AND transcript_id = ?
+                AND (
+                    ? IS NULL
+                    OR created_at < ?
+                    OR (created_at = ? AND id < ?)
+                )
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(transcript_id)
+        .bind(&cursor_created_at)
+        .bind(&cursor_created_at)
+        .bind(&cursor_created_at)
+        .bind(cursor_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(transcript_version_from_row).collect()
+    }
+
     pub async fn list_segments(
         &self,
         api_key_id: &str,
@@ -671,6 +791,55 @@ impl Storage {
         .await?;
 
         rows.into_iter().map(segment_from_row).collect()
+    }
+
+    pub async fn list_segments_page(
+        &self,
+        api_key_id: &str,
+        transcript_id: &str,
+        cursor: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<SegmentRecord>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, transcript_id, position, start_ms, end_ms, text
+            FROM segments
+            WHERE api_key_id = ?
+                AND transcript_id = ?
+                AND (? IS NULL OR position > ?)
+            ORDER BY position ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(transcript_id)
+        .bind(cursor)
+        .bind(cursor)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(segment_from_row).collect()
+    }
+
+    pub async fn session_exists(
+        &self,
+        api_key_id: &str,
+        session_id: &str,
+    ) -> Result<bool, StorageError> {
+        let exists: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT 1
+            FROM sessions
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(exists.is_some())
     }
 
     pub async fn replace_current_embedding(
@@ -1049,6 +1218,58 @@ impl Storage {
 
         rows.into_iter().map(tag_from_row).collect()
     }
+
+    pub async fn list_tags_for_transcripts(
+        &self,
+        api_key_id: &str,
+        transcript_ids: &[String],
+    ) -> Result<HashMap<String, Vec<TagRecord>>, StorageError> {
+        if transcript_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut query = QueryBuilder::new(
+            r#"
+            SELECT
+                transcript_tags.transcript_id AS transcript_id,
+                tags.id AS tag_id,
+                tags.api_key_id AS api_key_id,
+                tags.name AS name,
+                tags.created_at AS created_at
+            FROM transcript_tags
+            JOIN tags
+                ON tags.api_key_id = transcript_tags.api_key_id
+                AND tags.id = transcript_tags.tag_id
+            WHERE transcript_tags.api_key_id =
+            "#,
+        );
+        query.push_bind(api_key_id);
+        query.push(" AND transcript_tags.transcript_id IN (");
+        let mut separated = query.separated(", ");
+        for transcript_id in transcript_ids {
+            separated.push_bind(transcript_id);
+        }
+        separated.push_unseparated(")");
+        query.push(
+            " ORDER BY transcript_tags.transcript_id ASC, tags.created_at DESC, tags.id DESC",
+        );
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+        let mut tags_by_transcript = HashMap::new();
+        for transcript_id in transcript_ids {
+            tags_by_transcript.insert(transcript_id.clone(), Vec::new());
+        }
+        for row in rows {
+            let transcript_id: String = row.try_get("transcript_id")?;
+            let tag = tag_from_prefixed_row(row)?;
+            tags_by_transcript
+                .entry(transcript_id)
+                .or_default()
+                .push(tag);
+        }
+
+        Ok(tags_by_transcript)
+    }
 }
 
 impl TranscriptionJobRecord {
@@ -1200,6 +1421,17 @@ fn transcript_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TranscriptRecord,
     })
 }
 
+fn transcript_version_from_row(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<TranscriptVersionRecord, StorageError> {
+    Ok(TranscriptVersionRecord {
+        id: row.try_get("id")?,
+        transcript_id: row.try_get("transcript_id")?,
+        transcript: row.try_get("transcript")?,
+        created_at: parse_timestamp(row.try_get("created_at")?)?,
+    })
+}
+
 fn segment_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SegmentRecord, StorageError> {
     Ok(SegmentRecord {
         id: row.try_get("id")?,
@@ -1223,6 +1455,15 @@ fn embedding_from_row(row: sqlx::sqlite::SqliteRow) -> Result<EmbeddingRecord, S
 fn tag_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TagRecord, StorageError> {
     Ok(TagRecord {
         id: row.try_get("id")?,
+        api_key_id: row.try_get("api_key_id")?,
+        name: row.try_get("name")?,
+        created_at: parse_timestamp(row.try_get("created_at")?)?,
+    })
+}
+
+fn tag_from_prefixed_row(row: sqlx::sqlite::SqliteRow) -> Result<TagRecord, StorageError> {
+    Ok(TagRecord {
+        id: row.try_get("tag_id")?,
         api_key_id: row.try_get("api_key_id")?,
         name: row.try_get("name")?,
         created_at: parse_timestamp(row.try_get("created_at")?)?,

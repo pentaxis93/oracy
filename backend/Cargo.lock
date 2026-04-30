@@ -963,6 +963,7 @@ name = "oracy-backend"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "caseless",
  "serde",
  "serde_json",
