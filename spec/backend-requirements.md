@@ -506,10 +506,6 @@ Semantics:
   shape, filters, and pagination. This is an explicit `v0.1.0`
   governance decision to avoid duplicating voice-note collection
   surface with no semantic gain.
-- Until search semantics land, a valid `q` returns an empty
-  collection envelope after validating all supplied search and filter
-  parameters. This preserves the contract surface without presenting
-  history rows as search results.
 - Search results are always `VoiceNote` resources. Jobs, sessions,
   tags, versions, and segments are not returned as search hits.
 - Keyword search supports full-text matching over current voice-note
@@ -646,9 +642,8 @@ following are true:
 - Search behavior is explicit: history and search share one voice-
   note collection contract, omitted `search_mode` with `q` defaults
   to `hybrid`, repeated `tag_id` filters intersect, results are
-  voice-note-only, deferred search returns an empty collection rather
-  than history rows, and semantic search is eventually consistent
-  after edits.
+  voice-note-only, and semantic search is eventually consistent after
+  edits.
 - Deletion semantics are explicit and match resource ownership
   expectations.
 - Audio retention semantics are explicit: chunks and composed audio
