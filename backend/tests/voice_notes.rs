@@ -972,9 +972,9 @@ impl VoiceNoteFixture {
 
         sqlx::query(
             r#"
-            INSERT INTO transcripts (
+            INSERT INTO voice_notes (
                 id, api_key_id, audio_duration_seconds, audio_format, audio_size_bytes,
-                transcript_language, model, processing_time_ms, cost_cents,
+                language, model, processing_time_ms, cost_cents,
                 created_at, recorded_at, session_id
             )
             VALUES (?, ?, 12.5, 'wav', 401280, 'en', 'gpt-4o-mini-transcribe', 1843, NULL, ?, ?, ?)
@@ -987,12 +987,12 @@ impl VoiceNoteFixture {
         .bind(seed.session_id)
         .execute(self.storage.pool())
         .await
-        .expect("insert transcript");
+        .expect("insert voice note");
 
         sqlx::query(
             r#"
-            INSERT INTO transcript_versions (
-                id, api_key_id, transcript_id, version_number, transcript, created_at
+            INSERT INTO voice_note_versions (
+                id, api_key_id, voice_note_id, version_number, text, created_at
             )
             VALUES (?, ?, ?, 1, ?, ?)
             "#,
@@ -1004,7 +1004,7 @@ impl VoiceNoteFixture {
         .bind(seed.created_at)
         .execute(self.storage.pool())
         .await
-        .expect("insert transcript version");
+        .expect("insert voice note version");
 
         for tag in seed.tags {
             sqlx::query(
@@ -1024,7 +1024,7 @@ impl VoiceNoteFixture {
 
             sqlx::query(
                 r#"
-                INSERT INTO transcript_tags (api_key_id, transcript_id, tag_id)
+                INSERT INTO voice_note_tags (api_key_id, voice_note_id, tag_id)
                 VALUES (?, ?, ?)
                 "#,
             )
@@ -1033,7 +1033,7 @@ impl VoiceNoteFixture {
             .bind(tag.id)
             .execute(self.storage.pool())
             .await
-            .expect("insert transcript tag");
+            .expect("insert voice note tag");
         }
     }
 
@@ -1048,8 +1048,8 @@ impl VoiceNoteFixture {
     ) {
         sqlx::query(
             r#"
-            INSERT INTO transcript_versions (
-                id, api_key_id, transcript_id, version_number, transcript, created_at
+            INSERT INTO voice_note_versions (
+                id, api_key_id, voice_note_id, version_number, text, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?)
             "#,
@@ -1062,7 +1062,7 @@ impl VoiceNoteFixture {
         .bind(created_at)
         .execute(self.storage.pool())
         .await
-        .expect("insert transcript version");
+        .expect("insert voice note version");
     }
 
     async fn insert_segment(
@@ -1076,7 +1076,7 @@ impl VoiceNoteFixture {
         sqlx::query(
             r#"
             INSERT INTO segments (
-                id, api_key_id, transcript_id, position, start_ms, end_ms, text
+                id, api_key_id, voice_note_id, position, start_ms, end_ms, text
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
