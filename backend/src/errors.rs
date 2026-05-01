@@ -53,6 +53,20 @@ impl ApiError {
         }
     }
 
+    pub fn repeated_singular_parameter(field: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            body: ErrorResponse {
+                error_code: "repeated_singular_parameter".to_owned(),
+                message: "A singular query parameter was supplied more than once.".to_owned(),
+                details: Some(vec![ErrorDetail {
+                    field: field.into(),
+                    message: "Must be supplied at most once.".to_owned(),
+                }]),
+            },
+        }
+    }
+
     pub fn from_json_rejection(rejection: JsonRejection) -> Self {
         match rejection {
             JsonRejection::JsonSyntaxError(_) => Self::malformed_json(),

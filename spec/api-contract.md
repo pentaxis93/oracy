@@ -61,6 +61,10 @@ behavior are deferred to a later revision.
   `error_code: "invalid_request_shape"`; a JSON body exceeding the
   configured body limit returns `413 Payload Too Large` with
   `error_code: "payload_too_large"`.
+- A singular query parameter supplied more than once returns
+  `400 Bad Request` with
+  `error_code: "repeated_singular_parameter"` and a `details` entry
+  naming the repeated parameter.
 
 ### `ErrorResponse`
 

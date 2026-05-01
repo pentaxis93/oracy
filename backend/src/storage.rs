@@ -233,6 +233,16 @@ pub struct TranscriptVersionRecord {
     pub created_at: OffsetDateTime,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TranscriptFilters {
+    pub tag_ids: Vec<String>,
+    pub session_id: Option<String>,
+    pub recorded_after: Option<OffsetDateTime>,
+    pub recorded_before: Option<OffsetDateTime>,
+    pub created_after: Option<OffsetDateTime>,
+    pub created_before: Option<OffsetDateTime>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentRecord {
     pub id: String,
@@ -663,10 +673,11 @@ impl Storage {
     pub async fn list_transcripts(
         &self,
         api_key_id: &str,
+        filters: &TranscriptFilters,
         cursor: Option<(OffsetDateTime, String)>,
         limit: i64,
     ) -> Result<Vec<TranscriptRecord>, StorageError> {
-        self.list_transcripts_in_session(api_key_id, None, cursor, limit)
+        self.list_transcripts_in_session(api_key_id, None, filters, cursor, limit)
             .await
     }
 
@@ -674,10 +685,11 @@ impl Storage {
         &self,
         api_key_id: &str,
         session_id: &str,
+        filters: &TranscriptFilters,
         cursor: Option<(OffsetDateTime, String)>,
         limit: i64,
     ) -> Result<Vec<TranscriptRecord>, StorageError> {
-        self.list_transcripts_in_session(api_key_id, Some(session_id), cursor, limit)
+        self.list_transcripts_in_session(api_key_id, Some(session_id), filters, cursor, limit)
             .await
     }
 
@@ -685,6 +697,7 @@ impl Storage {
         &self,
         api_key_id: &str,
         session_id: Option<&str>,
+        filters: &TranscriptFilters,
         cursor: Option<(OffsetDateTime, String)>,
         limit: i64,
     ) -> Result<Vec<TranscriptRecord>, StorageError> {
@@ -693,7 +706,12 @@ impl Storage {
             .map(|(created_at, _)| format_timestamp(*created_at))
             .transpose()?;
         let cursor_id = cursor.as_ref().map(|(_, id)| id.as_str());
-        let rows = sqlx::query(
+        let recorded_after = filters.recorded_after.map(format_timestamp).transpose()?;
+        let recorded_before = filters.recorded_before.map(format_timestamp).transpose()?;
+        let created_after = filters.created_after.map(format_timestamp).transpose()?;
+        let created_before = filters.created_before.map(format_timestamp).transpose()?;
+        let effective_session_id = session_id.or(filters.session_id.as_deref());
+        let mut query = QueryBuilder::new(
             r#"
             SELECT
                 transcripts.*,
@@ -702,32 +720,70 @@ impl Storage {
             FROM transcripts
             JOIN transcript_versions
                 ON transcript_versions.transcript_id = transcripts.id
-            WHERE transcripts.api_key_id = ?
-                AND (? IS NULL OR transcripts.session_id = ?)
+            WHERE transcripts.api_key_id =
+            "#,
+        );
+        query.push_bind(api_key_id);
+        if let Some(session_id) = effective_session_id {
+            query.push(" AND transcripts.session_id = ");
+            query.push_bind(session_id);
+        }
+        if let Some(recorded_after) = recorded_after.as_deref() {
+            query.push(" AND transcripts.recorded_at > ");
+            query.push_bind(recorded_after);
+        }
+        if let Some(recorded_before) = recorded_before.as_deref() {
+            query.push(" AND transcripts.recorded_at <= ");
+            query.push_bind(recorded_before);
+        }
+        if let Some(created_after) = created_after.as_deref() {
+            query.push(" AND transcripts.created_at > ");
+            query.push_bind(created_after);
+        }
+        if let Some(created_before) = created_before.as_deref() {
+            query.push(" AND transcripts.created_at <= ");
+            query.push_bind(created_before);
+        }
+        for tag_id in &filters.tag_ids {
+            query.push(
+                r#"
+                AND EXISTS (
+                    SELECT 1
+                    FROM transcript_tags
+                    WHERE transcript_tags.api_key_id = transcripts.api_key_id
+                        AND transcript_tags.transcript_id = transcripts.id
+                        AND transcript_tags.tag_id =
+                "#,
+            );
+            query.push_bind(tag_id);
+            query.push(")");
+        }
+        query.push(
+            r#"
                 AND transcript_versions.version_number = (
                     SELECT MAX(version_number)
                     FROM transcript_versions
                     WHERE transcript_id = transcripts.id
                 )
-                AND (
-                    ? IS NULL
-                    OR transcripts.created_at < ?
-                    OR (transcripts.created_at = ? AND transcripts.id < ?)
-                )
-            ORDER BY transcripts.created_at DESC, transcripts.id DESC
-            LIMIT ?
             "#,
-        )
-        .bind(api_key_id)
-        .bind(session_id)
-        .bind(session_id)
-        .bind(&cursor_created_at)
-        .bind(&cursor_created_at)
-        .bind(&cursor_created_at)
-        .bind(cursor_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        );
+        if let Some(cursor_created_at) = cursor_created_at.as_deref() {
+            query.push(
+                r#"
+                AND (
+                    transcripts.created_at <
+                "#,
+            );
+            query.push_bind(cursor_created_at);
+            query.push(" OR (transcripts.created_at = ");
+            query.push_bind(cursor_created_at);
+            query.push(" AND transcripts.id < ");
+            query.push_bind(cursor_id.expect("cursor id is present with cursor timestamp"));
+            query.push("))");
+        }
+        query.push(" ORDER BY transcripts.created_at DESC, transcripts.id DESC LIMIT ");
+        query.push_bind(limit);
+        let rows = query.build().fetch_all(&self.pool).await?;
 
         rows.into_iter().map(transcript_from_row).collect()
     }

@@ -10,7 +10,9 @@ use ulid::Ulid;
 use crate::auth::AuthenticatedKey;
 use crate::errors::{ApiError, CollectionEnvelope, ErrorDetail};
 use crate::state::AppState;
-use crate::storage::{SegmentRecord, TagRecord, TranscriptRecord, TranscriptVersionRecord};
+use crate::storage::{
+    SegmentRecord, TagRecord, TranscriptFilters, TranscriptRecord, TranscriptVersionRecord,
+};
 
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 100;
@@ -28,6 +30,13 @@ enum CursorKind {
 struct PageQuery<T> {
     limit: i64,
     cursor: Option<T>,
+}
+
+#[derive(Debug, Clone)]
+struct VoiceNoteCollectionQuery {
+    page: PageQuery<(OffsetDateTime, String)>,
+    filters: TranscriptFilters,
+    search_requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,17 +103,18 @@ pub async fn list_voice_notes(
     RawQuery(raw_query): RawQuery,
 ) -> Result<Json<CollectionEnvelope<VoiceNoteResource>>, ApiError> {
     let params = parse_query_params(raw_query.as_deref());
-    let page = parse_time_page_query(&params, CursorKind::VoiceNoteHistory)?;
-    if has_deferred_collection_filter(&params, CursorKind::VoiceNoteHistory) {
-        return Ok(empty_collection());
+    let query = parse_voice_note_collection_query(&params, CursorKind::VoiceNoteHistory)?;
+    if query.search_requested {
+        return Ok(empty_voice_note_collection());
     }
 
     let rows = state
         .storage
         .list_transcripts(
             authenticated_key.api_key_id.as_str(),
-            page.cursor,
-            page.limit + 1,
+            &query.filters,
+            query.page.cursor,
+            query.page.limit + 1,
         )
         .await
         .map_err(|_| ApiError::internal("Failed to list voice notes."))?;
@@ -113,7 +123,7 @@ pub async fn list_voice_notes(
         authenticated_key.api_key_id.as_str(),
         &state,
         rows,
-        page.limit,
+        query.page.limit,
         CursorKind::VoiceNoteHistory,
     )
     .await
@@ -241,7 +251,7 @@ pub async fn list_session_voice_notes(
 ) -> Result<Json<CollectionEnvelope<VoiceNoteResource>>, ApiError> {
     validate_ulid_field("session_id", &session_id)?;
     let params = parse_query_params(raw_query.as_deref());
-    let page = parse_time_page_query(&params, CursorKind::SessionVoiceNoteHistory)?;
+    let query = parse_voice_note_collection_query(&params, CursorKind::SessionVoiceNoteHistory)?;
     if !state
         .storage
         .session_exists(authenticated_key.api_key_id.as_str(), &session_id)
@@ -251,8 +261,8 @@ pub async fn list_session_voice_notes(
         return Err(ApiError::not_found("Session not found."));
     }
 
-    if has_deferred_collection_filter(&params, CursorKind::SessionVoiceNoteHistory) {
-        return Ok(empty_collection());
+    if query.search_requested {
+        return Ok(empty_voice_note_collection());
     }
 
     let rows = state
@@ -260,8 +270,9 @@ pub async fn list_session_voice_notes(
         .list_session_transcripts(
             authenticated_key.api_key_id.as_str(),
             &session_id,
-            page.cursor,
-            page.limit + 1,
+            &query.filters,
+            query.page.cursor,
+            query.page.limit + 1,
         )
         .await
         .map_err(|_| ApiError::internal("Failed to list session voice notes."))?;
@@ -270,7 +281,7 @@ pub async fn list_session_voice_notes(
         authenticated_key.api_key_id.as_str(),
         &state,
         rows,
-        page.limit,
+        query.page.limit,
         CursorKind::SessionVoiceNoteHistory,
     )
     .await
@@ -329,10 +340,28 @@ async fn render_voice_note_page(
     Ok(Json(CollectionEnvelope { items, next_cursor }))
 }
 
-fn empty_collection<T>() -> Json<CollectionEnvelope<T>> {
+fn empty_voice_note_collection() -> Json<CollectionEnvelope<VoiceNoteResource>> {
     Json(CollectionEnvelope {
         items: Vec::new(),
         next_cursor: None,
+    })
+}
+
+fn parse_voice_note_collection_query(
+    params: &[(String, String)],
+    cursor_kind: CursorKind,
+) -> Result<VoiceNoteCollectionQuery, ApiError> {
+    validate_repeated_singular_query_params(params, cursor_kind)?;
+    validate_collection_query_values(params, cursor_kind)?;
+    Ok(VoiceNoteCollectionQuery {
+        page: PageQuery {
+            limit: parse_limit(params)?,
+            cursor: query_first(params, "cursor")
+                .map(|cursor| parse_time_cursor(cursor, cursor_kind))
+                .transpose()?,
+        },
+        filters: parse_transcript_filters(params, cursor_kind)?,
+        search_requested: query_any(params, "q"),
     })
 }
 
@@ -340,7 +369,8 @@ fn parse_time_page_query(
     params: &[(String, String)],
     cursor_kind: CursorKind,
 ) -> Result<PageQuery<(OffsetDateTime, String)>, ApiError> {
-    validate_transitional_query(params, cursor_kind)?;
+    validate_repeated_singular_query_params(params, cursor_kind)?;
+    validate_collection_query_values(params, cursor_kind)?;
     Ok(PageQuery {
         limit: parse_limit(params)?,
         cursor: query_first(params, "cursor")
@@ -353,7 +383,8 @@ fn parse_position_page_query(
     params: &[(String, String)],
     cursor_kind: CursorKind,
 ) -> Result<PageQuery<i64>, ApiError> {
-    validate_transitional_query(params, cursor_kind)?;
+    validate_repeated_singular_query_params(params, cursor_kind)?;
+    validate_collection_query_values(params, cursor_kind)?;
     Ok(PageQuery {
         limit: parse_limit(params)?,
         cursor: query_first(params, "cursor")
@@ -362,7 +393,41 @@ fn parse_position_page_query(
     })
 }
 
-fn validate_transitional_query(
+fn validate_repeated_singular_query_params(
+    params: &[(String, String)],
+    cursor_kind: CursorKind,
+) -> Result<(), ApiError> {
+    for field in ["cursor", "limit"] {
+        ensure_singular_query_param(params, field)?;
+    }
+    if cursor_kind.is_voice_note_collection() {
+        for field in [
+            "q",
+            "search_mode",
+            "recorded_after",
+            "recorded_before",
+            "created_after",
+            "created_before",
+        ] {
+            ensure_singular_query_param(params, field)?;
+        }
+        if cursor_kind == CursorKind::VoiceNoteHistory {
+            ensure_singular_query_param(params, "session_id")?;
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_singular_query_param(params: &[(String, String)], field: &str) -> Result<(), ApiError> {
+    if query_values(params, field).nth(1).is_some() {
+        return Err(ApiError::repeated_singular_parameter(field));
+    }
+
+    Ok(())
+}
+
+fn validate_collection_query_values(
     params: &[(String, String)],
     cursor_kind: CursorKind,
 ) -> Result<(), ApiError> {
@@ -408,23 +473,35 @@ fn validate_transitional_query(
     Ok(())
 }
 
-fn has_deferred_collection_filter(params: &[(String, String)], cursor_kind: CursorKind) -> bool {
-    if !cursor_kind.is_voice_note_collection() {
-        return false;
+fn parse_transcript_filters(
+    params: &[(String, String)],
+    cursor_kind: CursorKind,
+) -> Result<TranscriptFilters, ApiError> {
+    let mut filters = TranscriptFilters::default();
+    for tag_id in query_values(params, "tag_id") {
+        let tag_id = tag_id.to_owned();
+        if !filters.tag_ids.contains(&tag_id) {
+            filters.tag_ids.push(tag_id);
+        }
     }
+    if cursor_kind == CursorKind::VoiceNoteHistory {
+        filters.session_id = query_first(params, "session_id").map(str::to_owned);
+    }
+    filters.recorded_after = parse_optional_rfc3339_filter(params, "recorded_after")?;
+    filters.recorded_before = parse_optional_rfc3339_filter(params, "recorded_before")?;
+    filters.created_after = parse_optional_rfc3339_filter(params, "created_after")?;
+    filters.created_before = parse_optional_rfc3339_filter(params, "created_before")?;
 
-    query_any(params, "q")
-        || query_any(params, "search_mode")
-        || query_any(params, "tag_id")
-        || (cursor_kind == CursorKind::VoiceNoteHistory && query_any(params, "session_id"))
-        || [
-            "recorded_after",
-            "recorded_before",
-            "created_after",
-            "created_before",
-        ]
-        .into_iter()
-        .any(|field| query_any(params, field))
+    Ok(filters)
+}
+
+fn parse_optional_rfc3339_filter(
+    params: &[(String, String)],
+    field: &str,
+) -> Result<Option<OffsetDateTime>, ApiError> {
+    query_first(params, field)
+        .map(|value| parse_rfc3339_field(field, value))
+        .transpose()
 }
 
 fn parse_limit(params: &[(String, String)]) -> Result<i64, ApiError> {
@@ -612,6 +689,10 @@ fn validate_ulid_field(field: &str, value: &str) -> Result<(), ApiError> {
 }
 
 fn validate_rfc3339_field(field: &str, value: &str) -> Result<(), ApiError> {
+    parse_rfc3339_field(field, value).map(|_| ())
+}
+
+fn parse_rfc3339_field(field: &str, value: &str) -> Result<OffsetDateTime, ApiError> {
     let parsed = OffsetDateTime::parse(value, &Rfc3339)
         .map_err(|_| validation_error(field, "Must be an RFC 3339 UTC timestamp."))?;
     if parsed.offset() != UtcOffset::UTC {
@@ -621,7 +702,7 @@ fn validate_rfc3339_field(field: &str, value: &str) -> Result<(), ApiError> {
         ));
     }
 
-    Ok(())
+    Ok(parsed)
 }
 
 fn malformed_cursor() -> ApiError {

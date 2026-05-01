@@ -3,8 +3,8 @@
 ## Unreleased
 
 - Add authenticated voice-note history, detail, version-history, segment, and
-  session-scoped history read APIs. Search and filter query parameters are
-  accepted on the collection surfaces for wire compatibility but
+  session-scoped history read APIs. Collection filters compose across tags,
+  sessions, and recorded/created time ranges; search query parameters
   conservatively return no results until the tracked search work lands.
 - Define the backend runtime commitment not to emit the literal
   `OPENAI_API_KEY` value through backend-controlled logs, diagnostics, or error
