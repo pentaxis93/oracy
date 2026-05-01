@@ -35,7 +35,8 @@ behavior are deferred to a later revision.
 ## Shared Conventions
 
 - Timestamps use RFC 3339 UTC strings.
-- Resource IDs are opaque strings.
+- Resource IDs are ULID-formatted strings: Crockford base32 encoding,
+  26 characters, lexicographically sortable.
 - Collection endpoints return the same envelope shape:
 
 ```json
@@ -60,6 +61,10 @@ behavior are deferred to a later revision.
   `error_code: "invalid_request_shape"`; a JSON body exceeding the
   configured body limit returns `413 Payload Too Large` with
   `error_code: "payload_too_large"`.
+- A singular query parameter supplied more than once returns
+  `400 Bad Request` with
+  `error_code: "repeated_singular_parameter"` and a `details` entry
+  naming the repeated parameter.
 
 ### `ErrorResponse`
 
@@ -122,7 +127,7 @@ Request:
   "recorded_at": "2026-04-21T18:29:55Z",
   "chunk_count": 3,
   "audio_format": "m4a",
-  "session_id": "01JS9P0X3NM4Q5R6S7T8U9V0W1",
+  "session_id": "01JS9P0X3NM4Q5R6S7T8V9W0X1",
   "language": "en"
 }
 ```
@@ -283,8 +288,11 @@ Notes:
 - Without `q`, the endpoint returns voice-note history ordered
   newest-first by voice-note `created_at`, with descending `id` as
   the deterministic tiebreaker for cursor pagination.
-- With `q`, the endpoint returns voice-note search results using the
-  same `VoiceNote` resource shape, filters, and collection envelope.
+- Until search semantics land, a valid `q` returns an empty
+  `{items: [], next_cursor: null}` envelope after validating all
+  supplied search and filter parameters. Search results will use the
+  same `VoiceNote` resource shape, filters, and collection envelope
+  when the tracked search work lands.
 - If `q` is present and `search_mode` is omitted, the backend uses
   `hybrid`.
 - Search results are always voice-note resources.
@@ -714,6 +722,9 @@ Notes:
 - This endpoint applies the same collection semantics as
   `GET /api/v1/voice-notes` but with the session scope fixed by the
   path, including the same ordering and time-bound semantics.
+- Until search semantics land, a valid `q` returns an empty
+  `{items: [], next_cursor: null}` envelope after validating all
+  supplied search and filter parameters.
 - If `q` is present and `search_mode` is omitted, the backend uses
   `hybrid`.
 - Repeated `tag_id` filters combine by intersection.
@@ -875,7 +886,7 @@ Semantics:
   "cost_cents": 1,
   "created_at": "2026-04-21T18:31:19Z",
   "recorded_at": "2026-04-21T18:29:55Z",
-  "session_id": "01JS9P0X3NM4Q5R6S7T8U9V0W1",
+  "session_id": "01JS9P0X3NM4Q5R6S7T8V9W0X1",
   "tags": [
     {
       "id": "01JS9P0Q0THR2X3E4A5B6C7D8E",
@@ -975,7 +986,7 @@ Fields:
 
 ```json
 {
-  "id": "01JS9P0X3NM4Q5R6S7T8U9V0W1",
+  "id": "01JS9P0X3NM4Q5R6S7T8V9W0X1",
   "name": "Q2 Planning",
   "created_at": "2026-04-21T18:31:35Z"
 }
