@@ -2,6 +2,10 @@ use axum::Router;
 use axum::routing::get;
 
 use crate::errors::ApiError;
+use crate::metadata::{
+    create_session, create_tag, delete_session, delete_tag, get_session, get_tag, list_sessions,
+    list_tags, patch_session, patch_tag,
+};
 use crate::settings::{get_settings, patch_settings};
 use crate::state::AppState;
 use crate::voice_notes::{
@@ -12,6 +16,16 @@ use crate::voice_notes::{
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/settings", get(get_settings).patch(patch_settings))
+        .route("/api/v1/tags", get(list_tags).post(create_tag))
+        .route(
+            "/api/v1/tags/{tag_id}",
+            get(get_tag).patch(patch_tag).delete(delete_tag),
+        )
+        .route("/api/v1/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/api/v1/sessions/{session_id}",
+            get(get_session).patch(patch_session).delete(delete_session),
+        )
         .route("/api/v1/voice-notes", get(list_voice_notes))
         .route("/api/v1/voice-notes/{voice_note_id}", get(get_voice_note))
         .route(

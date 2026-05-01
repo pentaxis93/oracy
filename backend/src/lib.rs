@@ -3,9 +3,11 @@
 pub mod audio_hash;
 pub mod auth;
 pub mod bootstrap;
+pub mod collections;
 pub mod config;
 pub mod errors;
 pub mod json;
+pub mod metadata;
 pub mod router;
 pub mod settings;
 pub mod state;

@@ -898,6 +898,80 @@ impl Storage {
         Ok(exists.is_some())
     }
 
+    pub async fn list_tags(
+        &self,
+        api_key_id: &str,
+        cursor: Option<(OffsetDateTime, String)>,
+        limit: i64,
+    ) -> Result<Vec<TagRecord>, StorageError> {
+        let cursor_created_at = cursor
+            .as_ref()
+            .map(|(created_at, _)| format_timestamp(*created_at))
+            .transpose()?;
+        let cursor_id = cursor.as_ref().map(|(_, id)| id.as_str());
+        let rows = sqlx::query(
+            r#"
+            SELECT id, api_key_id, name, created_at
+            FROM tags
+            WHERE api_key_id = ?
+                AND (
+                    ? IS NULL
+                    OR created_at < ?
+                    OR (created_at = ? AND id < ?)
+                )
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(&cursor_created_at)
+        .bind(&cursor_created_at)
+        .bind(&cursor_created_at)
+        .bind(cursor_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(tag_from_row).collect()
+    }
+
+    pub async fn list_sessions(
+        &self,
+        api_key_id: &str,
+        cursor: Option<(OffsetDateTime, String)>,
+        limit: i64,
+    ) -> Result<Vec<SessionRecord>, StorageError> {
+        let cursor_created_at = cursor
+            .as_ref()
+            .map(|(created_at, _)| format_timestamp(*created_at))
+            .transpose()?;
+        let cursor_id = cursor.as_ref().map(|(_, id)| id.as_str());
+        let rows = sqlx::query(
+            r#"
+            SELECT id, api_key_id, name, created_at
+            FROM sessions
+            WHERE api_key_id = ?
+                AND (
+                    ? IS NULL
+                    OR created_at < ?
+                    OR (created_at = ? AND id < ?)
+                )
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(&cursor_created_at)
+        .bind(&cursor_created_at)
+        .bind(&cursor_created_at)
+        .bind(cursor_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(session_from_row).collect()
+    }
+
     pub async fn replace_current_embedding(
         &self,
         api_key_id: &str,
@@ -1003,11 +1077,13 @@ impl Storage {
         } else {
             sqlx::query(
                 r#"
-                SELECT id, api_key_id, name, created_at
-                FROM tags
+                UPDATE tags
+                SET name = ?
                 WHERE api_key_id = ? AND name_folded = ?
+                RETURNING id, api_key_id, name, created_at
                 "#,
             )
+            .bind(&input.name)
             .bind(&input.api_key_id)
             .bind(&name_folded)
             .fetch_one(&mut *tx)
@@ -1109,6 +1185,26 @@ impl Storage {
         row.map(tag_from_row).transpose()
     }
 
+    pub async fn get_session(
+        &self,
+        api_key_id: &str,
+        session_id: &str,
+    ) -> Result<Option<SessionRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, api_key_id, name, created_at
+            FROM sessions
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(session_from_row).transpose()
+    }
+
     pub async fn rename_tag(
         &self,
         api_key_id: &str,
@@ -1171,6 +1267,29 @@ impl Storage {
         } else {
             Ok(RenameTagOutcome::NotFound)
         }
+    }
+
+    pub async fn rename_session(
+        &self,
+        api_key_id: &str,
+        session_id: &str,
+        name: &str,
+    ) -> Result<Option<SessionRecord>, StorageError> {
+        let row = sqlx::query(
+            r#"
+            UPDATE sessions
+            SET name = ?
+            WHERE api_key_id = ? AND id = ?
+            RETURNING id, api_key_id, name, created_at
+            "#,
+        )
+        .bind(name)
+        .bind(api_key_id)
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(session_from_row).transpose()
     }
 
     pub async fn replace_transcript_tags(

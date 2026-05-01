@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add authenticated tag and session management APIs, including owner-scoped
+  CRUD, shared cursor pagination, case-insensitive tag identity with
+  latest-spelling display updates, and metadata deletion cascades.
 - Add authenticated voice-note history, detail, version-history, segment, and
   session-scoped history read APIs. Collection filters compose across tags,
   sessions, and recorded/created time ranges; search query parameters
