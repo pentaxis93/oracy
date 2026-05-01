@@ -27,8 +27,8 @@ CREATE TABLE transcription_jobs (
     ),
     failure_message TEXT,
     retryable_by_client INTEGER CHECK (retryable_by_client IS NULL OR retryable_by_client IN (0, 1)),
-    transcript_id TEXT REFERENCES transcripts(id) ON DELETE SET NULL,
-    FOREIGN KEY (api_key_id, transcript_id) REFERENCES transcripts(api_key_id, id),
+    voice_note_id TEXT REFERENCES voice_notes(id) ON DELETE SET NULL,
+    FOREIGN KEY (api_key_id, voice_note_id) REFERENCES voice_notes(api_key_id, id),
     UNIQUE (api_key_id, idempotency_key)
 );
 
@@ -45,13 +45,13 @@ BEGIN
     SELECT RAISE(ABORT, 'accepted submission tuple is immutable');
 END;
 
-CREATE TABLE transcripts (
+CREATE TABLE voice_notes (
     id TEXT PRIMARY KEY,
     api_key_id TEXT NOT NULL,
     audio_duration_seconds REAL NOT NULL CHECK (audio_duration_seconds >= 0),
     audio_format TEXT NOT NULL,
     audio_size_bytes INTEGER NOT NULL CHECK (audio_size_bytes >= 0),
-    transcript_language TEXT,
+    language TEXT,
     model TEXT NOT NULL,
     processing_time_ms INTEGER NOT NULL CHECK (processing_time_ms >= 0),
     cost_cents INTEGER CHECK (cost_cents IS NULL OR cost_cents >= 0),
@@ -60,49 +60,49 @@ CREATE TABLE transcripts (
     session_id TEXT
 );
 
-CREATE UNIQUE INDEX transcripts_owner_id_idx
-    ON transcripts (api_key_id, id);
+CREATE UNIQUE INDEX voice_notes_owner_id_idx
+    ON voice_notes (api_key_id, id);
 
-CREATE INDEX transcripts_history_idx
-    ON transcripts (api_key_id, created_at DESC, id DESC);
+CREATE INDEX voice_notes_history_idx
+    ON voice_notes (api_key_id, created_at DESC, id DESC);
 
-CREATE TABLE transcript_versions (
+CREATE TABLE voice_note_versions (
     id TEXT PRIMARY KEY,
     api_key_id TEXT NOT NULL,
-    transcript_id TEXT NOT NULL,
+    voice_note_id TEXT NOT NULL,
     version_number INTEGER NOT NULL CHECK (version_number >= 1),
-    transcript TEXT NOT NULL,
+    text TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (api_key_id, transcript_id) REFERENCES transcripts(api_key_id, id) ON DELETE CASCADE,
-    UNIQUE (transcript_id, version_number)
+    FOREIGN KEY (api_key_id, voice_note_id) REFERENCES voice_notes(api_key_id, id) ON DELETE CASCADE,
+    UNIQUE (voice_note_id, version_number)
 );
 
-CREATE INDEX transcript_versions_current_idx
-    ON transcript_versions (transcript_id, version_number DESC);
+CREATE INDEX voice_note_versions_current_idx
+    ON voice_note_versions (voice_note_id, version_number DESC);
 
 CREATE TABLE segments (
     id TEXT PRIMARY KEY,
     api_key_id TEXT NOT NULL,
-    transcript_id TEXT NOT NULL,
+    voice_note_id TEXT NOT NULL,
     position INTEGER NOT NULL CHECK (position >= 0),
     start_ms INTEGER NOT NULL CHECK (start_ms >= 0),
     end_ms INTEGER NOT NULL CHECK (end_ms >= start_ms),
     text TEXT NOT NULL,
-    FOREIGN KEY (api_key_id, transcript_id) REFERENCES transcripts(api_key_id, id) ON DELETE CASCADE,
-    UNIQUE (transcript_id, position)
+    FOREIGN KEY (api_key_id, voice_note_id) REFERENCES voice_notes(api_key_id, id) ON DELETE CASCADE,
+    UNIQUE (voice_note_id, position)
 );
 
 CREATE INDEX segments_order_idx
-    ON segments (transcript_id, position ASC);
+    ON segments (voice_note_id, position ASC);
 
 CREATE TABLE embeddings (
-    transcript_id TEXT PRIMARY KEY,
+    voice_note_id TEXT PRIMARY KEY,
     api_key_id TEXT NOT NULL,
     model TEXT NOT NULL,
     vector BLOB NOT NULL,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (api_key_id, transcript_id) REFERENCES transcripts(api_key_id, id) ON DELETE CASCADE
+    FOREIGN KEY (api_key_id, voice_note_id) REFERENCES voice_notes(api_key_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX embeddings_owner_idx
-    ON embeddings (api_key_id, transcript_id);
+    ON embeddings (api_key_id, voice_note_id);

@@ -16,13 +16,13 @@ class _SuccessfulTranscriptionService extends TranscriptionService {
   _SuccessfulTranscriptionService() : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
     void Function(double progress)? onProgress,
   }) async {
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 
@@ -32,14 +32,14 @@ class _CountingTranscriptionService extends TranscriptionService {
   int callCount = 0;
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
     void Function(double progress)? onProgress,
   }) async {
     callCount++;
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 

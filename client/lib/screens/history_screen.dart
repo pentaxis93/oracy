@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:oracy/screens/transcript_result_screen.dart';
+import 'package:oracy/screens/voice_note_result_screen.dart';
 import 'package:oracy/services/history_service.dart';
 import 'package:oracy/services/transcription_service.dart';
 
@@ -26,30 +26,28 @@ final searchQueryProvider = NotifierProvider<SearchQueryNotifier, String>(
   SearchQueryNotifier.new,
 );
 
-/// Groups a list of transcripts by date category.
-class _DateGroupedTranscripts {
-  final List<TranscriptResponse> today;
-  final List<TranscriptResponse> yesterday;
-  final Map<String, List<TranscriptResponse>> older;
+/// Groups a list of voice notes by date category.
+class _DateGroupedVoiceNotes {
+  final List<VoiceNoteResponse> today;
+  final List<VoiceNoteResponse> yesterday;
+  final Map<String, List<VoiceNoteResponse>> older;
 
-  _DateGroupedTranscripts({
+  _DateGroupedVoiceNotes({
     required this.today,
     required this.yesterday,
     required this.older,
   });
 
-  factory _DateGroupedTranscripts.fromList(
-    List<TranscriptResponse> transcripts,
-  ) {
+  factory _DateGroupedVoiceNotes.fromList(List<VoiceNoteResponse> voiceNotes) {
     final now = DateTime.now();
     final todayStart = DateTime(now.year, now.month, now.day);
     final yesterdayStart = todayStart.subtract(const Duration(days: 1));
 
-    final today = <TranscriptResponse>[];
-    final yesterday = <TranscriptResponse>[];
-    final older = <String, List<TranscriptResponse>>{};
+    final today = <VoiceNoteResponse>[];
+    final yesterday = <VoiceNoteResponse>[];
+    final older = <String, List<VoiceNoteResponse>>{};
 
-    for (final t in transcripts) {
+    for (final t in voiceNotes) {
       if (t.createdAt.isAfter(todayStart)) {
         today.add(t);
       } else if (t.createdAt.isAfter(yesterdayStart)) {
@@ -61,7 +59,7 @@ class _DateGroupedTranscripts {
       }
     }
 
-    return _DateGroupedTranscripts(
+    return _DateGroupedVoiceNotes(
       today: today,
       yesterday: yesterday,
       older: older,
@@ -89,7 +87,7 @@ class _DateGroupedTranscripts {
   bool get isEmpty => today.isEmpty && yesterday.isEmpty && older.isEmpty;
 }
 
-/// Screen displaying transcript history with search and pagination.
+/// Screen displaying voice-note history with search and pagination.
 class HistoryScreen extends ConsumerStatefulWidget {
   const HistoryScreen({super.key});
 
@@ -107,7 +105,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
     super.initState();
     // Load initial data
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(transcriptHistoryProvider.notifier).loadInitial();
+      ref.read(voiceNoteHistoryProvider.notifier).loadInitial();
     });
 
     // Listen for scroll to load more
@@ -129,7 +127,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
     // Load more when near the bottom.
     if (_scrollController.position.pixels >=
         _scrollController.position.maxScrollExtent - 200) {
-      ref.read(transcriptHistoryProvider.notifier).loadMore();
+      ref.read(voiceNoteHistoryProvider.notifier).loadMore();
     }
   }
 
@@ -139,19 +137,19 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
     _debounceTimer = Timer(const Duration(milliseconds: 300), () {
       final query = _searchController.text;
       ref.read(searchQueryProvider.notifier).update(query);
-      unawaited(ref.read(transcriptHistoryProvider.notifier).search(query));
+      unawaited(ref.read(voiceNoteHistoryProvider.notifier).search(query));
     });
   }
 
   void _clearSearch() {
     _searchController.clear();
     ref.read(searchQueryProvider.notifier).clear();
-    unawaited(ref.read(transcriptHistoryProvider.notifier).search(''));
+    unawaited(ref.read(voiceNoteHistoryProvider.notifier).search(''));
   }
 
   @override
   Widget build(BuildContext context) {
-    final state = ref.watch(transcriptHistoryProvider);
+    final state = ref.watch(voiceNoteHistoryProvider);
     final searchQuery = ref.watch(searchQueryProvider);
     final theme = Theme.of(context);
 
@@ -165,7 +163,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
             tooltip: 'Refresh',
             onPressed: state.isLoading
                 ? null
-                : () => ref.read(transcriptHistoryProvider.notifier).refresh(),
+                : () => ref.read(voiceNoteHistoryProvider.notifier).refresh(),
           ),
         ],
       ),
@@ -177,7 +175,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
             child: TextField(
               controller: _searchController,
               decoration: InputDecoration(
-                hintText: 'Search transcripts...',
+                hintText: 'Search voice notes...',
                 prefixIcon: const Icon(Icons.search),
                 suffixIcon: searchQuery.isNotEmpty
                     ? IconButton(
@@ -202,7 +200,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
 
           // Results
           Expanded(
-            child: _buildBody(state, state.transcripts, searchQuery, theme),
+            child: _buildBody(state, state.voiceNotes, searchQuery, theme),
           ),
         ],
       ),
@@ -210,25 +208,25 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
   }
 
   Widget _buildBody(
-    TranscriptHistoryState state,
-    List<TranscriptResponse> filteredTranscripts,
+    VoiceNoteHistoryState state,
+    List<VoiceNoteResponse> filteredVoiceNotes,
     String searchQuery,
     ThemeData theme,
   ) {
-    if (state.isLoading && state.transcripts.isEmpty) {
+    if (state.isLoading && state.voiceNotes.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
 
-    if (state.error != null && state.transcripts.isEmpty) {
+    if (state.error != null && state.voiceNotes.isEmpty) {
       return _ErrorView(
         message: state.error!,
         onRetry: () =>
-            ref.read(transcriptHistoryProvider.notifier).loadInitial(),
+            ref.read(voiceNoteHistoryProvider.notifier).loadInitial(),
       );
     }
 
     // Show no results message for search
-    if (state.query.isNotEmpty && filteredTranscripts.isEmpty) {
+    if (state.query.isNotEmpty && filteredVoiceNotes.isEmpty) {
       return _NoSearchResults(query: state.query);
     }
 
@@ -236,11 +234,11 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
       return const _EmptyView();
     }
 
-    // Group transcripts by date
-    final grouped = _DateGroupedTranscripts.fromList(filteredTranscripts);
+    // Group voice notes by date
+    final grouped = _DateGroupedVoiceNotes.fromList(filteredVoiceNotes);
 
     return RefreshIndicator(
-      onRefresh: () => ref.read(transcriptHistoryProvider.notifier).refresh(),
+      onRefresh: () => ref.read(voiceNoteHistoryProvider.notifier).refresh(),
       child: ListView(
         controller: _scrollController,
         padding: const EdgeInsets.only(bottom: 16),
@@ -249,9 +247,9 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
           if (grouped.today.isNotEmpty) ...[
             _DateHeader(label: 'Today'),
             ...grouped.today.map(
-              (t) => _TranscriptTile(
-                transcript: t,
-                onTap: () => _openTranscript(t),
+              (t) => _VoiceNoteTile(
+                voiceNote: t,
+                onTap: () => _openVoiceNote(t),
                 searchQuery: searchQuery,
               ),
             ),
@@ -261,9 +259,9 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
           if (grouped.yesterday.isNotEmpty) ...[
             _DateHeader(label: 'Yesterday'),
             ...grouped.yesterday.map(
-              (t) => _TranscriptTile(
-                transcript: t,
-                onTap: () => _openTranscript(t),
+              (t) => _VoiceNoteTile(
+                voiceNote: t,
+                onTap: () => _openVoiceNote(t),
                 searchQuery: searchQuery,
               ),
             ),
@@ -273,9 +271,9 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
           for (final entry in grouped.older.entries) ...[
             _DateHeader(label: entry.key),
             ...entry.value.map(
-              (t) => _TranscriptTile(
-                transcript: t,
-                onTap: () => _openTranscript(t),
+              (t) => _VoiceNoteTile(
+                voiceNote: t,
+                onTap: () => _openVoiceNote(t),
                 searchQuery: searchQuery,
               ),
             ),
@@ -292,17 +290,17 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
     );
   }
 
-  void _openTranscript(TranscriptResponse transcript) {
+  void _openVoiceNote(VoiceNoteResponse voiceNote) {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => TranscriptResultScreen(transcript: transcript),
+        builder: (_) => VoiceNoteResultScreen(voiceNote: voiceNote),
       ),
     );
   }
 }
 
-/// Date header for grouping transcripts.
+/// Date header for grouping voice notes.
 class _DateHeader extends StatelessWidget {
   final String label;
 
@@ -325,30 +323,30 @@ class _DateHeader extends StatelessWidget {
   }
 }
 
-/// A tile displaying a transcript summary with expand/collapse.
-class _TranscriptTile extends StatefulWidget {
-  final TranscriptResponse transcript;
+/// A tile displaying a voice note summary with expand/collapse.
+class _VoiceNoteTile extends StatefulWidget {
+  final VoiceNoteResponse voiceNote;
   final VoidCallback onTap;
   final String searchQuery;
 
-  const _TranscriptTile({
-    required this.transcript,
+  const _VoiceNoteTile({
+    required this.voiceNote,
     required this.onTap,
     this.searchQuery = '',
   });
 
   @override
-  State<_TranscriptTile> createState() => _TranscriptTileState();
+  State<_VoiceNoteTile> createState() => _VoiceNoteTileState();
 }
 
-class _TranscriptTileState extends State<_TranscriptTile> {
+class _VoiceNoteTileState extends State<_VoiceNoteTile> {
   bool _isExpanded = false;
 
-  void _copyTranscript() {
-    Clipboard.setData(ClipboardData(text: widget.transcript.transcript));
+  void _copyVoiceNote() {
+    Clipboard.setData(ClipboardData(text: widget.voiceNote.text));
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Transcript copied to clipboard'),
+        content: Text('Voice note copied to clipboard'),
         duration: Duration(seconds: 2),
       ),
     );
@@ -357,10 +355,10 @@ class _TranscriptTileState extends State<_TranscriptTile> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final transcript = widget.transcript;
+    final voiceNote = widget.voiceNote;
 
     // Get text to display
-    final fullText = transcript.transcript;
+    final fullText = voiceNote.text;
     final previewText = fullText.length > 100
         ? '${fullText.substring(0, 100)}...'
         : fullText;
@@ -377,9 +375,9 @@ class _TranscriptTileState extends State<_TranscriptTile> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Transcript text
+              // Voice note text
               Text(
-                displayText.isEmpty ? '(No transcript text)' : displayText,
+                displayText.isEmpty ? '(No voice note text)' : displayText,
                 style: theme.textTheme.bodyMedium,
               ),
 
@@ -407,14 +405,14 @@ class _TranscriptTileState extends State<_TranscriptTile> {
                   // Duration
                   _MetadataChip(
                     icon: Icons.timer_outlined,
-                    label: _formatDuration(transcript.audioDurationSeconds),
+                    label: _formatDuration(voiceNote.audioDurationSeconds),
                   ),
                   const SizedBox(width: 12),
 
                   // Timestamp
                   _MetadataChip(
                     icon: Icons.schedule,
-                    label: _formatTime(transcript.createdAt),
+                    label: _formatTime(voiceNote.createdAt),
                   ),
 
                   const Spacer(),
@@ -422,8 +420,8 @@ class _TranscriptTileState extends State<_TranscriptTile> {
                   // Copy button
                   IconButton(
                     icon: const Icon(Icons.copy, size: 20),
-                    onPressed: _copyTranscript,
-                    tooltip: 'Copy transcript',
+                    onPressed: _copyVoiceNote,
+                    tooltip: 'Copy voice note',
                     visualDensity: VisualDensity.compact,
                     style: IconButton.styleFrom(
                       foregroundColor: theme.colorScheme.onSurfaceVariant,
@@ -431,7 +429,7 @@ class _TranscriptTileState extends State<_TranscriptTile> {
                   ),
 
                   // Language badge
-                  if (transcript.transcriptLanguage != null)
+                  if (voiceNote.language != null)
                     Container(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 8,
@@ -442,7 +440,7 @@ class _TranscriptTileState extends State<_TranscriptTile> {
                         borderRadius: BorderRadius.circular(4),
                       ),
                       child: Text(
-                        transcript.transcriptLanguage!.toUpperCase(),
+                        voiceNote.language!.toUpperCase(),
                         style: theme.textTheme.labelSmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
@@ -504,7 +502,7 @@ class _MetadataChip extends StatelessWidget {
   }
 }
 
-/// Empty state when no transcripts exist.
+/// Empty state when no voice notes exist.
 class _EmptyView extends StatelessWidget {
   const _EmptyView();
 
@@ -524,7 +522,7 @@ class _EmptyView extends StatelessWidget {
               color: theme.colorScheme.onSurfaceVariant,
             ),
             const SizedBox(height: 16),
-            Text('No transcripts yet', style: theme.textTheme.titleLarge),
+            Text('No voice notes yet', style: theme.textTheme.titleLarge),
             const SizedBox(height: 8),
             Text(
               'Your transcription history will appear here.',
@@ -606,7 +604,7 @@ class _NoSearchResults extends StatelessWidget {
             Text('No results found', style: theme.textTheme.titleLarge),
             const SizedBox(height: 8),
             Text(
-              'No transcripts match "$query"',
+              'No voice notes match "$query"',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,

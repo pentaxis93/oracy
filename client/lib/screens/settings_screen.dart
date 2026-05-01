@@ -332,7 +332,7 @@ class _AutoCopyToggle extends ConsumerWidget {
     return SwitchListTile(
       secondary: const Icon(Icons.content_copy),
       title: const Text('Auto-copy to clipboard'),
-      subtitle: const Text('Copy transcript automatically when complete'),
+      subtitle: const Text('Copy voice note automatically when complete'),
       value: autoCopyEnabled,
       onChanged: (value) {
         ref.read(autoCopyEnabledProvider.notifier).toggle(value);

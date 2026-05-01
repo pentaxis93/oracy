@@ -59,7 +59,7 @@ pub enum StorageError {
     },
     #[error("storage query failed: {0}")]
     Query(#[from] sqlx::Error),
-    #[error("job is not eligible for transcript completion: {job_id}")]
+    #[error("job is not eligible for voice note completion: {job_id}")]
     JobNotCompletable { job_id: String },
     #[error("stored timestamp is invalid: {0}")]
     InvalidTimestamp(#[from] time::error::Parse),
@@ -89,7 +89,7 @@ pub enum RenameTagOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplaceTranscriptTagsOutcome {
+pub enum ReplaceVoiceNoteTagsOutcome {
     Replaced,
     NotFound,
     DuplicateTagIds,
@@ -159,24 +159,24 @@ pub struct TranscriptionJobRecord {
     pub failure_code: Option<String>,
     pub failure_message: Option<String>,
     pub retryable_by_client: Option<bool>,
-    pub transcript_id: Option<String>,
+    pub voice_note_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct TranscriptMaterialization {
-    pub transcript: NewTranscript,
-    pub initial_version: NewTranscriptVersion,
+pub struct VoiceNoteMaterialization {
+    pub voice_note: NewVoiceNote,
+    pub initial_version: NewVoiceNoteVersion,
     pub segments: Vec<NewSegment>,
     pub embedding: NewEmbedding,
 }
 
 #[derive(Debug, Clone)]
-pub struct NewTranscript {
+pub struct NewVoiceNote {
     pub id: String,
     pub audio_duration_seconds: f64,
     pub audio_format: String,
     pub audio_size_bytes: i64,
-    pub transcript_language: Option<String>,
+    pub language: Option<String>,
     pub model: String,
     pub processing_time_ms: i64,
     pub cost_cents: Option<i64>,
@@ -185,9 +185,9 @@ pub struct NewTranscript {
 }
 
 #[derive(Debug, Clone)]
-pub struct NewTranscriptVersion {
+pub struct NewVoiceNoteVersion {
     pub id: String,
-    pub transcript: String,
+    pub text: String,
     pub created_at: OffsetDateTime,
 }
 
@@ -208,15 +208,15 @@ pub struct NewEmbedding {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TranscriptRecord {
+pub struct VoiceNoteRecord {
     pub id: String,
     pub api_key_id: String,
     pub current_version_id: String,
-    pub transcript: String,
+    pub text: String,
     pub audio_duration_seconds: f64,
     pub audio_format: String,
     pub audio_size_bytes: i64,
-    pub transcript_language: Option<String>,
+    pub language: Option<String>,
     pub model: String,
     pub processing_time_ms: i64,
     pub cost_cents: Option<i64>,
@@ -226,15 +226,15 @@ pub struct TranscriptRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TranscriptVersionRecord {
+pub struct VoiceNoteVersionRecord {
     pub id: String,
-    pub transcript_id: String,
-    pub transcript: String,
+    pub voice_note_id: String,
+    pub text: String,
     pub created_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TranscriptFilters {
+pub struct VoiceNoteFilters {
     pub tag_ids: Vec<String>,
     pub session_id: Option<String>,
     pub recorded_after: Option<OffsetDateTime>,
@@ -246,7 +246,7 @@ pub struct TranscriptFilters {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentRecord {
     pub id: String,
-    pub transcript_id: String,
+    pub voice_note_id: String,
     pub position: i64,
     pub start_ms: i64,
     pub end_ms: i64,
@@ -255,7 +255,7 @@ pub struct SegmentRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingRecord {
-    pub transcript_id: String,
+    pub voice_note_id: String,
     pub model: String,
     pub vector: Vec<u8>,
     pub created_at: OffsetDateTime,
@@ -489,16 +489,16 @@ impl Storage {
         row.map(job_from_row).transpose()
     }
 
-    pub async fn complete_job_with_transcript(
+    pub async fn complete_job_with_voice_note(
         &self,
         api_key_id: &str,
         job_id: &str,
-        materialization: TranscriptMaterialization,
+        materialization: VoiceNoteMaterialization,
     ) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
-        let transcript = materialization.transcript;
+        let voice_note = materialization.voice_note;
         let version = materialization.initial_version;
-        let now = format_timestamp(transcript.created_at)?;
+        let now = format_timestamp(voice_note.created_at)?;
 
         let result = sqlx::query(
             r#"
@@ -507,7 +507,7 @@ impl Storage {
             WHERE api_key_id = ?
                 AND id = ?
                 AND status = 'processing'
-                AND transcript_id IS NULL
+                AND voice_note_id IS NULL
             "#,
         )
         .bind(&now)
@@ -521,9 +521,9 @@ impl Storage {
             });
         }
 
-        let transcript_session_id: Option<String> = sqlx::query(
+        let voice_note_session_id: Option<String> = sqlx::query(
             r#"
-            SELECT sessions.id AS transcript_session_id
+            SELECT sessions.id AS voice_note_session_id
             FROM transcription_jobs
             LEFT JOIN sessions
                 ON sessions.api_key_id = transcription_jobs.api_key_id
@@ -536,45 +536,45 @@ impl Storage {
         .bind(job_id)
         .fetch_one(&mut *tx)
         .await?
-        .try_get("transcript_session_id")?;
+        .try_get("voice_note_session_id")?;
 
         sqlx::query(
             r#"
-            INSERT INTO transcripts (
+            INSERT INTO voice_notes (
                 id, api_key_id, audio_duration_seconds, audio_format, audio_size_bytes,
-                transcript_language, model, processing_time_ms, cost_cents,
+                language, model, processing_time_ms, cost_cents,
                 created_at, recorded_at, session_id
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(&transcript.id)
+        .bind(&voice_note.id)
         .bind(api_key_id)
-        .bind(transcript.audio_duration_seconds)
-        .bind(&transcript.audio_format)
-        .bind(transcript.audio_size_bytes)
-        .bind(&transcript.transcript_language)
-        .bind(&transcript.model)
-        .bind(transcript.processing_time_ms)
-        .bind(transcript.cost_cents)
+        .bind(voice_note.audio_duration_seconds)
+        .bind(&voice_note.audio_format)
+        .bind(voice_note.audio_size_bytes)
+        .bind(&voice_note.language)
+        .bind(&voice_note.model)
+        .bind(voice_note.processing_time_ms)
+        .bind(voice_note.cost_cents)
         .bind(&now)
-        .bind(format_timestamp(transcript.recorded_at)?)
-        .bind(&transcript_session_id)
+        .bind(format_timestamp(voice_note.recorded_at)?)
+        .bind(&voice_note_session_id)
         .execute(&mut *tx)
         .await?;
 
         sqlx::query(
             r#"
-            INSERT INTO transcript_versions (
-                id, api_key_id, transcript_id, version_number, transcript, created_at
+            INSERT INTO voice_note_versions (
+                id, api_key_id, voice_note_id, version_number, text, created_at
             )
             VALUES (?, ?, ?, 1, ?, ?)
             "#,
         )
         .bind(&version.id)
         .bind(api_key_id)
-        .bind(&transcript.id)
-        .bind(&version.transcript)
+        .bind(&voice_note.id)
+        .bind(&version.text)
         .bind(format_timestamp(version.created_at)?)
         .execute(&mut *tx)
         .await?;
@@ -583,14 +583,14 @@ impl Storage {
             sqlx::query(
                 r#"
                 INSERT INTO segments (
-                    id, api_key_id, transcript_id, position, start_ms, end_ms, text
+                    id, api_key_id, voice_note_id, position, start_ms, end_ms, text
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&segment.id)
             .bind(api_key_id)
-            .bind(&transcript.id)
+            .bind(&voice_note.id)
             .bind(segment.position)
             .bind(segment.start_ms)
             .bind(segment.end_ms)
@@ -601,11 +601,11 @@ impl Storage {
 
         sqlx::query(
             r#"
-            INSERT INTO embeddings (transcript_id, api_key_id, model, vector, created_at)
+            INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
             VALUES (?, ?, ?, ?, ?)
             "#,
         )
-        .bind(&transcript.id)
+        .bind(&voice_note.id)
         .bind(api_key_id)
         .bind(&materialization.embedding.model)
         .bind(&materialization.embedding.vector)
@@ -616,14 +616,14 @@ impl Storage {
         let result = sqlx::query(
             r#"
             UPDATE transcription_jobs
-            SET status = 'succeeded', transcript_id = ?, updated_at = ?
+            SET status = 'succeeded', voice_note_id = ?, updated_at = ?
             WHERE api_key_id = ?
                 AND id = ?
                 AND status = 'processing'
-                AND transcript_id IS NULL
+                AND voice_note_id IS NULL
             "#,
         )
-        .bind(&transcript.id)
+        .bind(&voice_note.id)
         .bind(&now)
         .bind(api_key_id)
         .bind(job_id)
@@ -639,68 +639,68 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn get_transcript(
+    pub async fn get_voice_note(
         &self,
         api_key_id: &str,
-        transcript_id: &str,
-    ) -> Result<Option<TranscriptRecord>, StorageError> {
+        voice_note_id: &str,
+    ) -> Result<Option<VoiceNoteRecord>, StorageError> {
         let row = sqlx::query(
             r#"
             SELECT
-                transcripts.*,
-                transcript_versions.id AS current_version_id,
-                transcript_versions.transcript AS current_transcript
-            FROM transcripts
-            JOIN transcript_versions
-                ON transcript_versions.transcript_id = transcripts.id
-            WHERE transcripts.api_key_id = ?
-                AND transcripts.id = ?
-                AND transcript_versions.version_number = (
+                voice_notes.*,
+                voice_note_versions.id AS current_version_id,
+                voice_note_versions.text AS current_text
+            FROM voice_notes
+            JOIN voice_note_versions
+                ON voice_note_versions.voice_note_id = voice_notes.id
+            WHERE voice_notes.api_key_id = ?
+                AND voice_notes.id = ?
+                AND voice_note_versions.version_number = (
                     SELECT MAX(version_number)
-                    FROM transcript_versions
-                    WHERE transcript_id = transcripts.id
+                    FROM voice_note_versions
+                    WHERE voice_note_id = voice_notes.id
                 )
             "#,
         )
         .bind(api_key_id)
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .fetch_optional(&self.pool)
         .await?;
 
-        row.map(transcript_from_row).transpose()
+        row.map(voice_note_from_row).transpose()
     }
 
-    pub async fn list_transcripts(
+    pub async fn list_voice_notes(
         &self,
         api_key_id: &str,
-        filters: &TranscriptFilters,
+        filters: &VoiceNoteFilters,
         cursor: Option<(OffsetDateTime, String)>,
         limit: i64,
-    ) -> Result<Vec<TranscriptRecord>, StorageError> {
-        self.list_transcripts_in_session(api_key_id, None, filters, cursor, limit)
+    ) -> Result<Vec<VoiceNoteRecord>, StorageError> {
+        self.list_voice_notes_in_session(api_key_id, None, filters, cursor, limit)
             .await
     }
 
-    pub async fn list_session_transcripts(
+    pub async fn list_session_voice_notes(
         &self,
         api_key_id: &str,
         session_id: &str,
-        filters: &TranscriptFilters,
+        filters: &VoiceNoteFilters,
         cursor: Option<(OffsetDateTime, String)>,
         limit: i64,
-    ) -> Result<Vec<TranscriptRecord>, StorageError> {
-        self.list_transcripts_in_session(api_key_id, Some(session_id), filters, cursor, limit)
+    ) -> Result<Vec<VoiceNoteRecord>, StorageError> {
+        self.list_voice_notes_in_session(api_key_id, Some(session_id), filters, cursor, limit)
             .await
     }
 
-    async fn list_transcripts_in_session(
+    async fn list_voice_notes_in_session(
         &self,
         api_key_id: &str,
         session_id: Option<&str>,
-        filters: &TranscriptFilters,
+        filters: &VoiceNoteFilters,
         cursor: Option<(OffsetDateTime, String)>,
         limit: i64,
-    ) -> Result<Vec<TranscriptRecord>, StorageError> {
+    ) -> Result<Vec<VoiceNoteRecord>, StorageError> {
         let cursor_created_at = cursor
             .as_ref()
             .map(|(created_at, _)| format_timestamp(*created_at))
@@ -714,34 +714,34 @@ impl Storage {
         let mut query = QueryBuilder::new(
             r#"
             SELECT
-                transcripts.*,
-                transcript_versions.id AS current_version_id,
-                transcript_versions.transcript AS current_transcript
-            FROM transcripts
-            JOIN transcript_versions
-                ON transcript_versions.transcript_id = transcripts.id
-            WHERE transcripts.api_key_id =
+                voice_notes.*,
+                voice_note_versions.id AS current_version_id,
+                voice_note_versions.text AS current_text
+            FROM voice_notes
+            JOIN voice_note_versions
+                ON voice_note_versions.voice_note_id = voice_notes.id
+            WHERE voice_notes.api_key_id =
             "#,
         );
         query.push_bind(api_key_id);
         if let Some(session_id) = effective_session_id {
-            query.push(" AND transcripts.session_id = ");
+            query.push(" AND voice_notes.session_id = ");
             query.push_bind(session_id);
         }
         if let Some(recorded_after) = recorded_after.as_deref() {
-            query.push(" AND transcripts.recorded_at > ");
+            query.push(" AND voice_notes.recorded_at > ");
             query.push_bind(recorded_after);
         }
         if let Some(recorded_before) = recorded_before.as_deref() {
-            query.push(" AND transcripts.recorded_at <= ");
+            query.push(" AND voice_notes.recorded_at <= ");
             query.push_bind(recorded_before);
         }
         if let Some(created_after) = created_after.as_deref() {
-            query.push(" AND transcripts.created_at > ");
+            query.push(" AND voice_notes.created_at > ");
             query.push_bind(created_after);
         }
         if let Some(created_before) = created_before.as_deref() {
-            query.push(" AND transcripts.created_at <= ");
+            query.push(" AND voice_notes.created_at <= ");
             query.push_bind(created_before);
         }
         for tag_id in &filters.tag_ids {
@@ -749,10 +749,10 @@ impl Storage {
                 r#"
                 AND EXISTS (
                     SELECT 1
-                    FROM transcript_tags
-                    WHERE transcript_tags.api_key_id = transcripts.api_key_id
-                        AND transcript_tags.transcript_id = transcripts.id
-                        AND transcript_tags.tag_id =
+                    FROM voice_note_tags
+                    WHERE voice_note_tags.api_key_id = voice_notes.api_key_id
+                        AND voice_note_tags.voice_note_id = voice_notes.id
+                        AND voice_note_tags.tag_id =
                 "#,
             );
             query.push_bind(tag_id);
@@ -760,10 +760,10 @@ impl Storage {
         }
         query.push(
             r#"
-                AND transcript_versions.version_number = (
+                AND voice_note_versions.version_number = (
                     SELECT MAX(version_number)
-                    FROM transcript_versions
-                    WHERE transcript_id = transcripts.id
+                    FROM voice_note_versions
+                    WHERE voice_note_id = voice_notes.id
                 )
             "#,
         );
@@ -771,30 +771,30 @@ impl Storage {
             query.push(
                 r#"
                 AND (
-                    transcripts.created_at <
+                    voice_notes.created_at <
                 "#,
             );
             query.push_bind(cursor_created_at);
-            query.push(" OR (transcripts.created_at = ");
+            query.push(" OR (voice_notes.created_at = ");
             query.push_bind(cursor_created_at);
-            query.push(" AND transcripts.id < ");
+            query.push(" AND voice_notes.id < ");
             query.push_bind(cursor_id.expect("cursor id is present with cursor timestamp"));
             query.push("))");
         }
-        query.push(" ORDER BY transcripts.created_at DESC, transcripts.id DESC LIMIT ");
+        query.push(" ORDER BY voice_notes.created_at DESC, voice_notes.id DESC LIMIT ");
         query.push_bind(limit);
         let rows = query.build().fetch_all(&self.pool).await?;
 
-        rows.into_iter().map(transcript_from_row).collect()
+        rows.into_iter().map(voice_note_from_row).collect()
     }
 
-    pub async fn list_transcript_versions(
+    pub async fn list_voice_note_versions(
         &self,
         api_key_id: &str,
-        transcript_id: &str,
+        voice_note_id: &str,
         cursor: Option<(OffsetDateTime, String)>,
         limit: i64,
-    ) -> Result<Vec<TranscriptVersionRecord>, StorageError> {
+    ) -> Result<Vec<VoiceNoteVersionRecord>, StorageError> {
         let cursor_created_at = cursor
             .as_ref()
             .map(|(created_at, _)| format_timestamp(*created_at))
@@ -802,10 +802,10 @@ impl Storage {
         let cursor_id = cursor.as_ref().map(|(_, id)| id.as_str());
         let rows = sqlx::query(
             r#"
-            SELECT id, transcript_id, transcript, created_at
-            FROM transcript_versions
+            SELECT id, voice_note_id, text, created_at
+            FROM voice_note_versions
             WHERE api_key_id = ?
-                AND transcript_id = ?
+                AND voice_note_id = ?
                 AND (
                     ? IS NULL
                     OR created_at < ?
@@ -816,7 +816,7 @@ impl Storage {
             "#,
         )
         .bind(api_key_id)
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .bind(&cursor_created_at)
         .bind(&cursor_created_at)
         .bind(&cursor_created_at)
@@ -825,24 +825,24 @@ impl Storage {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter().map(transcript_version_from_row).collect()
+        rows.into_iter().map(voice_note_version_from_row).collect()
     }
 
     pub async fn list_segments(
         &self,
         api_key_id: &str,
-        transcript_id: &str,
+        voice_note_id: &str,
     ) -> Result<Vec<SegmentRecord>, StorageError> {
         let rows = sqlx::query(
             r#"
-            SELECT id, transcript_id, position, start_ms, end_ms, text
+            SELECT id, voice_note_id, position, start_ms, end_ms, text
             FROM segments
-            WHERE api_key_id = ? AND transcript_id = ?
+            WHERE api_key_id = ? AND voice_note_id = ?
             ORDER BY position ASC
             "#,
         )
         .bind(api_key_id)
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -852,23 +852,23 @@ impl Storage {
     pub async fn list_segments_page(
         &self,
         api_key_id: &str,
-        transcript_id: &str,
+        voice_note_id: &str,
         cursor: Option<i64>,
         limit: i64,
     ) -> Result<Vec<SegmentRecord>, StorageError> {
         let rows = sqlx::query(
             r#"
-            SELECT id, transcript_id, position, start_ms, end_ms, text
+            SELECT id, voice_note_id, position, start_ms, end_ms, text
             FROM segments
             WHERE api_key_id = ?
-                AND transcript_id = ?
+                AND voice_note_id = ?
                 AND (? IS NULL OR position > ?)
             ORDER BY position ASC
             LIMIT ?
             "#,
         )
         .bind(api_key_id)
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .bind(cursor)
         .bind(cursor)
         .bind(limit)
@@ -975,30 +975,30 @@ impl Storage {
     pub async fn replace_current_embedding(
         &self,
         api_key_id: &str,
-        transcript_id: &str,
+        voice_note_id: &str,
         embedding: NewEmbedding,
     ) -> Result<bool, StorageError> {
         let result = sqlx::query(
             r#"
-            INSERT INTO embeddings (transcript_id, api_key_id, model, vector, created_at)
+            INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
             SELECT ?, ?, ?, ?, ?
             WHERE EXISTS (
-                SELECT 1 FROM transcripts WHERE api_key_id = ? AND id = ?
+                SELECT 1 FROM voice_notes WHERE api_key_id = ? AND id = ?
             )
-            ON CONFLICT(transcript_id) DO UPDATE SET
+            ON CONFLICT(voice_note_id) DO UPDATE SET
                 model = excluded.model,
                 vector = excluded.vector,
                 created_at = excluded.created_at
             WHERE embeddings.api_key_id = excluded.api_key_id
             "#,
         )
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .bind(api_key_id)
         .bind(&embedding.model)
         .bind(&embedding.vector)
         .bind(format_timestamp(embedding.created_at)?)
         .bind(api_key_id)
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)
@@ -1007,36 +1007,36 @@ impl Storage {
     pub async fn get_current_embedding(
         &self,
         api_key_id: &str,
-        transcript_id: &str,
+        voice_note_id: &str,
     ) -> Result<Option<EmbeddingRecord>, StorageError> {
         let row = sqlx::query(
             r#"
-            SELECT transcript_id, model, vector, created_at
+            SELECT voice_note_id, model, vector, created_at
             FROM embeddings
-            WHERE api_key_id = ? AND transcript_id = ?
+            WHERE api_key_id = ? AND voice_note_id = ?
             "#,
         )
         .bind(api_key_id)
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .fetch_optional(&self.pool)
         .await?;
 
         row.map(embedding_from_row).transpose()
     }
 
-    pub async fn delete_transcript(
+    pub async fn delete_voice_note(
         &self,
         api_key_id: &str,
-        transcript_id: &str,
+        voice_note_id: &str,
     ) -> Result<bool, StorageError> {
         let result = sqlx::query(
             r#"
-            DELETE FROM transcripts
+            DELETE FROM voice_notes
             WHERE api_key_id = ? AND id = ?
             "#,
         )
         .bind(api_key_id)
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .execute(&self.pool)
         .await?;
 
@@ -1292,34 +1292,34 @@ impl Storage {
         row.map(session_from_row).transpose()
     }
 
-    pub async fn replace_transcript_tags(
+    pub async fn replace_voice_note_tags(
         &self,
         api_key_id: &str,
-        transcript_id: &str,
+        voice_note_id: &str,
         tag_ids: &[String],
-    ) -> Result<ReplaceTranscriptTagsOutcome, StorageError> {
+    ) -> Result<ReplaceVoiceNoteTagsOutcome, StorageError> {
         let mut seen = HashSet::with_capacity(tag_ids.len());
         for tag_id in tag_ids {
             if !seen.insert(tag_id) {
-                return Ok(ReplaceTranscriptTagsOutcome::DuplicateTagIds);
+                return Ok(ReplaceVoiceNoteTagsOutcome::DuplicateTagIds);
             }
         }
 
         let mut tx = self.pool.begin().await?;
-        let transcript_exists: Option<i64> = sqlx::query_scalar(
+        let voice_note_exists: Option<i64> = sqlx::query_scalar(
             r#"
             SELECT 1
-            FROM transcripts
+            FROM voice_notes
             WHERE api_key_id = ? AND id = ?
             "#,
         )
         .bind(api_key_id)
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .fetch_optional(&mut *tx)
         .await?;
-        if transcript_exists.is_none() {
+        if voice_note_exists.is_none() {
             tx.commit().await?;
-            return Ok(ReplaceTranscriptTagsOutcome::NotFound);
+            return Ok(ReplaceVoiceNoteTagsOutcome::NotFound);
         }
 
         for tag_id in tag_ids {
@@ -1336,114 +1336,114 @@ impl Storage {
             .await?;
             if tag_exists.is_none() {
                 tx.commit().await?;
-                return Ok(ReplaceTranscriptTagsOutcome::NotFound);
+                return Ok(ReplaceVoiceNoteTagsOutcome::NotFound);
             }
         }
 
         sqlx::query(
             r#"
-            DELETE FROM transcript_tags
-            WHERE api_key_id = ? AND transcript_id = ?
+            DELETE FROM voice_note_tags
+            WHERE api_key_id = ? AND voice_note_id = ?
             "#,
         )
         .bind(api_key_id)
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .execute(&mut *tx)
         .await?;
 
         for tag_id in tag_ids {
             sqlx::query(
                 r#"
-                INSERT INTO transcript_tags (api_key_id, transcript_id, tag_id)
+                INSERT INTO voice_note_tags (api_key_id, voice_note_id, tag_id)
                 VALUES (?, ?, ?)
                 "#,
             )
             .bind(api_key_id)
-            .bind(transcript_id)
+            .bind(voice_note_id)
             .bind(tag_id)
             .execute(&mut *tx)
             .await?;
         }
 
         tx.commit().await?;
-        Ok(ReplaceTranscriptTagsOutcome::Replaced)
+        Ok(ReplaceVoiceNoteTagsOutcome::Replaced)
     }
 
-    pub async fn list_transcript_tags(
+    pub async fn list_voice_note_tags(
         &self,
         api_key_id: &str,
-        transcript_id: &str,
+        voice_note_id: &str,
     ) -> Result<Vec<TagRecord>, StorageError> {
         let rows = sqlx::query(
             r#"
             SELECT tags.id, tags.api_key_id, tags.name, tags.created_at
             FROM tags
-            JOIN transcript_tags
-                ON transcript_tags.api_key_id = tags.api_key_id
-                AND transcript_tags.tag_id = tags.id
-            WHERE transcript_tags.api_key_id = ?
-                AND transcript_tags.transcript_id = ?
+            JOIN voice_note_tags
+                ON voice_note_tags.api_key_id = tags.api_key_id
+                AND voice_note_tags.tag_id = tags.id
+            WHERE voice_note_tags.api_key_id = ?
+                AND voice_note_tags.voice_note_id = ?
             ORDER BY tags.created_at DESC, tags.id DESC
             "#,
         )
         .bind(api_key_id)
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .fetch_all(&self.pool)
         .await?;
 
         rows.into_iter().map(tag_from_row).collect()
     }
 
-    pub async fn list_tags_for_transcripts(
+    pub async fn list_tags_for_voice_notes(
         &self,
         api_key_id: &str,
-        transcript_ids: &[String],
+        voice_note_ids: &[String],
     ) -> Result<HashMap<String, Vec<TagRecord>>, StorageError> {
-        if transcript_ids.is_empty() {
+        if voice_note_ids.is_empty() {
             return Ok(HashMap::new());
         }
 
         let mut query = QueryBuilder::new(
             r#"
             SELECT
-                transcript_tags.transcript_id AS transcript_id,
+                voice_note_tags.voice_note_id AS voice_note_id,
                 tags.id AS tag_id,
                 tags.api_key_id AS api_key_id,
                 tags.name AS name,
                 tags.created_at AS created_at
-            FROM transcript_tags
+            FROM voice_note_tags
             JOIN tags
-                ON tags.api_key_id = transcript_tags.api_key_id
-                AND tags.id = transcript_tags.tag_id
-            WHERE transcript_tags.api_key_id =
+                ON tags.api_key_id = voice_note_tags.api_key_id
+                AND tags.id = voice_note_tags.tag_id
+            WHERE voice_note_tags.api_key_id =
             "#,
         );
         query.push_bind(api_key_id);
-        query.push(" AND transcript_tags.transcript_id IN (");
+        query.push(" AND voice_note_tags.voice_note_id IN (");
         let mut separated = query.separated(", ");
-        for transcript_id in transcript_ids {
-            separated.push_bind(transcript_id);
+        for voice_note_id in voice_note_ids {
+            separated.push_bind(voice_note_id);
         }
         separated.push_unseparated(")");
         query.push(
-            " ORDER BY transcript_tags.transcript_id ASC, tags.created_at DESC, tags.id DESC",
+            " ORDER BY voice_note_tags.voice_note_id ASC, tags.created_at DESC, tags.id DESC",
         );
 
         let rows = query.build().fetch_all(&self.pool).await?;
-        let mut tags_by_transcript = HashMap::new();
-        for transcript_id in transcript_ids {
-            tags_by_transcript.insert(transcript_id.clone(), Vec::new());
+        let mut tags_by_voice_note = HashMap::new();
+        for voice_note_id in voice_note_ids {
+            tags_by_voice_note.insert(voice_note_id.clone(), Vec::new());
         }
         for row in rows {
-            let transcript_id: String = row.try_get("transcript_id")?;
+            let voice_note_id: String = row.try_get("voice_note_id")?;
             let tag = tag_from_prefixed_row(row)?;
-            tags_by_transcript
-                .entry(transcript_id)
+            tags_by_voice_note
+                .entry(voice_note_id)
                 .or_default()
                 .push(tag);
         }
 
-        Ok(tags_by_transcript)
+        Ok(tags_by_voice_note)
     }
 }
 
@@ -1567,7 +1567,7 @@ fn job_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TranscriptionJobRecord, 
         failure_code: row.try_get("failure_code")?,
         failure_message: row.try_get("failure_message")?,
         retryable_by_client,
-        transcript_id: row.try_get("transcript_id")?,
+        voice_note_id: row.try_get("voice_note_id")?,
     })
 }
 
@@ -1577,16 +1577,16 @@ fn settings_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SettingsRecord, Sto
     })
 }
 
-fn transcript_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TranscriptRecord, StorageError> {
-    Ok(TranscriptRecord {
+fn voice_note_from_row(row: sqlx::sqlite::SqliteRow) -> Result<VoiceNoteRecord, StorageError> {
+    Ok(VoiceNoteRecord {
         id: row.try_get("id")?,
         api_key_id: row.try_get("api_key_id")?,
         current_version_id: row.try_get("current_version_id")?,
-        transcript: row.try_get("current_transcript")?,
+        text: row.try_get("current_text")?,
         audio_duration_seconds: row.try_get("audio_duration_seconds")?,
         audio_format: row.try_get("audio_format")?,
         audio_size_bytes: row.try_get("audio_size_bytes")?,
-        transcript_language: row.try_get("transcript_language")?,
+        language: row.try_get("language")?,
         model: row.try_get("model")?,
         processing_time_ms: row.try_get("processing_time_ms")?,
         cost_cents: row.try_get("cost_cents")?,
@@ -1596,13 +1596,13 @@ fn transcript_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TranscriptRecord,
     })
 }
 
-fn transcript_version_from_row(
+fn voice_note_version_from_row(
     row: sqlx::sqlite::SqliteRow,
-) -> Result<TranscriptVersionRecord, StorageError> {
-    Ok(TranscriptVersionRecord {
+) -> Result<VoiceNoteVersionRecord, StorageError> {
+    Ok(VoiceNoteVersionRecord {
         id: row.try_get("id")?,
-        transcript_id: row.try_get("transcript_id")?,
-        transcript: row.try_get("transcript")?,
+        voice_note_id: row.try_get("voice_note_id")?,
+        text: row.try_get("text")?,
         created_at: parse_timestamp(row.try_get("created_at")?)?,
     })
 }
@@ -1610,7 +1610,7 @@ fn transcript_version_from_row(
 fn segment_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SegmentRecord, StorageError> {
     Ok(SegmentRecord {
         id: row.try_get("id")?,
-        transcript_id: row.try_get("transcript_id")?,
+        voice_note_id: row.try_get("voice_note_id")?,
         position: row.try_get("position")?,
         start_ms: row.try_get("start_ms")?,
         end_ms: row.try_get("end_ms")?,
@@ -1620,7 +1620,7 @@ fn segment_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SegmentRecord, Stora
 
 fn embedding_from_row(row: sqlx::sqlite::SqliteRow) -> Result<EmbeddingRecord, StorageError> {
     Ok(EmbeddingRecord {
-        transcript_id: row.try_get("transcript_id")?,
+        voice_note_id: row.try_get("voice_note_id")?,
         model: row.try_get("model")?,
         vector: row.try_get("vector")?,
         created_at: parse_timestamp(row.try_get("created_at")?)?,

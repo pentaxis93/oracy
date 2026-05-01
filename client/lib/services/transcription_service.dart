@@ -12,40 +12,40 @@ import 'transcription_service_stub.dart'
     as platform;
 
 /// Response from the transcription API.
-class TranscriptResponse {
+class VoiceNoteResponse {
   final String id;
-  final String transcript;
+  final String text;
   final double audioDurationSeconds;
   final String? audioFormat;
   final int? audioSizeBytes;
-  final String? transcriptLanguage;
-  final String? whisperModel;
+  final String? language;
+  final String? model;
   final int? processingTimeMs;
   final int costCents;
   final DateTime createdAt;
 
-  const TranscriptResponse({
+  const VoiceNoteResponse({
     required this.id,
-    required this.transcript,
+    required this.text,
     required this.audioDurationSeconds,
     this.audioFormat,
     this.audioSizeBytes,
-    this.transcriptLanguage,
-    this.whisperModel,
+    this.language,
+    this.model,
     this.processingTimeMs,
     required this.costCents,
     required this.createdAt,
   });
 
-  factory TranscriptResponse.fromJson(Map<String, dynamic> json) {
-    return TranscriptResponse(
+  factory VoiceNoteResponse.fromJson(Map<String, dynamic> json) {
+    return VoiceNoteResponse(
       id: json['id'] as String,
-      transcript: json['transcript'] as String,
+      text: json['text'] as String,
       audioDurationSeconds: (json['audio_duration_seconds'] as num).toDouble(),
       audioFormat: json['audio_format'] as String?,
       audioSizeBytes: json['audio_size_bytes'] as int?,
-      transcriptLanguage: json['transcript_language'] as String?,
-      whisperModel: json['whisper_model'] as String?,
+      language: json['language'] as String?,
+      model: json['model'] as String?,
       processingTimeMs: json['processing_time_ms'] as int?,
       costCents: json['cost_cents'] as int,
       createdAt: DateTime.parse(json['created_at'] as String),
@@ -72,8 +72,8 @@ class TranscriptionProcessing extends TranscriptionState {
 }
 
 class TranscriptionSuccess extends TranscriptionState {
-  final TranscriptResponse transcript;
-  const TranscriptionSuccess(this.transcript);
+  final VoiceNoteResponse voiceNote;
+  const TranscriptionSuccess(this.voiceNote);
 }
 
 /// Types of transcription errors for better UI differentiation.
@@ -321,7 +321,7 @@ class TranscriptionService {
   /// Upload an audio file for transcription.
   /// On native platforms, filePath is a file system path.
   /// On web, filePath is a blob URL (blob:https://...).
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
@@ -371,7 +371,7 @@ class TranscriptionService {
       },
     );
 
-    return TranscriptResponse.fromJson(response.data as Map<String, dynamic>);
+    return VoiceNoteResponse.fromJson(response.data as Map<String, dynamic>);
   }
 }
 
@@ -458,7 +458,7 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
 
       state = const TranscriptionUploading(progress: 0.0);
 
-      final transcript = await service.transcribe(
+      final voiceNote = await service.transcribe(
         filePath,
         language: language,
         idempotencyKey: queuedUpload?.idempotencyKey,
@@ -483,7 +483,7 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
         );
       }
 
-      state = TranscriptionSuccess(transcript);
+      state = TranscriptionSuccess(voiceNote);
     } on DioException catch (e) {
       final classification = classifyUploadFailure(e);
       await _markQueuedUploadFailed(

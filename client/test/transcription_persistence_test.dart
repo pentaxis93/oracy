@@ -17,7 +17,7 @@ class _FailingTranscriptionService extends TranscriptionService {
   _FailingTranscriptionService() : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
@@ -34,13 +34,13 @@ class _SuccessfulTranscriptionService extends TranscriptionService {
   _SuccessfulTranscriptionService() : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
     void Function(double progress)? onProgress,
   }) async {
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 
@@ -54,7 +54,7 @@ class _ApiKeySensitiveTranscriptionService extends TranscriptionService {
   }) : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
@@ -73,7 +73,7 @@ class _ApiKeySensitiveTranscriptionService extends TranscriptionService {
       );
     }
 
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 
@@ -85,7 +85,7 @@ class _StatusCodeFailingTranscriptionService extends TranscriptionService {
     : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
@@ -114,7 +114,7 @@ class _PlainTextResponseFailingTranscriptionService
   }) : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
@@ -136,7 +136,7 @@ class _TimeoutTranscriptionService extends TranscriptionService {
   _TimeoutTranscriptionService() : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
@@ -153,7 +153,7 @@ class _ThrowingTranscriptionService extends TranscriptionService {
   _ThrowingTranscriptionService() : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,

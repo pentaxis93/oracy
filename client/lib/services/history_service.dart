@@ -3,67 +3,58 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/transcription_service.dart';
 
-/// Response from the transcripts list endpoint.
-class TranscriptListResponse {
-  final List<TranscriptResponse> transcripts;
-  final int total;
-  final int offset;
-  final int limit;
+/// Response from the voice notes list endpoint.
+class VoiceNoteListResponse {
+  final List<VoiceNoteResponse> voiceNotes;
+  final String? nextCursor;
 
-  const TranscriptListResponse({
-    required this.transcripts,
-    required this.total,
-    required this.offset,
-    required this.limit,
-  });
+  const VoiceNoteListResponse({required this.voiceNotes, this.nextCursor});
 
-  factory TranscriptListResponse.fromJson(Map<String, dynamic> json) {
-    return TranscriptListResponse(
-      transcripts: (json['transcripts'] as List)
-          .map((e) => TranscriptResponse.fromJson(e as Map<String, dynamic>))
+  factory VoiceNoteListResponse.fromJson(Map<String, dynamic> json) {
+    final items = json['items'] as List;
+    return VoiceNoteListResponse(
+      voiceNotes: items
+          .map((e) => VoiceNoteResponse.fromJson(e as Map<String, dynamic>))
           .toList(),
-      total: json['total'] as int,
-      offset: json['offset'] as int,
-      limit: json['limit'] as int,
+      nextCursor: json['next_cursor'] as String?,
     );
   }
 
-  bool get hasMore => offset + transcripts.length < total;
+  bool get hasMore => nextCursor != null;
 }
 
-/// Service for fetching transcript history from the API.
+/// Service for fetching voice-note history from the API.
 class HistoryService {
   final Dio _dio;
 
   HistoryService(this._dio);
 
-  /// Fetch a page of transcripts.
+  /// Fetch a page of voice notes.
   ///
-  /// [offset] - Number of items to skip (for pagination)
   /// [limit] - Maximum items per page (default 20, max 100)
-  Future<TranscriptListResponse> getTranscripts({
-    int offset = 0,
+  Future<VoiceNoteListResponse> getVoiceNotes({
+    String? cursor,
     int limit = 20,
     String? query,
   }) async {
     final response = await _dio.get(
-      '/api/v1/transcripts',
+      '/api/v1/voice-notes',
       queryParameters: {
-        'offset': offset,
         'limit': limit,
+        'cursor': ?cursor,
         if (query != null && query.isNotEmpty) 'q': query,
       },
     );
 
-    return TranscriptListResponse.fromJson(
+    return VoiceNoteListResponse.fromJson(
       response.data as Map<String, dynamic>,
     );
   }
 
-  /// Get a single transcript by ID.
-  Future<TranscriptResponse> getTranscript(String id) async {
-    final response = await _dio.get('/api/v1/transcripts/$id');
-    return TranscriptResponse.fromJson(response.data as Map<String, dynamic>);
+  /// Get a single voice note by ID.
+  Future<VoiceNoteResponse> getVoiceNote(String id) async {
+    final response = await _dio.get('/api/v1/voice-notes/$id');
+    return VoiceNoteResponse.fromJson(response.data as Map<String, dynamic>);
   }
 }
 
@@ -73,62 +64,62 @@ final historyServiceProvider = Provider<HistoryService>((ref) {
   return HistoryService(dio);
 });
 
-/// State for the paginated transcript list.
-class TranscriptHistoryState {
-  final List<TranscriptResponse> transcripts;
-  final int total;
+/// State for the paginated voice-note list.
+class VoiceNoteHistoryState {
+  final List<VoiceNoteResponse> voiceNotes;
   final bool isLoading;
   final bool isLoadingMore;
   final String? error;
   final bool hasMore;
+  final String? nextCursor;
   final String query;
 
-  const TranscriptHistoryState({
-    this.transcripts = const [],
-    this.total = 0,
+  const VoiceNoteHistoryState({
+    this.voiceNotes = const [],
     this.isLoading = false,
     this.isLoadingMore = false,
     this.error,
     this.hasMore = true,
+    this.nextCursor,
     this.query = '',
   });
 
-  TranscriptHistoryState copyWith({
-    List<TranscriptResponse>? transcripts,
-    int? total,
+  VoiceNoteHistoryState copyWith({
+    List<VoiceNoteResponse>? voiceNotes,
     bool? isLoading,
     bool? isLoadingMore,
     String? error,
     bool? hasMore,
+    String? nextCursor,
     String? query,
   }) {
-    return TranscriptHistoryState(
-      transcripts: transcripts ?? this.transcripts,
-      total: total ?? this.total,
+    return VoiceNoteHistoryState(
+      voiceNotes: voiceNotes ?? this.voiceNotes,
       isLoading: isLoading ?? this.isLoading,
       isLoadingMore: isLoadingMore ?? this.isLoadingMore,
       error: error,
       hasMore: hasMore ?? this.hasMore,
+      nextCursor: nextCursor ?? this.nextCursor,
       query: query ?? this.query,
     );
   }
 
-  bool get isEmpty => transcripts.isEmpty && !isLoading;
+  bool get isEmpty => voiceNotes.isEmpty && !isLoading;
 }
 
-/// Notifier for managing transcript history with pagination.
-class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
+/// Notifier for managing voice-note history with pagination.
+class VoiceNoteHistoryNotifier extends Notifier<VoiceNoteHistoryState> {
   static const int _pageSize = 20;
   int _requestVersion = 0;
 
   HistoryService get _service => ref.read(historyServiceProvider);
 
   @override
-  TranscriptHistoryState build() {
-    return const TranscriptHistoryState();
+  VoiceNoteHistoryState build() {
+    return const VoiceNoteHistoryState();
   }
 
-  /// Load the initial page of transcripts.
+  /// Load the initial page of voice notes.
   Future<void> loadInitial() async {
     if (state.isLoading) return;
 
@@ -137,18 +128,17 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
     state = state.copyWith(isLoading: true, error: null);
 
     try {
-      final response = await _service.getTranscripts(
-        offset: 0,
+      final response = await _service.getVoiceNotes(
         limit: _pageSize,
         query: query,
       );
       if (!_isCurrentRequest(requestVersion, query)) return;
 
-      state = TranscriptHistoryState(
-        transcripts: response.transcripts,
-        total: response.total,
+      state = VoiceNoteHistoryState(
+        voiceNotes: response.voiceNotes,
         isLoading: false,
         hasMore: response.hasMore,
+        nextCursor: response.nextCursor,
         query: query,
       );
     } on DioException catch (e) {
@@ -158,36 +148,37 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
       if (!_isCurrentRequest(requestVersion, query)) return;
       state = state.copyWith(
         isLoading: false,
-        error: 'Failed to load transcripts: $e',
+        error: 'Failed to load voice notes: $e',
       );
     }
   }
 
-  /// Load more transcripts (append to existing list).
+  /// Load more voice notes (append to existing list).
   Future<void> loadMore() async {
     if (state.isLoading || state.isLoadingMore || !state.hasMore) return;
 
     final query = state.query;
-    final offset = state.transcripts.length;
+    final cursor = state.nextCursor;
     final requestVersion = ++_requestVersion;
+    final previousCount = state.voiceNotes.length;
     state = state.copyWith(isLoadingMore: true);
 
     try {
-      final response = await _service.getTranscripts(
-        offset: offset,
+      final response = await _service.getVoiceNotes(
+        cursor: cursor,
         limit: _pageSize,
         query: query,
       );
       if (!_isCurrentRequest(requestVersion, query) ||
-          state.transcripts.length != offset) {
+          state.voiceNotes.length != previousCount) {
         return;
       }
 
       state = state.copyWith(
-        transcripts: [...state.transcripts, ...response.transcripts],
-        total: response.total,
+        voiceNotes: [...state.voiceNotes, ...response.voiceNotes],
         isLoadingMore: false,
         hasMore: response.hasMore,
+        nextCursor: response.nextCursor,
       );
     } on DioException catch (e) {
       if (!_isCurrentRequest(requestVersion, query)) return;
@@ -196,25 +187,25 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
       if (!_isCurrentRequest(requestVersion, query)) return;
       state = state.copyWith(
         isLoadingMore: false,
-        error: 'Failed to load more transcripts: $e',
+        error: 'Failed to load more voice notes: $e',
       );
     }
   }
 
   /// Refresh the list (reload from beginning).
   Future<void> refresh() async {
-    state = TranscriptHistoryState(query: state.query);
+    state = VoiceNoteHistoryState(query: state.query);
     await loadInitial();
   }
 
-  /// Search transcripts using the same paginated collection contract as history.
+  /// Search voice notes using the same paginated collection contract as history.
   Future<void> search(String query) async {
     final normalizedQuery = query.trim();
     if (normalizedQuery == state.query && !state.isLoading) {
       return;
     }
 
-    state = TranscriptHistoryState(query: normalizedQuery);
+    state = VoiceNoteHistoryState(query: normalizedQuery);
     await loadInitial();
   }
 
@@ -231,12 +222,12 @@ class TranscriptHistoryNotifier extends Notifier<TranscriptHistoryState> {
         e.type == DioExceptionType.receiveTimeout) {
       return 'Request timed out. Please try again.';
     }
-    return 'Failed to load transcripts. Please try again.';
+    return 'Failed to load voice notes. Please try again.';
   }
 }
 
-/// Provider for transcript history state.
-final transcriptHistoryProvider =
-    NotifierProvider<TranscriptHistoryNotifier, TranscriptHistoryState>(
-      TranscriptHistoryNotifier.new,
+/// Provider for voice-note history state.
+final voiceNoteHistoryProvider =
+    NotifierProvider<VoiceNoteHistoryNotifier, VoiceNoteHistoryState>(
+      VoiceNoteHistoryNotifier.new,
     );

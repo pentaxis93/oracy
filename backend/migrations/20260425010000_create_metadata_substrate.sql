@@ -28,17 +28,17 @@ CREATE UNIQUE INDEX tags_owner_id_idx
 CREATE INDEX tags_list_idx
     ON tags (api_key_id, created_at DESC, id DESC);
 
-CREATE TABLE transcript_tags (
+CREATE TABLE voice_note_tags (
     api_key_id TEXT NOT NULL,
-    transcript_id TEXT NOT NULL,
+    voice_note_id TEXT NOT NULL,
     tag_id TEXT NOT NULL,
-    PRIMARY KEY (api_key_id, transcript_id, tag_id),
-    FOREIGN KEY (api_key_id, transcript_id) REFERENCES transcripts(api_key_id, id) ON DELETE CASCADE,
+    PRIMARY KEY (api_key_id, voice_note_id, tag_id),
+    FOREIGN KEY (api_key_id, voice_note_id) REFERENCES voice_notes(api_key_id, id) ON DELETE CASCADE,
     FOREIGN KEY (api_key_id, tag_id) REFERENCES tags(api_key_id, id) ON DELETE CASCADE
 );
 
-CREATE INDEX transcript_tags_tag_idx
-    ON transcript_tags (api_key_id, tag_id, transcript_id);
+CREATE INDEX voice_note_tags_tag_idx
+    ON voice_note_tags (api_key_id, tag_id, voice_note_id);
 
 CREATE TRIGGER transcription_jobs_session_owner_insert
 BEFORE INSERT ON transcription_jobs
@@ -51,32 +51,32 @@ BEGIN
     );
 END;
 
-CREATE TRIGGER transcripts_session_owner_insert
-BEFORE INSERT ON transcripts
+CREATE TRIGGER voice_notes_session_owner_insert
+BEFORE INSERT ON voice_notes
 WHEN NEW.session_id IS NOT NULL
 BEGIN
-    SELECT RAISE(ABORT, 'transcript session must belong to same owner')
+    SELECT RAISE(ABORT, 'voice note session must belong to same owner')
     WHERE NOT EXISTS (
         SELECT 1 FROM sessions
         WHERE api_key_id = NEW.api_key_id AND id = NEW.session_id
     );
 END;
 
-CREATE TRIGGER transcripts_session_owner_update
-BEFORE UPDATE OF api_key_id, session_id ON transcripts
+CREATE TRIGGER voice_notes_session_owner_update
+BEFORE UPDATE OF api_key_id, session_id ON voice_notes
 WHEN NEW.session_id IS NOT NULL
 BEGIN
-    SELECT RAISE(ABORT, 'transcript session must belong to same owner')
+    SELECT RAISE(ABORT, 'voice note session must belong to same owner')
     WHERE NOT EXISTS (
         SELECT 1 FROM sessions
         WHERE api_key_id = NEW.api_key_id AND id = NEW.session_id
     );
 END;
 
-CREATE TRIGGER sessions_delete_null_transcripts
+CREATE TRIGGER sessions_delete_null_voice_notes
 AFTER DELETE ON sessions
 BEGIN
-    UPDATE transcripts
+    UPDATE voice_notes
     SET session_id = NULL
     WHERE api_key_id = OLD.api_key_id AND session_id = OLD.id;
 END;

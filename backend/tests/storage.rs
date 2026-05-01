@@ -4,8 +4,8 @@ use std::sync::Arc;
 use oracy_backend::audio_hash::{AUDIO_CONTENT_HASH_ALGORITHM_ID, compose_audio_content_hash_hex};
 use oracy_backend::storage::{
     AcceptJobOutcome, CreateTagOutcome, NewEmbedding, NewSegment, NewSession, NewTag,
-    NewTranscript, NewTranscriptVersion, NewTranscriptionJob, RenameTagOutcome,
-    ReplaceTranscriptTagsOutcome, Storage, StorageError, TranscriptMaterialization,
+    NewTranscriptionJob, NewVoiceNote, NewVoiceNoteVersion, RenameTagOutcome,
+    ReplaceVoiceNoteTagsOutcome, Storage, StorageError, VoiceNoteMaterialization,
 };
 use sqlx::Row;
 use tempfile::TempDir;
@@ -320,23 +320,23 @@ async fn accepted_submission_tuple_is_immutable_in_storage() {
 }
 
 #[tokio::test]
-async fn transcript_materialization_is_transactional() {
+async fn voice_note_materialization_is_transactional() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
     mark_job_processing(&storage, &job.id).await;
-    let mut materialization = materialization("transcript-a");
+    let mut materialization = materialization("voice-note-a");
     materialization.segments[1].position = materialization.segments[0].position;
 
     storage
-        .complete_job_with_transcript("owner-a", &job.id, materialization)
+        .complete_job_with_voice_note("owner-a", &job.id, materialization)
         .await
         .expect_err("duplicate segment position should fail");
 
     assert!(
         storage
-            .get_transcript("owner-a", "transcript-a")
+            .get_voice_note("owner-a", "voice-note-a")
             .await
-            .expect("transcript lookup")
+            .expect("voice note lookup")
             .is_none()
     );
     let job = storage
@@ -345,41 +345,41 @@ async fn transcript_materialization_is_transactional() {
         .expect("job lookup")
         .expect("job exists");
     assert_eq!(job.status, "processing");
-    assert_eq!(job.transcript_id, None);
+    assert_eq!(job.voice_note_id, None);
 }
 
 #[tokio::test]
-async fn completed_transcripts_expose_current_version_ordered_segments_and_current_embedding() {
+async fn completed_voice_notes_expose_current_version_ordered_segments_and_current_embedding() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
     mark_job_processing(&storage, &job.id).await;
     storage
-        .complete_job_with_transcript("owner-a", &job.id, materialization("transcript-a"))
+        .complete_job_with_voice_note("owner-a", &job.id, materialization("voice-note-a"))
         .await
-        .expect("materialize transcript");
+        .expect("materialize voice note");
 
     sqlx::query(
         r#"
-        INSERT INTO transcript_versions (
-            id, api_key_id, transcript_id, version_number, transcript, created_at
+        INSERT INTO voice_note_versions (
+            id, api_key_id, voice_note_id, version_number, text, created_at
         )
-        VALUES ('version-2', 'owner-a', 'transcript-a', 2, 'edited text', '2026-04-24T18:01:00Z')
+        VALUES ('version-2', 'owner-a', 'voice-note-a', 2, 'edited text', '2026-04-24T18:01:00Z')
         "#,
     )
     .execute(storage.pool())
     .await
     .expect("insert edited version");
 
-    let transcript = storage
-        .get_transcript("owner-a", "transcript-a")
+    let voice_note = storage
+        .get_voice_note("owner-a", "voice-note-a")
         .await
-        .expect("transcript lookup")
-        .expect("transcript exists");
-    assert_eq!(transcript.current_version_id, "version-2");
-    assert_eq!(transcript.transcript, "edited text");
+        .expect("voice note lookup")
+        .expect("voice note exists");
+    assert_eq!(voice_note.current_version_id, "version-2");
+    assert_eq!(voice_note.text, "edited text");
 
     let segments = storage
-        .list_segments("owner-a", "transcript-a")
+        .list_segments("owner-a", "voice-note-a")
         .await
         .expect("segments");
     assert_eq!(
@@ -391,7 +391,7 @@ async fn completed_transcripts_expose_current_version_ordered_segments_and_curre
     );
 
     let initial_embedding = storage
-        .get_current_embedding("owner-a", "transcript-a")
+        .get_current_embedding("owner-a", "voice-note-a")
         .await
         .expect("embedding lookup")
         .expect("embedding exists");
@@ -401,7 +401,7 @@ async fn completed_transcripts_expose_current_version_ordered_segments_and_curre
         storage
             .replace_current_embedding(
                 "owner-a",
-                "transcript-a",
+                "voice-note-a",
                 NewEmbedding {
                     model: "embedding-v2".to_owned(),
                     vector: vec![4, 5, 6],
@@ -415,7 +415,7 @@ async fn completed_transcripts_expose_current_version_ordered_segments_and_curre
         !storage
             .replace_current_embedding(
                 "owner-b",
-                "transcript-a",
+                "voice-note-a",
                 NewEmbedding {
                     model: "wrong-owner".to_owned(),
                     vector: vec![9],
@@ -427,7 +427,7 @@ async fn completed_transcripts_expose_current_version_ordered_segments_and_curre
     );
 
     let replaced = storage
-        .get_current_embedding("owner-a", "transcript-a")
+        .get_current_embedding("owner-a", "voice-note-a")
         .await
         .expect("embedding lookup")
         .expect("embedding exists");
@@ -442,12 +442,12 @@ async fn duplicate_completion_fails_without_orphaning_materialized_rows() {
     mark_job_processing(&storage, &job.id).await;
 
     storage
-        .complete_job_with_transcript("owner-a", &job.id, materialization("transcript-a"))
+        .complete_job_with_voice_note("owner-a", &job.id, materialization("voice-note-a"))
         .await
         .expect("first materialization succeeds");
 
     let error = storage
-        .complete_job_with_transcript("owner-a", &job.id, materialization("transcript-b"))
+        .complete_job_with_voice_note("owner-a", &job.id, materialization("voice-note-b"))
         .await
         .expect_err("duplicate materialization should fail");
     assert!(matches!(
@@ -461,30 +461,30 @@ async fn duplicate_completion_fails_without_orphaning_materialized_rows() {
         .expect("job lookup")
         .expect("job exists");
     assert_eq!(job.status, "succeeded");
-    assert_eq!(job.transcript_id.as_deref(), Some("transcript-a"));
-    assert_eq!(row_count(&storage, "transcripts", "transcript-b").await, 0);
+    assert_eq!(job.voice_note_id.as_deref(), Some("voice-note-a"));
+    assert_eq!(row_count(&storage, "voice_notes", "voice-note-b").await, 0);
     assert_eq!(
-        child_row_count(&storage, "transcript_versions", "transcript-b").await,
+        child_row_count(&storage, "voice_note_versions", "voice-note-b").await,
         0
     );
     assert_eq!(
-        child_row_count(&storage, "segments", "transcript-b").await,
+        child_row_count(&storage, "segments", "voice-note-b").await,
         0
     );
     assert_eq!(
-        child_row_count(&storage, "embeddings", "transcript-b").await,
+        child_row_count(&storage, "embeddings", "voice-note-b").await,
         0
     );
 }
 
 #[tokio::test]
-async fn retry_waiting_jobs_are_not_eligible_for_transcript_completion() {
+async fn retry_waiting_jobs_are_not_eligible_for_voice_note_completion() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
     mark_job_retry_waiting(&storage, &job.id).await;
 
     let error = storage
-        .complete_job_with_transcript("owner-a", &job.id, materialization("transcript-a"))
+        .complete_job_with_voice_note("owner-a", &job.id, materialization("voice-note-a"))
         .await
         .expect_err("retry-waiting completion should fail");
     assert!(matches!(
@@ -498,18 +498,18 @@ async fn retry_waiting_jobs_are_not_eligible_for_transcript_completion() {
         .expect("job lookup")
         .expect("job exists");
     assert_eq!(job.status, "retry_waiting");
-    assert_eq!(job.transcript_id, None);
-    assert_eq!(row_count(&storage, "transcripts", "transcript-a").await, 0);
+    assert_eq!(job.voice_note_id, None);
+    assert_eq!(row_count(&storage, "voice_notes", "voice-note-a").await, 0);
     assert_eq!(
-        child_row_count(&storage, "transcript_versions", "transcript-a").await,
+        child_row_count(&storage, "voice_note_versions", "voice-note-a").await,
         0
     );
     assert_eq!(
-        child_row_count(&storage, "segments", "transcript-a").await,
+        child_row_count(&storage, "segments", "voice-note-a").await,
         0
     );
     assert_eq!(
-        child_row_count(&storage, "embeddings", "transcript-a").await,
+        child_row_count(&storage, "embeddings", "voice-note-a").await,
         0
     );
 }
@@ -607,38 +607,38 @@ async fn persisted_timestamps_order_and_filter_chronologically_under_sql_text_co
 }
 
 #[tokio::test]
-async fn deleting_a_transcript_cascades_children_and_nulls_the_succeeded_job() {
+async fn deleting_a_voice_note_cascades_children_and_nulls_the_succeeded_job() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
     mark_job_processing(&storage, &job.id).await;
     storage
-        .complete_job_with_transcript("owner-a", &job.id, materialization("transcript-a"))
+        .complete_job_with_voice_note("owner-a", &job.id, materialization("voice-note-a"))
         .await
-        .expect("materialize transcript");
+        .expect("materialize voice note");
 
     assert!(
         storage
-            .delete_transcript("owner-a", "transcript-a")
+            .delete_voice_note("owner-a", "voice-note-a")
             .await
-            .expect("delete transcript")
+            .expect("delete voice note")
     );
     assert!(
         storage
-            .get_transcript("owner-a", "transcript-a")
+            .get_voice_note("owner-a", "voice-note-a")
             .await
-            .expect("transcript lookup")
+            .expect("voice note lookup")
             .is_none()
     );
     assert!(
         storage
-            .list_segments("owner-a", "transcript-a")
+            .list_segments("owner-a", "voice-note-a")
             .await
             .expect("segments")
             .is_empty()
     );
     assert!(
         storage
-            .get_current_embedding("owner-a", "transcript-a")
+            .get_current_embedding("owner-a", "voice-note-a")
             .await
             .expect("embedding lookup")
             .is_none()
@@ -650,36 +650,36 @@ async fn deleting_a_transcript_cascades_children_and_nulls_the_succeeded_job() {
         .expect("job lookup")
         .expect("job survives");
     assert_eq!(job.status, "succeeded");
-    assert_eq!(job.transcript_id, None);
+    assert_eq!(job.voice_note_id, None);
 }
 
 #[tokio::test]
-async fn transcript_child_rows_must_match_the_parent_transcript_owner() {
+async fn voice_note_child_rows_must_match_the_parent_voice_note_owner() {
     let (_tempdir, storage) = storage().await;
-    insert_transcript_only(&storage, "owner-a", "transcript-a").await;
+    insert_voice_note_only(&storage, "owner-a", "voice-note-a").await;
 
     sqlx::query(
         r#"
-        INSERT INTO transcript_versions (
-            id, api_key_id, transcript_id, version_number, transcript, created_at
+        INSERT INTO voice_note_versions (
+            id, api_key_id, voice_note_id, version_number, text, created_at
         )
         VALUES (
-            'owner-mismatched-version', 'owner-b', 'transcript-a', 1,
+            'owner-mismatched-version', 'owner-b', 'voice-note-a', 1,
             'cross-owner version', '2026-04-24T18:00:30.000000000Z'
         )
         "#,
     )
     .execute(storage.pool())
     .await
-    .expect_err("mismatched transcript version owner should fail");
+    .expect_err("mismatched voice note version owner should fail");
 
     sqlx::query(
         r#"
         INSERT INTO segments (
-            id, api_key_id, transcript_id, position, start_ms, end_ms, text
+            id, api_key_id, voice_note_id, position, start_ms, end_ms, text
         )
         VALUES (
-            'owner-mismatched-segment', 'owner-b', 'transcript-a', 0, 0, 1000,
+            'owner-mismatched-segment', 'owner-b', 'voice-note-a', 0, 0, 1000,
             'cross-owner segment'
         )
         "#,
@@ -690,9 +690,9 @@ async fn transcript_child_rows_must_match_the_parent_transcript_owner() {
 
     sqlx::query(
         r#"
-        INSERT INTO embeddings (transcript_id, api_key_id, model, vector, created_at)
+        INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
         VALUES (
-            'transcript-a', 'owner-b', 'embedding-v1', x'010203',
+            'voice-note-a', 'owner-b', 'embedding-v1', x'010203',
             '2026-04-24T18:00:31.000000000Z'
         )
         "#,
@@ -703,31 +703,31 @@ async fn transcript_child_rows_must_match_the_parent_transcript_owner() {
 }
 
 #[tokio::test]
-async fn completed_job_transcript_link_must_match_the_job_owner() {
+async fn completed_job_voice_note_link_must_match_the_job_owner() {
     let (_tempdir, storage) = storage().await;
-    insert_transcript_only(&storage, "owner-a", "transcript-a").await;
+    insert_voice_note_only(&storage, "owner-a", "voice-note-a").await;
     let job = created_job(&storage, "owner-b", "attempt-1").await;
 
     sqlx::query(
         r#"
         UPDATE transcription_jobs
-        SET transcript_id = 'transcript-a'
+        SET voice_note_id = 'voice-note-a'
         WHERE id = ?
         "#,
     )
     .bind(&job.id)
     .execute(storage.pool())
     .await
-    .expect_err("mismatched job transcript owner should fail");
+    .expect_err("mismatched job voice note owner should fail");
 }
 
 #[tokio::test]
-async fn tags_are_owner_scoped_case_insensitive_latest_spelling_and_many_to_many_with_transcripts()
+async fn tags_are_owner_scoped_case_insensitive_latest_spelling_and_many_to_many_with_voice_notes()
 {
     let (_tempdir, storage) = storage().await;
-    insert_transcript_only(&storage, "owner-a", "transcript-a").await;
-    insert_transcript_only(&storage, "owner-a", "transcript-b").await;
-    insert_transcript_only(&storage, "owner-b", "transcript-c").await;
+    insert_voice_note_only(&storage, "owner-a", "voice-note-a").await;
+    insert_voice_note_only(&storage, "owner-a", "voice-note-b").await;
+    insert_voice_note_only(&storage, "owner-b", "voice-note-c").await;
 
     let meeting = match storage
         .create_tag(new_tag("owner-a", "tag-meeting", "Meeting"))
@@ -760,31 +760,31 @@ async fn tags_are_owner_scoped_case_insensitive_latest_spelling_and_many_to_many
 
     assert_eq!(
         storage
-            .replace_transcript_tags("owner-a", "transcript-a", std::slice::from_ref(&meeting.id))
+            .replace_voice_note_tags("owner-a", "voice-note-a", std::slice::from_ref(&meeting.id))
             .await
-            .expect("tag transcript"),
-        ReplaceTranscriptTagsOutcome::Replaced
+            .expect("tag voice note"),
+        ReplaceVoiceNoteTagsOutcome::Replaced
     );
     assert_eq!(
         storage
-            .replace_transcript_tags("owner-a", "transcript-b", std::slice::from_ref(&meeting.id))
+            .replace_voice_note_tags("owner-a", "voice-note-b", std::slice::from_ref(&meeting.id))
             .await
-            .expect("tag second transcript"),
-        ReplaceTranscriptTagsOutcome::Replaced
+            .expect("tag second voice note"),
+        ReplaceVoiceNoteTagsOutcome::Replaced
     );
     assert_eq!(
         storage
-            .replace_transcript_tags("owner-b", "transcript-c", std::slice::from_ref(&meeting.id))
+            .replace_voice_note_tags("owner-b", "voice-note-c", std::slice::from_ref(&meeting.id))
             .await
             .expect("wrong-owner tag is rejected"),
-        ReplaceTranscriptTagsOutcome::NotFound
+        ReplaceVoiceNoteTagsOutcome::NotFound
     );
 
     assert_eq!(
         storage
-            .list_transcript_tags("owner-a", "transcript-a")
+            .list_voice_note_tags("owner-a", "voice-note-a")
             .await
-            .expect("list transcript tags"),
+            .expect("list voice note tags"),
         vec![replayed.clone()]
     );
 
@@ -796,13 +796,13 @@ async fn tags_are_owner_scoped_case_insensitive_latest_spelling_and_many_to_many
     );
     assert!(
         storage
-            .list_transcript_tags("owner-a", "transcript-a")
+            .list_voice_note_tags("owner-a", "voice-note-a")
             .await
             .expect("tag associations removed")
             .is_empty()
     );
-    assert_eq!(row_count(&storage, "transcripts", "transcript-a").await, 1);
-    assert_eq!(row_count(&storage, "transcripts", "transcript-b").await, 1);
+    assert_eq!(row_count(&storage, "voice_notes", "voice-note-a").await, 1);
+    assert_eq!(row_count(&storage, "voice_notes", "voice-note-b").await, 1);
 }
 
 #[tokio::test]
@@ -837,9 +837,9 @@ async fn unicode_case_equivalent_tag_names_share_one_owner_scoped_identity() {
 }
 
 #[tokio::test]
-async fn duplicate_transcript_tag_ids_are_rejected_without_mutating_prior_tags() {
+async fn duplicate_voice_note_tag_ids_are_rejected_without_mutating_prior_tags() {
     let (_tempdir, storage) = storage().await;
-    insert_transcript_only(&storage, "owner-a", "transcript-a").await;
+    insert_voice_note_only(&storage, "owner-a", "voice-note-a").await;
     let meeting = match storage
         .create_tag(new_tag("owner-a", "tag-meeting", "Meeting"))
         .await
@@ -858,35 +858,35 @@ async fn duplicate_transcript_tag_ids_are_rejected_without_mutating_prior_tags()
     };
     assert_eq!(
         storage
-            .replace_transcript_tags("owner-a", "transcript-a", std::slice::from_ref(&notes.id))
+            .replace_voice_note_tags("owner-a", "voice-note-a", std::slice::from_ref(&notes.id))
             .await
             .expect("set prior tag"),
-        ReplaceTranscriptTagsOutcome::Replaced
+        ReplaceVoiceNoteTagsOutcome::Replaced
     );
 
     let outcome = storage
-        .replace_transcript_tags(
+        .replace_voice_note_tags(
             "owner-a",
-            "transcript-a",
+            "voice-note-a",
             &[meeting.id.clone(), meeting.id.clone()],
         )
         .await
         .expect("duplicate-input outcome");
 
-    assert_eq!(outcome, ReplaceTranscriptTagsOutcome::DuplicateTagIds);
+    assert_eq!(outcome, ReplaceVoiceNoteTagsOutcome::DuplicateTagIds);
     assert_eq!(
         storage
-            .list_transcript_tags("owner-a", "transcript-a")
+            .list_voice_note_tags("owner-a", "voice-note-a")
             .await
-            .expect("list transcript tags"),
+            .expect("list voice note tags"),
         vec![notes]
     );
 }
 
 #[tokio::test]
-async fn transcript_tag_replacement_collapses_missing_transcript_and_tag_to_not_found() {
+async fn voice_note_tag_replacement_collapses_missing_voice_note_and_tag_to_not_found() {
     let (_tempdir, storage) = storage().await;
-    insert_transcript_only(&storage, "owner-a", "transcript-a").await;
+    insert_voice_note_only(&storage, "owner-a", "voice-note-a").await;
     let meeting = match storage
         .create_tag(new_tag("owner-a", "tag-meeting", "Meeting"))
         .await
@@ -898,22 +898,22 @@ async fn transcript_tag_replacement_collapses_missing_transcript_and_tag_to_not_
 
     assert_eq!(
         storage
-            .replace_transcript_tags("owner-a", "transcript-missing", &[meeting.id])
+            .replace_voice_note_tags("owner-a", "voice-note-missing", &[meeting.id])
             .await
-            .expect("missing transcript outcome"),
-        ReplaceTranscriptTagsOutcome::NotFound
+            .expect("missing voice note outcome"),
+        ReplaceVoiceNoteTagsOutcome::NotFound
     );
     assert_eq!(
         storage
-            .replace_transcript_tags("owner-a", "transcript-a", &["tag-missing".to_owned()])
+            .replace_voice_note_tags("owner-a", "voice-note-a", &["tag-missing".to_owned()])
             .await
             .expect("missing tag outcome"),
-        ReplaceTranscriptTagsOutcome::NotFound
+        ReplaceVoiceNoteTagsOutcome::NotFound
     );
 }
 
 #[tokio::test]
-async fn complete_job_with_transcript_nulls_deleted_accepted_session_without_mutating_job_tuple() {
+async fn complete_job_with_voice_note_nulls_deleted_accepted_session_without_mutating_job_tuple() {
     let (_tempdir, storage) = storage().await;
     let input = new_job("owner-a", "attempt-deleted-session", "hash-a");
     let job = created_job(&storage, "owner-a", "attempt-deleted-session").await;
@@ -927,20 +927,20 @@ async fn complete_job_with_transcript_nulls_deleted_accepted_session_without_mut
     );
 
     storage
-        .complete_job_with_transcript(
+        .complete_job_with_voice_note(
             "owner-a",
             &job.id,
-            materialization("transcript-deleted-session"),
+            materialization("voice-note-deleted-session"),
         )
         .await
-        .expect("materialize transcript after session deletion");
+        .expect("materialize voice note after session deletion");
 
     assert_eq!(
         storage
-            .get_transcript("owner-a", "transcript-deleted-session")
+            .get_voice_note("owner-a", "voice-note-deleted-session")
             .await
-            .expect("transcript lookup")
-            .expect("transcript exists")
+            .expect("voice note lookup")
+            .expect("voice note exists")
             .session_id,
         None
     );
@@ -961,7 +961,7 @@ async fn complete_job_with_transcript_nulls_deleted_accepted_session_without_mut
 }
 
 #[tokio::test]
-async fn sessions_are_identities_that_null_transcripts_without_mutating_replay_tuples() {
+async fn sessions_are_identities_that_null_voice_notes_without_mutating_replay_tuples() {
     let (_tempdir, storage) = storage().await;
     let session = storage
         .create_session(new_session("owner-a", "session-a", "Planning"))
@@ -981,16 +981,16 @@ async fn sessions_are_identities_that_null_transcripts_without_mutating_replay_t
     };
     mark_job_processing(&storage, &job.id).await;
     storage
-        .complete_job_with_transcript("owner-a", &job.id, materialization("transcript-session"))
+        .complete_job_with_voice_note("owner-a", &job.id, materialization("voice-note-session"))
         .await
-        .expect("materialize transcript");
+        .expect("materialize voice note");
 
     assert_eq!(
         storage
-            .get_transcript("owner-a", "transcript-session")
+            .get_voice_note("owner-a", "voice-note-session")
             .await
-            .expect("transcript lookup")
-            .expect("transcript exists")
+            .expect("voice note lookup")
+            .expect("voice note exists")
             .session_id
             .as_deref(),
         Some("session-a")
@@ -1004,10 +1004,10 @@ async fn sessions_are_identities_that_null_transcripts_without_mutating_replay_t
     );
     assert_eq!(
         storage
-            .get_transcript("owner-a", "transcript-session")
+            .get_voice_note("owner-a", "voice-note-session")
             .await
-            .expect("transcript lookup")
-            .expect("transcript exists")
+            .expect("voice note lookup")
+            .expect("voice note exists")
             .session_id,
         None
     );
@@ -1030,7 +1030,7 @@ async fn sessions_are_identities_that_null_transcripts_without_mutating_replay_t
 #[tokio::test]
 async fn tag_renames_preserve_latest_spelling_and_reject_case_insensitive_collisions() {
     let (_tempdir, storage) = storage().await;
-    insert_transcript_only(&storage, "owner-a", "transcript-a").await;
+    insert_voice_note_only(&storage, "owner-a", "voice-note-a").await;
     let meeting = match storage
         .create_tag(new_tag("owner-a", "tag-meeting", "Meeting"))
         .await
@@ -1048,9 +1048,9 @@ async fn tag_renames_preserve_latest_spelling_and_reject_case_insensitive_collis
         other => panic!("expected created tag, got {other:?}"),
     };
     storage
-        .replace_transcript_tags("owner-a", "transcript-a", std::slice::from_ref(&meeting.id))
+        .replace_voice_note_tags("owner-a", "voice-note-a", std::slice::from_ref(&meeting.id))
         .await
-        .expect("tag transcript");
+        .expect("tag voice note");
 
     let renamed = match storage
         .rename_tag("owner-a", &meeting.id, "MEETING")
@@ -1064,9 +1064,9 @@ async fn tag_renames_preserve_latest_spelling_and_reject_case_insensitive_collis
     assert_eq!(renamed.name, "MEETING");
     assert_eq!(
         storage
-            .list_transcript_tags("owner-a", "transcript-a")
+            .list_voice_note_tags("owner-a", "voice-note-a")
             .await
-            .expect("list transcript tags")
+            .expect("list voice note tags")
             .first()
             .expect("tag exists")
             .name,
@@ -1311,12 +1311,12 @@ async fn accept_while_uncommitted_row_exists(
     handle.await.expect("accept task should not panic")
 }
 
-async fn insert_transcript_only(storage: &Storage, owner: &str, transcript_id: &str) {
+async fn insert_voice_note_only(storage: &Storage, owner: &str, voice_note_id: &str) {
     sqlx::query(
         r#"
-        INSERT INTO transcripts (
+        INSERT INTO voice_notes (
             id, api_key_id, audio_duration_seconds, audio_format, audio_size_bytes,
-            transcript_language, model, processing_time_ms, cost_cents,
+            language, model, processing_time_ms, cost_cents,
             created_at, recorded_at, session_id
         )
         VALUES (
@@ -1327,11 +1327,11 @@ async fn insert_transcript_only(storage: &Storage, owner: &str, transcript_id: &
         )
         "#,
     )
-    .bind(transcript_id)
+    .bind(voice_note_id)
     .bind(owner)
     .execute(storage.pool())
     .await
-    .expect("insert transcript");
+    .expect("insert voice note");
 }
 
 async fn insert_session_row(storage: &Storage, owner: &str, session_id: &str) {
@@ -1405,10 +1405,10 @@ async fn row_count(storage: &Storage, table: &str, id: &str) -> i64 {
         .get("count")
 }
 
-async fn child_row_count(storage: &Storage, table: &str, transcript_id: &str) -> i64 {
-    let sql = format!("SELECT COUNT(*) AS count FROM {table} WHERE transcript_id = ?");
+async fn child_row_count(storage: &Storage, table: &str, voice_note_id: &str) -> i64 {
+    let sql = format!("SELECT COUNT(*) AS count FROM {table} WHERE voice_note_id = ?");
     sqlx::query(&sql)
-        .bind(transcript_id)
+        .bind(voice_note_id)
         .fetch_one(storage.pool())
         .await
         .expect("count child rows")
@@ -1447,35 +1447,35 @@ fn new_session(owner: &str, id: &str, name: &str) -> NewSession {
     }
 }
 
-fn materialization(transcript_id: &str) -> TranscriptMaterialization {
-    TranscriptMaterialization {
-        transcript: NewTranscript {
-            id: transcript_id.to_owned(),
+fn materialization(voice_note_id: &str) -> VoiceNoteMaterialization {
+    VoiceNoteMaterialization {
+        voice_note: NewVoiceNote {
+            id: voice_note_id.to_owned(),
             audio_duration_seconds: 12.5,
             audio_format: "wav".to_owned(),
             audio_size_bytes: 401_280,
-            transcript_language: Some("en".to_owned()),
+            language: Some("en".to_owned()),
             model: "general-transcription-v1".to_owned(),
             processing_time_ms: 1_843,
             cost_cents: Some(1),
             created_at: datetime!(2026-04-24 18:00:30 UTC),
             recorded_at: datetime!(2026-04-24 17:59:00 UTC),
         },
-        initial_version: NewTranscriptVersion {
-            id: format!("{transcript_id}-version-1"),
-            transcript: "initial text".to_owned(),
+        initial_version: NewVoiceNoteVersion {
+            id: format!("{voice_note_id}-version-1"),
+            text: "initial text".to_owned(),
             created_at: datetime!(2026-04-24 18:00:30 UTC),
         },
         segments: vec![
             NewSegment {
-                id: format!("{transcript_id}-segment-1"),
+                id: format!("{voice_note_id}-segment-1"),
                 position: 0,
                 start_ms: 0,
                 end_ms: 1_000,
                 text: "first segment".to_owned(),
             },
             NewSegment {
-                id: format!("{transcript_id}-segment-2"),
+                id: format!("{voice_note_id}-segment-2"),
                 position: 1,
                 start_ms: 1_000,
                 end_ms: 2_000,

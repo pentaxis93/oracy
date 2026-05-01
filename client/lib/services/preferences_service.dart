@@ -12,7 +12,7 @@ class PreferencesService {
 
   PreferencesService(this._prefs);
 
-  /// Whether to automatically copy transcripts to clipboard.
+  /// Whether to automatically copy voice notes to clipboard.
   /// Default: true (enabled)
   bool get autoCopyToClipboard =>
       _prefs.getBool(PreferenceKeys.autoCopyToClipboard) ?? true;

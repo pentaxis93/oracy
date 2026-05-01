@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/screens/history_screen.dart';
 import 'package:oracy/screens/settings_screen.dart';
-import 'package:oracy/screens/transcript_result_screen.dart';
+import 'package:oracy/screens/voice_note_result_screen.dart';
 import 'package:oracy/services/home_widget_service.dart';
 import 'package:oracy/services/preferences_service.dart';
 import 'package:oracy/services/recording_service.dart';
@@ -109,7 +109,7 @@ class _HomePageState extends ConsumerState<HomePage>
         // Auto-copy to clipboard if enabled
         final autoCopyEnabled = ref.read(autoCopyEnabledProvider);
         if (autoCopyEnabled) {
-          Clipboard.setData(ClipboardData(text: next.transcript.transcript));
+          Clipboard.setData(ClipboardData(text: next.voiceNote.text));
           // Haptic feedback to indicate copy
           HapticFeedback.mediumImpact();
         }
@@ -118,8 +118,8 @@ class _HomePageState extends ConsumerState<HomePage>
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => TranscriptResultScreen(
-              transcript: next.transcript,
+            builder: (_) => VoiceNoteResultScreen(
+              voiceNote: next.voiceNote,
               wasAutoCopied: autoCopyEnabled,
             ),
           ),

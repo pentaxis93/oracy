@@ -5,32 +5,31 @@ import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/widgets/permission_dialog.dart';
 
 /// Screen that displays the result of a transcription.
-class TranscriptResultScreen extends ConsumerStatefulWidget {
-  final TranscriptResponse transcript;
+class VoiceNoteResultScreen extends ConsumerStatefulWidget {
+  final VoiceNoteResponse voiceNote;
   final bool wasAutoCopied;
 
-  const TranscriptResultScreen({
+  const VoiceNoteResultScreen({
     super.key,
-    required this.transcript,
+    required this.voiceNote,
     this.wasAutoCopied = false,
   });
 
   @override
-  ConsumerState<TranscriptResultScreen> createState() =>
-      _TranscriptResultScreenState();
+  ConsumerState<VoiceNoteResultScreen> createState() =>
+      _VoiceNoteResultScreenState();
 }
 
-class _TranscriptResultScreenState
-    extends ConsumerState<TranscriptResultScreen> {
+class _VoiceNoteResultScreenState extends ConsumerState<VoiceNoteResultScreen> {
   @override
   void initState() {
     super.initState();
-    // Show snackbar after build if transcript was auto-copied
+    // Show snackbar after build if voiceNote was auto-copied
     if (widget.wasAutoCopied) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Transcript copied to clipboard'),
+            content: Text('Voice note copied to clipboard'),
             duration: Duration(seconds: 2),
             behavior: SnackBarBehavior.floating,
           ),
@@ -45,13 +44,13 @@ class _TranscriptResultScreenState
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Transcript'),
+        title: const Text('Voice note'),
         centerTitle: true,
         actions: [
           IconButton(
             icon: const Icon(Icons.copy),
-            tooltip: 'Copy transcript',
-            onPressed: () => _copyTranscript(context),
+            tooltip: 'Copy voice note',
+            onPressed: () => _copyVoiceNote(context),
           ),
         ],
       ),
@@ -68,33 +67,32 @@ class _TranscriptResultScreenState
                   _MetadataItem(
                     icon: Icons.timer_outlined,
                     label: _formatDuration(
-                      widget.transcript.audioDurationSeconds,
+                      widget.voiceNote.audioDurationSeconds,
                     ),
                     tooltip: 'Audio duration',
                   ),
-                  if (widget.transcript.transcriptLanguage != null)
+                  if (widget.voiceNote.language != null)
                     _MetadataItem(
                       icon: Icons.language,
-                      label: widget.transcript.transcriptLanguage!
-                          .toUpperCase(),
+                      label: widget.voiceNote.language!.toUpperCase(),
                       tooltip: 'Language',
                     ),
                   _MetadataItem(
                     icon: Icons.attach_money,
                     label:
-                        '\$${(widget.transcript.costCents / 100).toStringAsFixed(3)}',
+                        '\$${(widget.voiceNote.costCents / 100).toStringAsFixed(3)}',
                     tooltip: 'Cost',
                   ),
                 ],
               ),
             ),
 
-            // Transcript text
+            // Voice note text
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
                 child: SelectableText(
-                  widget.transcript.transcript,
+                  widget.voiceNote.text,
                   style: theme.textTheme.bodyLarge?.copyWith(height: 1.6),
                 ),
               ),
@@ -107,7 +105,7 @@ class _TranscriptResultScreenState
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: () => _copyTranscript(context),
+                      onPressed: () => _copyVoiceNote(context),
                       icon: const Icon(Icons.copy),
                       label: const Text('Copy'),
                     ),
@@ -129,11 +127,11 @@ class _TranscriptResultScreenState
     );
   }
 
-  void _copyTranscript(BuildContext context) {
-    Clipboard.setData(ClipboardData(text: widget.transcript.transcript));
+  void _copyVoiceNote(BuildContext context) {
+    Clipboard.setData(ClipboardData(text: widget.voiceNote.text));
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Transcript copied to clipboard'),
+        content: Text('Voice note copied to clipboard'),
         duration: Duration(seconds: 2),
       ),
     );

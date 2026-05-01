@@ -172,7 +172,7 @@ class MockTranscriptionNotifier extends TranscriptionNotifier {
     await Future.delayed(const Duration(milliseconds: 10));
     state = const TranscriptionProcessing();
     await Future.delayed(const Duration(milliseconds: 10));
-    state = TranscriptionSuccess(createMockTranscript());
+    state = TranscriptionSuccess(createMockVoiceNote());
   }
 
   @override
@@ -188,31 +188,31 @@ class MockTranscriptionNotifier extends TranscriptionNotifier {
 }
 
 /// Mock history notifier for testing.
-class MockHistoryNotifier extends TranscriptHistoryNotifier {
-  final List<TranscriptResponse> _mockTranscripts;
+class MockHistoryNotifier extends VoiceNoteHistoryNotifier {
+  final List<VoiceNoteResponse> _mockVoiceNotes;
   final bool _hasMore;
 
   MockHistoryNotifier({
-    List<TranscriptResponse>? transcripts,
+    List<VoiceNoteResponse>? voiceNotes,
     bool hasMore = false,
-  }) : _mockTranscripts = transcripts ?? [],
+  }) : _mockVoiceNotes = voiceNotes ?? [],
        _hasMore = hasMore;
 
   @override
-  TranscriptHistoryState build() => TranscriptHistoryState(
-    transcripts: _mockTranscripts,
-    total: _mockTranscripts.length,
+  VoiceNoteHistoryState build() => VoiceNoteHistoryState(
+    voiceNotes: _mockVoiceNotes,
     hasMore: _hasMore,
+    nextCursor: _hasMore ? 'mock-next-page' : null,
   );
 
   @override
   Future<void> loadInitial() async {
     state = state.copyWith(isLoading: true);
     await Future.delayed(const Duration(milliseconds: 10));
-    state = TranscriptHistoryState(
-      transcripts: _mockTranscripts,
-      total: _mockTranscripts.length,
+    state = VoiceNoteHistoryState(
+      voiceNotes: _mockVoiceNotes,
       hasMore: _hasMore,
+      nextCursor: _hasMore ? 'mock-next-page' : null,
     );
   }
 
@@ -227,36 +227,36 @@ class MockHistoryNotifier extends TranscriptHistoryNotifier {
   }
 }
 
-/// Creates a mock TranscriptResponse for testing.
-TranscriptResponse createMockTranscript({
+/// Creates a mock VoiceNoteResponse for testing.
+VoiceNoteResponse createMockVoiceNote({
   String? id,
-  String? transcript,
+  String? text,
   double? audioDurationSeconds,
   int? costCents,
   DateTime? createdAt,
   String? language,
 }) {
-  return TranscriptResponse(
+  return VoiceNoteResponse(
     id: id ?? 'mock-id-123',
-    transcript: transcript ?? 'This is a mock transcript for testing purposes.',
+    text: text ?? 'This is a mock voice note for testing purposes.',
     audioDurationSeconds: audioDurationSeconds ?? 30.0,
     audioFormat: 'm4a',
     audioSizeBytes: 50000,
-    transcriptLanguage: language ?? 'en',
-    whisperModel: 'whisper-1',
+    language: language ?? 'en',
+    model: 'whisper-1',
     processingTimeMs: 1500,
     costCents: costCents ?? 1,
     createdAt: createdAt ?? DateTime.now(),
   );
 }
 
-/// Creates a list of mock transcripts for testing.
-List<TranscriptResponse> createMockTranscriptList({int count = 5}) {
+/// Creates a list of mock voice notes for testing.
+List<VoiceNoteResponse> createMockVoiceNoteList({int count = 5}) {
   return List.generate(
     count,
-    (index) => createMockTranscript(
+    (index) => createMockVoiceNote(
       id: 'mock-id-$index',
-      transcript: 'Mock transcript number ${index + 1}.',
+      text: 'Mock voice note number ${index + 1}.',
       createdAt: DateTime.now().subtract(Duration(days: index)),
     ),
   );
@@ -313,11 +313,11 @@ dynamic transcriptionOverride([TranscriptionState? initialState]) {
 
 /// Override for mock history state.
 dynamic historyOverride({
-  List<TranscriptResponse>? transcripts,
+  List<VoiceNoteResponse>? voiceNotes,
   bool hasMore = false,
 }) {
-  return transcriptHistoryProvider.overrideWith(
-    () => MockHistoryNotifier(transcripts: transcripts, hasMore: hasMore),
+  return voiceNoteHistoryProvider.overrideWith(
+    () => MockHistoryNotifier(voiceNotes: voiceNotes, hasMore: hasMore),
   );
 }
 

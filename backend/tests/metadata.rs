@@ -571,10 +571,10 @@ impl MetadataFixture {
     }
 
     async fn insert_voice_note_with_tag(&self, owner: &str, tag_id: &str) {
-        self.insert_transcript(owner, None).await;
+        self.insert_voice_note(owner, None).await;
         sqlx::query(
             r#"
-            INSERT INTO transcript_tags (api_key_id, transcript_id, tag_id)
+            INSERT INTO voice_note_tags (api_key_id, voice_note_id, tag_id)
             VALUES (?, ?, ?)
             "#,
         )
@@ -583,18 +583,18 @@ impl MetadataFixture {
         .bind(tag_id)
         .execute(self.storage.pool())
         .await
-        .expect("insert transcript tag");
+        .expect("insert voice note tag");
     }
 
     async fn insert_job_and_voice_note_in_session(&self) {
-        self.insert_transcript("alpha", Some(SESSION_ALPHA)).await;
+        self.insert_voice_note("alpha", Some(SESSION_ALPHA)).await;
         sqlx::query(
             r#"
             INSERT INTO transcription_jobs (
                 id, api_key_id, idempotency_key, audio_sha256_hex,
                 audio_content_hash_algorithm, recorded_at, session_id,
                 accepted_audio_path, status, created_at, updated_at,
-                retry_count, max_retries, transcript_id
+                retry_count, max_retries, voice_note_id
             )
             VALUES (
                 ?, 'alpha', 'attempt-a', 'hash', 'sha256:chunk-sha256-v1',
@@ -612,12 +612,12 @@ impl MetadataFixture {
         .expect("insert job");
     }
 
-    async fn insert_transcript(&self, owner: &str, session_id: Option<&str>) {
+    async fn insert_voice_note(&self, owner: &str, session_id: Option<&str>) {
         sqlx::query(
             r#"
-            INSERT INTO transcripts (
+            INSERT INTO voice_notes (
                 id, api_key_id, audio_duration_seconds, audio_format, audio_size_bytes,
-                transcript_language, model, processing_time_ms, cost_cents,
+                language, model, processing_time_ms, cost_cents,
                 created_at, recorded_at, session_id
             )
             VALUES (?, ?, 12.5, 'wav', 401280, 'en', 'gpt-4o-mini-transcribe', 1843, NULL, ?, ?, ?)
@@ -630,12 +630,12 @@ impl MetadataFixture {
         .bind(session_id)
         .execute(self.storage.pool())
         .await
-        .expect("insert transcript");
+        .expect("insert voice note");
 
         sqlx::query(
             r#"
-            INSERT INTO transcript_versions (
-                id, api_key_id, transcript_id, version_number, transcript, created_at
+            INSERT INTO voice_note_versions (
+                id, api_key_id, voice_note_id, version_number, text, created_at
             )
             VALUES (?, ?, ?, 1, 'note text', '2026-04-24T18:00:00.000000000Z')
             "#,
@@ -645,7 +645,7 @@ impl MetadataFixture {
         .bind(NOTE_ALPHA)
         .execute(self.storage.pool())
         .await
-        .expect("insert transcript version");
+        .expect("insert voice note version");
     }
 }
 

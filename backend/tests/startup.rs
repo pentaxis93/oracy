@@ -614,13 +614,15 @@ key = "key-one"
         .expect("valid runtime");
 
     assert!(database_path.exists());
-    let table_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transcription_jobs'",
-    )
-    .fetch_one(state.storage.pool())
-    .await
-    .expect("query migrated schema");
-    assert_eq!(table_count, 1);
+    let table_names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name ASC")
+            .fetch_all(state.storage.pool())
+            .await
+            .expect("query migrated schema");
+    let legacy_table = ["trans", "cripts"].concat();
+    assert!(table_names.iter().any(|name| name == "transcription_jobs"));
+    assert!(table_names.iter().any(|name| name == "voice_notes"));
+    assert!(!table_names.iter().any(|name| name == &legacy_table));
 }
 
 #[tokio::test]

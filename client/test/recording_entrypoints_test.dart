@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:oracy/app.dart';
-import 'package:oracy/screens/transcript_result_screen.dart';
+import 'package:oracy/screens/voice_note_result_screen.dart';
 import 'package:oracy/services/home_widget_service.dart';
 import 'package:oracy/services/permission_service.dart';
 import 'package:oracy/services/recording_service.dart';
@@ -231,7 +231,7 @@ void main() {
   );
 
   testWidgets(
-    'Given microphone permission is denied, When New Recording is tapped from a transcript, Then the result screen remains and recording does not start',
+    'Given microphone permission is denied, When New Recording is tapped from a voice note, Then the result screen remains and recording does not start',
     (tester) async {
       final permissions = MockPermissionService(
         status: MicrophonePermissionStatus.denied,
@@ -241,7 +241,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            transcriptionOverride(TranscriptionSuccess(createMockTranscript())),
+            transcriptionOverride(TranscriptionSuccess(createMockVoiceNote())),
             permissionOverride(permissions),
             recordingProvider.overrideWith(() => recordingNotifier),
           ],
@@ -250,10 +250,8 @@ void main() {
               builder: (context) => TextButton(
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
-                    builder: (_) => TranscriptResultScreen(
-                      transcript: createMockTranscript(
-                        transcript: 'Saved result',
-                      ),
+                    builder: (_) => VoiceNoteResultScreen(
+                      voiceNote: createMockVoiceNote(text: 'Saved result'),
                     ),
                   ),
                 ),
@@ -272,18 +270,18 @@ void main() {
 
       expect(permissions.checkCount, greaterThanOrEqualTo(1));
       expect(recordingNotifier.startCount, 0);
-      expect(find.text('Transcript'), findsOneWidget);
+      expect(find.text('Voice note'), findsOneWidget);
       expect(find.text('Microphone Access Required'), findsOneWidget);
     },
   );
 
   testWidgets(
-    'Given microphone permission is granted but recorder startup fails, When New Recording is tapped from a transcript, Then the result screen remains and transcript state is preserved',
+    'Given microphone permission is granted but recorder startup fails, When New Recording is tapped from a voice note, Then the result screen remains and voice note state is preserved',
     (tester) async {
       final permissions = MockPermissionService();
       final recordingNotifier = _StartupFailingRecordingNotifier();
       final transcriptionNotifier = _ResetCountingTranscriptionNotifier(
-        TranscriptionSuccess(createMockTranscript()),
+        TranscriptionSuccess(createMockVoiceNote()),
       );
 
       await tester.pumpWidget(
@@ -298,10 +296,8 @@ void main() {
               builder: (context) => TextButton(
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
-                    builder: (_) => TranscriptResultScreen(
-                      transcript: createMockTranscript(
-                        transcript: 'Saved result',
-                      ),
+                    builder: (_) => VoiceNoteResultScreen(
+                      voiceNote: createMockVoiceNote(text: 'Saved result'),
                     ),
                   ),
                 ),
@@ -320,13 +316,13 @@ void main() {
       expect(permissions.checkCount, greaterThanOrEqualTo(1));
       expect(recordingNotifier.startCount, 1);
       expect(transcriptionNotifier.resetCount, 0);
-      expect(find.text('Transcript'), findsOneWidget);
+      expect(find.text('Voice note'), findsOneWidget);
       expect(find.text('Open result'), findsNothing);
     },
   );
 
   testWidgets(
-    'Given microphone permission is granted after a completed recording, When New Recording is tapped from a transcript, Then recording starts and returns home',
+    'Given microphone permission is granted after a completed recording, When New Recording is tapped from a voice note, Then recording starts and returns home',
     (tester) async {
       final permissions = MockPermissionService();
       final recordingNotifier = MockRecordingNotifier(
@@ -339,7 +335,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            transcriptionOverride(TranscriptionSuccess(createMockTranscript())),
+            transcriptionOverride(TranscriptionSuccess(createMockVoiceNote())),
             permissionOverride(permissions),
             recordingProvider.overrideWith(() => recordingNotifier),
           ],
@@ -348,10 +344,8 @@ void main() {
               builder: (context) => TextButton(
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
-                    builder: (_) => TranscriptResultScreen(
-                      transcript: createMockTranscript(
-                        transcript: 'Saved result',
-                      ),
+                    builder: (_) => VoiceNoteResultScreen(
+                      voiceNote: createMockVoiceNote(text: 'Saved result'),
                     ),
                   ),
                 ),
@@ -370,7 +364,7 @@ void main() {
       expect(permissions.checkCount, greaterThanOrEqualTo(1));
       expect(recordingNotifier.startCount, 1);
       expect(find.text('Open result'), findsOneWidget);
-      expect(find.text('Transcript'), findsNothing);
+      expect(find.text('Voice note'), findsNothing);
     },
   );
 }

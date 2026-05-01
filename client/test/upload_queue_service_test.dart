@@ -50,7 +50,7 @@ class _CountingTranscriptionService extends TranscriptionService {
   final List<String?> idempotencyKeys = [];
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
@@ -58,7 +58,7 @@ class _CountingTranscriptionService extends TranscriptionService {
   }) async {
     callCount++;
     idempotencyKeys.add(idempotencyKey);
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 
@@ -69,7 +69,7 @@ class _RetryingTranscriptionService extends TranscriptionService {
   final List<String?> idempotencyKeys = [];
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNoteResponse> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
@@ -85,7 +85,7 @@ class _RetryingTranscriptionService extends TranscriptionService {
       );
     }
 
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 
