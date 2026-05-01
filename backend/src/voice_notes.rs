@@ -12,7 +12,7 @@ use crate::collections::{
 use crate::errors::{ApiError, CollectionEnvelope};
 use crate::state::AppState;
 use crate::storage::{
-    SegmentRecord, TagRecord, TranscriptFilters, TranscriptRecord, TranscriptVersionRecord,
+    SegmentRecord, TagRecord, VoiceNoteFilters, VoiceNoteRecord, VoiceNoteVersionRecord,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +32,7 @@ struct PageQuery<T> {
 #[derive(Debug, Clone)]
 struct VoiceNoteCollectionQuery {
     page: PageQuery<(OffsetDateTime, String)>,
-    filters: TranscriptFilters,
+    filters: VoiceNoteFilters,
     search_requested: bool,
 }
 
@@ -92,7 +92,7 @@ pub async fn list_voice_notes(
 
     let rows = state
         .storage
-        .list_transcripts(
+        .list_voice_notes(
             authenticated_key.api_key_id.as_str(),
             &query.filters,
             query.page.cursor,
@@ -119,7 +119,7 @@ pub async fn get_voice_note(
     validate_ulid_field("voice_note_id", &voice_note_id)?;
     let Some(record) = state
         .storage
-        .get_transcript(authenticated_key.api_key_id.as_str(), &voice_note_id)
+        .get_voice_note(authenticated_key.api_key_id.as_str(), &voice_note_id)
         .await
         .map_err(|_| ApiError::internal("Failed to load voice note."))?
     else {
@@ -127,7 +127,7 @@ pub async fn get_voice_note(
     };
     let tags = state
         .storage
-        .list_transcript_tags(authenticated_key.api_key_id.as_str(), &voice_note_id)
+        .list_voice_note_tags(authenticated_key.api_key_id.as_str(), &voice_note_id)
         .await
         .map_err(|_| ApiError::internal("Failed to load voice note tags."))?;
 
@@ -151,7 +151,7 @@ pub async fn list_voice_note_versions(
     .await?;
     let mut rows = state
         .storage
-        .list_transcript_versions(
+        .list_voice_note_versions(
             authenticated_key.api_key_id.as_str(),
             &voice_note_id,
             page.cursor,
@@ -251,7 +251,7 @@ pub async fn list_session_voice_notes(
 
     let rows = state
         .storage
-        .list_session_transcripts(
+        .list_session_voice_notes(
             authenticated_key.api_key_id.as_str(),
             &session_id,
             &query.filters,
@@ -278,7 +278,7 @@ async fn ensure_voice_note_exists(
 ) -> Result<(), ApiError> {
     if state
         .storage
-        .get_transcript(api_key_id, voice_note_id)
+        .get_voice_note(api_key_id, voice_note_id)
         .await
         .map_err(|_| ApiError::internal("Failed to load voice note."))?
         .is_none()
@@ -292,7 +292,7 @@ async fn ensure_voice_note_exists(
 async fn render_voice_note_page(
     api_key_id: &str,
     state: &AppState,
-    mut rows: Vec<TranscriptRecord>,
+    mut rows: Vec<VoiceNoteRecord>,
     limit: i64,
     cursor_kind: CursorKind,
 ) -> Result<Json<CollectionEnvelope<VoiceNoteResource>>, ApiError> {
@@ -309,16 +309,16 @@ async fn render_voice_note_page(
     } else {
         None
     };
-    let transcript_ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
-    let mut tags_by_transcript = state
+    let voice_note_ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+    let mut tags_by_voice_note = state
         .storage
-        .list_tags_for_transcripts(api_key_id, &transcript_ids)
+        .list_tags_for_voice_notes(api_key_id, &voice_note_ids)
         .await
         .map_err(|_| ApiError::internal("Failed to load voice note tags."))?;
     let items = rows
         .into_iter()
         .map(|row| {
-            let tags = tags_by_transcript.remove(&row.id).unwrap_or_default();
+            let tags = tags_by_voice_note.remove(&row.id).unwrap_or_default();
             voice_note_resource(row, tags)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -346,7 +346,7 @@ fn parse_voice_note_collection_query(
                 .map(|cursor| parse_time_cursor(cursor, cursor_kind.as_str()))
                 .transpose()?,
         },
-        filters: parse_transcript_filters(params, cursor_kind)?,
+        filters: parse_voice_note_filters(params, cursor_kind)?,
         search_requested: query_any(params, "q"),
     })
 }
@@ -451,11 +451,11 @@ fn validate_collection_query_values(
     Ok(())
 }
 
-fn parse_transcript_filters(
+fn parse_voice_note_filters(
     params: &[(String, String)],
     cursor_kind: CursorKind,
-) -> Result<TranscriptFilters, ApiError> {
-    let mut filters = TranscriptFilters::default();
+) -> Result<VoiceNoteFilters, ApiError> {
+    let mut filters = VoiceNoteFilters::default();
     for tag_id in query_values(params, "tag_id") {
         let tag_id = tag_id.to_owned();
         if !filters.tag_ids.contains(&tag_id) {
@@ -483,17 +483,17 @@ fn parse_optional_rfc3339_filter(
 }
 
 fn voice_note_resource(
-    record: TranscriptRecord,
+    record: VoiceNoteRecord,
     tags: Vec<TagRecord>,
 ) -> Result<VoiceNoteResource, ApiError> {
     Ok(VoiceNoteResource {
         id: record.id,
         current_version_id: record.current_version_id,
-        text: record.transcript,
+        text: record.text,
         audio_duration_seconds: record.audio_duration_seconds,
         audio_format: record.audio_format,
         audio_size_bytes: record.audio_size_bytes,
-        language: record.transcript_language,
+        language: record.language,
         model: record.model,
         processing_time_ms: record.processing_time_ms,
         cost_cents: record.cost_cents,
@@ -508,12 +508,12 @@ fn voice_note_resource(
 }
 
 fn voice_note_version_resource(
-    record: TranscriptVersionRecord,
+    record: VoiceNoteVersionRecord,
 ) -> Result<VoiceNoteVersionResource, ApiError> {
     Ok(VoiceNoteVersionResource {
         id: record.id,
-        voice_note_id: record.transcript_id,
-        text: record.transcript,
+        voice_note_id: record.voice_note_id,
+        text: record.text,
         created_at: timestamp(record.created_at)?,
     })
 }
@@ -521,7 +521,7 @@ fn voice_note_version_resource(
 fn segment_resource(record: SegmentRecord) -> SegmentResource {
     SegmentResource {
         id: record.id,
-        voice_note_id: record.transcript_id,
+        voice_note_id: record.voice_note_id,
         position: record.position,
         start_ms: record.start_ms,
         end_ms: record.end_ms,
