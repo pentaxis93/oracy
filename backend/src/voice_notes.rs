@@ -1,22 +1,19 @@
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde::{Deserialize, Serialize};
-use time::format_description::well_known::Rfc3339;
-use time::{OffsetDateTime, UtcOffset};
-use ulid::Ulid;
+use serde::Serialize;
+use time::OffsetDateTime;
 
 use crate::auth::AuthenticatedKey;
-use crate::errors::{ApiError, CollectionEnvelope, ErrorDetail};
+use crate::collections::{
+    ensure_singular_query_param, parse_limit, parse_position_cursor, parse_query_params,
+    parse_rfc3339_field, parse_time_cursor, position_cursor, query_any, query_first, query_values,
+    time_cursor, timestamp, validate_rfc3339_field, validate_ulid_field, validation_error,
+};
+use crate::errors::{ApiError, CollectionEnvelope};
 use crate::state::AppState;
 use crate::storage::{
     SegmentRecord, TagRecord, TranscriptFilters, TranscriptRecord, TranscriptVersionRecord,
 };
-
-const DEFAULT_LIMIT: i64 = 50;
-const MAX_LIMIT: i64 = 100;
-const CURSOR_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CursorKind {
@@ -80,21 +77,6 @@ pub struct TagResource {
     id: String,
     name: String,
     created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct TimeCursor {
-    v: u8,
-    kind: String,
-    created_at: String,
-    id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct PositionCursor {
-    v: u8,
-    kind: String,
-    position: i64,
 }
 
 pub async fn list_voice_notes(
@@ -185,7 +167,7 @@ pub async fn list_voice_note_versions(
         rows.last()
             .map(|version| {
                 time_cursor(
-                    CursorKind::VoiceNoteVersions,
+                    CursorKind::VoiceNoteVersions.as_str(),
                     version.created_at,
                     &version.id,
                 )
@@ -233,7 +215,9 @@ pub async fn list_voice_note_segments(
     }
     let next_cursor = if has_next {
         rows.last()
-            .map(|segment| position_cursor(CursorKind::VoiceNoteSegments, segment.position))
+            .map(|segment| {
+                position_cursor(CursorKind::VoiceNoteSegments.as_str(), segment.position)
+            })
             .transpose()?
     } else {
         None
@@ -318,7 +302,9 @@ async fn render_voice_note_page(
     }
     let next_cursor = if has_next {
         rows.last()
-            .map(|voice_note| time_cursor(cursor_kind, voice_note.created_at, &voice_note.id))
+            .map(|voice_note| {
+                time_cursor(cursor_kind.as_str(), voice_note.created_at, &voice_note.id)
+            })
             .transpose()?
     } else {
         None
@@ -357,7 +343,7 @@ fn parse_voice_note_collection_query(
         page: PageQuery {
             limit: parse_limit(params)?,
             cursor: query_first(params, "cursor")
-                .map(|cursor| parse_time_cursor(cursor, cursor_kind))
+                .map(|cursor| parse_time_cursor(cursor, cursor_kind.as_str()))
                 .transpose()?,
         },
         filters: parse_transcript_filters(params, cursor_kind)?,
@@ -374,7 +360,7 @@ fn parse_time_page_query(
     Ok(PageQuery {
         limit: parse_limit(params)?,
         cursor: query_first(params, "cursor")
-            .map(|cursor| parse_time_cursor(cursor, cursor_kind))
+            .map(|cursor| parse_time_cursor(cursor, cursor_kind.as_str()))
             .transpose()?,
     })
 }
@@ -388,7 +374,7 @@ fn parse_position_page_query(
     Ok(PageQuery {
         limit: parse_limit(params)?,
         cursor: query_first(params, "cursor")
-            .map(|cursor| parse_position_cursor(cursor, cursor_kind))
+            .map(|cursor| parse_position_cursor(cursor, cursor_kind.as_str()))
             .transpose()?,
     })
 }
@@ -414,14 +400,6 @@ fn validate_repeated_singular_query_params(
         if cursor_kind == CursorKind::VoiceNoteHistory {
             ensure_singular_query_param(params, "session_id")?;
         }
-    }
-
-    Ok(())
-}
-
-fn ensure_singular_query_param(params: &[(String, String)], field: &str) -> Result<(), ApiError> {
-    if query_values(params, field).nth(1).is_some() {
-        return Err(ApiError::repeated_singular_parameter(field));
     }
 
     Ok(())
@@ -504,109 +482,6 @@ fn parse_optional_rfc3339_filter(
         .transpose()
 }
 
-fn parse_limit(params: &[(String, String)]) -> Result<i64, ApiError> {
-    let Some(raw_limit) = query_first(params, "limit") else {
-        return Ok(DEFAULT_LIMIT);
-    };
-    let limit = raw_limit
-        .parse::<i64>()
-        .map_err(|_| validation_error("limit", "Must be an integer in 1..100."))?;
-    if !(1..=MAX_LIMIT).contains(&limit) {
-        return Err(validation_error("limit", "Must be an integer in 1..100."));
-    }
-
-    Ok(limit)
-}
-
-fn parse_query_params(raw_query: Option<&str>) -> Vec<(String, String)> {
-    raw_query
-        .map(|query| {
-            form_urlencoded::parse(query.as_bytes())
-                .into_owned()
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn query_first<'a>(params: &'a [(String, String)], field: &str) -> Option<&'a str> {
-    params
-        .iter()
-        .find(|(name, _)| name == field)
-        .map(|(_, value)| value.as_str())
-}
-
-fn query_any(params: &[(String, String)], field: &str) -> bool {
-    query_first(params, field).is_some()
-}
-
-fn query_values<'a>(
-    params: &'a [(String, String)],
-    field: &'a str,
-) -> impl Iterator<Item = &'a str> {
-    params
-        .iter()
-        .filter(move |(name, _)| name == field)
-        .map(|(_, value)| value.as_str())
-}
-
-fn parse_time_cursor(
-    cursor: &str,
-    expected_kind: CursorKind,
-) -> Result<(OffsetDateTime, String), ApiError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(cursor)
-        .map_err(|_| malformed_cursor())?;
-    let decoded: TimeCursor = serde_json::from_slice(&bytes).map_err(|_| malformed_cursor())?;
-    if decoded.v != CURSOR_VERSION || decoded.kind != expected_kind.as_str() {
-        return Err(malformed_cursor());
-    }
-    let created_at =
-        OffsetDateTime::parse(&decoded.created_at, &Rfc3339).map_err(|_| malformed_cursor())?;
-    if decoded.id.is_empty() {
-        return Err(malformed_cursor());
-    }
-
-    Ok((created_at, decoded.id))
-}
-
-fn parse_position_cursor(cursor: &str, expected_kind: CursorKind) -> Result<i64, ApiError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(cursor)
-        .map_err(|_| malformed_cursor())?;
-    let decoded: PositionCursor = serde_json::from_slice(&bytes).map_err(|_| malformed_cursor())?;
-    if decoded.v != CURSOR_VERSION || decoded.kind != expected_kind.as_str() || decoded.position < 0
-    {
-        return Err(malformed_cursor());
-    }
-
-    Ok(decoded.position)
-}
-
-fn time_cursor(kind: CursorKind, created_at: OffsetDateTime, id: &str) -> Result<String, ApiError> {
-    let cursor = TimeCursor {
-        v: CURSOR_VERSION,
-        kind: kind.as_str().to_owned(),
-        created_at: timestamp(created_at)?,
-        id: id.to_owned(),
-    };
-    encode_cursor(&cursor)
-}
-
-fn position_cursor(kind: CursorKind, position: i64) -> Result<String, ApiError> {
-    let cursor = PositionCursor {
-        v: CURSOR_VERSION,
-        kind: kind.as_str().to_owned(),
-        position,
-    };
-    encode_cursor(&cursor)
-}
-
-fn encode_cursor<T: Serialize>(cursor: &T) -> Result<String, ApiError> {
-    let bytes =
-        serde_json::to_vec(cursor).map_err(|_| ApiError::internal("Failed to encode cursor."))?;
-    Ok(URL_SAFE_NO_PAD.encode(bytes))
-}
-
 fn voice_note_resource(
     record: TranscriptRecord,
     tags: Vec<TagRecord>,
@@ -660,53 +535,6 @@ fn tag_resource(record: TagRecord) -> Result<TagResource, ApiError> {
         name: record.name,
         created_at: timestamp(record.created_at)?,
     })
-}
-
-fn timestamp(value: OffsetDateTime) -> Result<String, ApiError> {
-    value
-        .format(&Rfc3339)
-        .map_err(|_| ApiError::internal("Failed to format timestamp."))
-}
-
-fn validation_error(field: &str, message: &str) -> ApiError {
-    ApiError::validation(
-        "One or more request fields are invalid.",
-        Some(vec![ErrorDetail {
-            field: field.to_owned(),
-            message: message.to_owned(),
-        }]),
-    )
-}
-
-fn validate_ulid_field(field: &str, value: &str) -> Result<(), ApiError> {
-    let parsed =
-        Ulid::from_string(value).map_err(|_| validation_error(field, "Must be a valid ULID."))?;
-    if parsed.to_string() != value {
-        return Err(validation_error(field, "Must be a valid ULID."));
-    }
-
-    Ok(())
-}
-
-fn validate_rfc3339_field(field: &str, value: &str) -> Result<(), ApiError> {
-    parse_rfc3339_field(field, value).map(|_| ())
-}
-
-fn parse_rfc3339_field(field: &str, value: &str) -> Result<OffsetDateTime, ApiError> {
-    let parsed = OffsetDateTime::parse(value, &Rfc3339)
-        .map_err(|_| validation_error(field, "Must be an RFC 3339 UTC timestamp."))?;
-    if parsed.offset() != UtcOffset::UTC {
-        return Err(validation_error(
-            field,
-            "Must be an RFC 3339 UTC timestamp.",
-        ));
-    }
-
-    Ok(parsed)
-}
-
-fn malformed_cursor() -> ApiError {
-    validation_error("cursor", "Malformed cursor.")
 }
 
 impl CursorKind {

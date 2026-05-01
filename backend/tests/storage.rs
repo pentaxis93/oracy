@@ -722,7 +722,8 @@ async fn completed_job_transcript_link_must_match_the_job_owner() {
 }
 
 #[tokio::test]
-async fn tags_are_owner_scoped_case_insensitive_and_many_to_many_with_transcripts() {
+async fn tags_are_owner_scoped_case_insensitive_latest_spelling_and_many_to_many_with_transcripts()
+{
     let (_tempdir, storage) = storage().await;
     insert_transcript_only(&storage, "owner-a", "transcript-a").await;
     insert_transcript_only(&storage, "owner-a", "transcript-b").await;
@@ -745,7 +746,7 @@ async fn tags_are_owner_scoped_case_insensitive_and_many_to_many_with_transcript
         other => panic!("expected existing tag, got {other:?}"),
     };
     assert_eq!(replayed.id, meeting.id);
-    assert_eq!(replayed.name, "Meeting");
+    assert_eq!(replayed.name, "meeting");
 
     let other_owner = match storage
         .create_tag(new_tag("owner-b", "tag-meeting-owner-b", "meeting"))
@@ -784,7 +785,7 @@ async fn tags_are_owner_scoped_case_insensitive_and_many_to_many_with_transcript
             .list_transcript_tags("owner-a", "transcript-a")
             .await
             .expect("list transcript tags"),
-        vec![meeting.clone()]
+        vec![replayed.clone()]
     );
 
     assert!(
@@ -831,7 +832,7 @@ async fn unicode_case_equivalent_tag_names_share_one_owner_scoped_identity() {
         };
 
         assert_eq!(replayed.id, created.id);
-        assert_eq!(replayed.name, created_name);
+        assert_eq!(replayed.name, replayed_name);
     }
 }
 

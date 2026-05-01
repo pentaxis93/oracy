@@ -523,7 +523,9 @@ Responses:
 Notes:
 
 - Tag identity is case-insensitive within one API-key scope.
-- The returned `Tag.name` preserves the stored spelling.
+- When a duplicate create matches an existing tag case-insensitively,
+  the existing tag keeps its `id` and its stored `name` updates to the
+  spelling supplied by the latest create request.
 
 Response body is a `Tag` resource.
 
