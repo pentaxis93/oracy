@@ -370,7 +370,7 @@ async fn session_voice_note_history_requires_owned_session_and_lists_only_sessio
 }
 
 #[tokio::test]
-async fn collection_queries_accept_valid_deferred_parameters_and_ignore_unknown_parameters() {
+async fn root_collection_deferred_filters_return_empty_results_without_false_positives() {
     let fixture = VoiceNoteFixture::new().await;
     fixture
         .insert_voice_note(VoiceNoteSeed {
@@ -385,13 +385,77 @@ async fn collection_queries_accept_valid_deferred_parameters_and_ignore_unknown_
         })
         .await;
 
-    let accepted = fixture
-        .get_json(
-            &format!("/api/v1/voice-notes?q=hello&search_mode=keyword&tag_id={TAG_MISSING}&tag_id={TAG_MEETING}&session_id={SESSION_MISSING}&recorded_after=2026-01-01T00%3A00%3A00Z&recorded_before=2026-01-02T00%3A00%3A00Z&created_after=2026-01-01T00%3A00%3A00Z&created_before=2026-01-02T00%3A00%3A00Z&unknown=value"),
-            "alpha-secret",
-        )
+    for path in [
+        "/api/v1/voice-notes?q=hello".to_owned(),
+        "/api/v1/voice-notes?q=hello&search_mode=keyword".to_owned(),
+        format!("/api/v1/voice-notes?tag_id={TAG_MEETING}"),
+        format!("/api/v1/voice-notes?tag_id={TAG_MISSING}&tag_id={TAG_MEETING}"),
+        format!("/api/v1/voice-notes?session_id={SESSION_MISSING}"),
+        "/api/v1/voice-notes?recorded_after=2026-01-01T00%3A00%3A00Z".to_owned(),
+        "/api/v1/voice-notes?recorded_before=2026-01-02T00%3A00%3A00Z".to_owned(),
+        "/api/v1/voice-notes?created_after=2026-01-01T00%3A00%3A00Z".to_owned(),
+        "/api/v1/voice-notes?created_before=2026-01-02T00%3A00%3A00Z".to_owned(),
+    ] {
+        assert_empty_collection(fixture.get_json(&path, "alpha-secret").await);
+    }
+}
+
+#[tokio::test]
+async fn root_collection_ignores_unknown_parameters_without_deferring_history() {
+    let fixture = VoiceNoteFixture::new().await;
+    fixture
+        .insert_voice_note(VoiceNoteSeed {
+            owner: "alpha",
+            id: NOTE_OLD,
+            version_id: VERSION_OLD,
+            text: "history result",
+            created_at: "2026-04-24T18:00:00.000000000Z",
+            recorded_at: "2026-04-24T17:59:00.000000000Z",
+            session_id: None,
+            tags: vec![],
+        })
         .await;
-    assert_eq!(accepted["items"][0]["id"], NOTE_OLD);
+
+    let body = fixture
+        .get_json("/api/v1/voice-notes?unknown=value", "alpha-secret")
+        .await;
+    assert_eq!(body["items"][0]["id"], NOTE_OLD);
+}
+
+#[tokio::test]
+async fn session_collection_deferred_filters_return_empty_results_for_owned_session() {
+    let fixture = VoiceNoteFixture::new().await;
+    fixture.insert_session("alpha", SESSION_A).await;
+    fixture
+        .insert_voice_note(VoiceNoteSeed {
+            owner: "alpha",
+            id: NOTE_IN_SESSION,
+            version_id: VERSION_OLD,
+            text: "in session",
+            created_at: "2026-04-24T18:00:00.000000000Z",
+            recorded_at: "2026-04-24T17:59:00.000000000Z",
+            session_id: Some(SESSION_A),
+            tags: vec![TagSeed {
+                id: TAG_MEETING,
+                name: "Meeting",
+                created_at: "2026-04-24T18:01:30.000000000Z",
+            }],
+        })
+        .await;
+
+    for path in [
+        format!("/api/v1/sessions/{SESSION_A}/voice-notes?q=hello"),
+        format!("/api/v1/sessions/{SESSION_A}/voice-notes?q=hello&search_mode=keyword"),
+        format!("/api/v1/sessions/{SESSION_A}/voice-notes?tag_id={TAG_MEETING}"),
+        format!("/api/v1/sessions/{SESSION_A}/voice-notes?recorded_after=2026-01-01T00%3A00%3A00Z"),
+        format!(
+            "/api/v1/sessions/{SESSION_A}/voice-notes?recorded_before=2026-01-02T00%3A00%3A00Z"
+        ),
+        format!("/api/v1/sessions/{SESSION_A}/voice-notes?created_after=2026-01-01T00%3A00%3A00Z"),
+        format!("/api/v1/sessions/{SESSION_A}/voice-notes?created_before=2026-01-02T00%3A00%3A00Z"),
+    ] {
+        assert_empty_collection(fixture.get_json(&path, "alpha-secret").await);
+    }
 }
 
 #[tokio::test]
@@ -465,7 +529,7 @@ async fn each_valid_search_mode_is_accepted_while_search_is_deferred() {
                 "alpha-secret",
             )
             .await;
-        assert_eq!(accepted["items"][0]["id"], NOTE_OLD);
+        assert_empty_collection(accepted);
     }
 }
 
@@ -511,6 +575,33 @@ async fn malformed_cursor_and_invalid_limit_return_validation_errors() {
         let response = fixture.get(path, "alpha-secret").await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(json_body(response).await["error_code"], "validation_error");
+    }
+}
+
+#[tokio::test]
+async fn collection_query_validation_precedes_existence_checks() {
+    let fixture = VoiceNoteFixture::new().await;
+
+    for (path, field) in [
+        (
+            format!("/api/v1/sessions/{SESSION_MISSING}/voice-notes?limit=0"),
+            "limit",
+        ),
+        (
+            format!("/api/v1/sessions/{SESSION_MISSING}/voice-notes?recorded_after=not-a-time"),
+            "recorded_after",
+        ),
+        (
+            format!("/api/v1/voice-notes/{NOTE_MISSING}/versions?cursor=not-a-cursor"),
+            "cursor",
+        ),
+        (
+            format!("/api/v1/voice-notes/{NOTE_MISSING}/segments?limit=abc"),
+            "limit",
+        ),
+    ] {
+        let response = fixture.get(&path, "alpha-secret").await;
+        assert_validation_error(response, field).await;
     }
 }
 
@@ -771,4 +862,14 @@ async fn assert_validation_error(response: axum::response::Response, field: &str
     let body = json_body(response).await;
     assert_eq!(body["error_code"], "validation_error");
     assert_eq!(body["details"][0]["field"], field);
+}
+
+fn assert_empty_collection(body: Value) {
+    assert_eq!(
+        body,
+        json!({
+            "items": [],
+            "next_cursor": null
+        })
+    );
 }

@@ -95,6 +95,10 @@ pub async fn list_voice_notes(
 ) -> Result<Json<CollectionEnvelope<VoiceNoteResource>>, ApiError> {
     let params = parse_query_params(raw_query.as_deref());
     let page = parse_time_page_query(&params, CursorKind::VoiceNoteHistory)?;
+    if has_deferred_collection_filter(&params, CursorKind::VoiceNoteHistory) {
+        return Ok(empty_collection());
+    }
+
     let rows = state
         .storage
         .list_transcripts(
@@ -146,13 +150,13 @@ pub async fn list_voice_note_versions(
 ) -> Result<Json<CollectionEnvelope<VoiceNoteVersionResource>>, ApiError> {
     validate_ulid_field("voice_note_id", &voice_note_id)?;
     let params = parse_query_params(raw_query.as_deref());
+    let page = parse_time_page_query(&params, CursorKind::VoiceNoteVersions)?;
     ensure_voice_note_exists(
         &state,
         authenticated_key.api_key_id.as_str(),
         &voice_note_id,
     )
     .await?;
-    let page = parse_time_page_query(&params, CursorKind::VoiceNoteVersions)?;
     let mut rows = state
         .storage
         .list_transcript_versions(
@@ -196,13 +200,13 @@ pub async fn list_voice_note_segments(
 ) -> Result<Json<CollectionEnvelope<SegmentResource>>, ApiError> {
     validate_ulid_field("voice_note_id", &voice_note_id)?;
     let params = parse_query_params(raw_query.as_deref());
+    let page = parse_position_page_query(&params, CursorKind::VoiceNoteSegments)?;
     ensure_voice_note_exists(
         &state,
         authenticated_key.api_key_id.as_str(),
         &voice_note_id,
     )
     .await?;
-    let page = parse_position_page_query(&params, CursorKind::VoiceNoteSegments)?;
     let mut rows = state
         .storage
         .list_segments_page(
@@ -237,6 +241,7 @@ pub async fn list_session_voice_notes(
 ) -> Result<Json<CollectionEnvelope<VoiceNoteResource>>, ApiError> {
     validate_ulid_field("session_id", &session_id)?;
     let params = parse_query_params(raw_query.as_deref());
+    let page = parse_time_page_query(&params, CursorKind::SessionVoiceNoteHistory)?;
     if !state
         .storage
         .session_exists(authenticated_key.api_key_id.as_str(), &session_id)
@@ -246,7 +251,10 @@ pub async fn list_session_voice_notes(
         return Err(ApiError::not_found("Session not found."));
     }
 
-    let page = parse_time_page_query(&params, CursorKind::SessionVoiceNoteHistory)?;
+    if has_deferred_collection_filter(&params, CursorKind::SessionVoiceNoteHistory) {
+        return Ok(empty_collection());
+    }
+
     let rows = state
         .storage
         .list_session_transcripts(
@@ -321,6 +329,13 @@ async fn render_voice_note_page(
     Ok(Json(CollectionEnvelope { items, next_cursor }))
 }
 
+fn empty_collection<T>() -> Json<CollectionEnvelope<T>> {
+    Json(CollectionEnvelope {
+        items: Vec::new(),
+        next_cursor: None,
+    })
+}
+
 fn parse_time_page_query(
     params: &[(String, String)],
     cursor_kind: CursorKind,
@@ -391,6 +406,25 @@ fn validate_transitional_query(
     }
 
     Ok(())
+}
+
+fn has_deferred_collection_filter(params: &[(String, String)], cursor_kind: CursorKind) -> bool {
+    if !cursor_kind.is_voice_note_collection() {
+        return false;
+    }
+
+    query_any(params, "q")
+        || query_any(params, "search_mode")
+        || query_any(params, "tag_id")
+        || (cursor_kind == CursorKind::VoiceNoteHistory && query_any(params, "session_id"))
+        || [
+            "recorded_after",
+            "recorded_before",
+            "created_after",
+            "created_before",
+        ]
+        .into_iter()
+        .any(|field| query_any(params, field))
 }
 
 fn parse_limit(params: &[(String, String)]) -> Result<i64, ApiError> {
