@@ -968,6 +968,13 @@ Fields:
   start of the composed audio
 - `text`: segment text captured from the transcription result
 
+For `v0.1.0`, the supported OpenAI transcription engines do not
+produce per-utterance timing. Voice notes therefore carry one coarse
+segment with `position=0`, `start_ms=0`, and `end_ms` equal to the
+locally measured audio duration in milliseconds. The resource shape
+already supports richer per-utterance timing for future engines without
+a contract change.
+
 ### `Tag`
 
 ```json

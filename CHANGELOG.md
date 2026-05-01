@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add the authenticated chunked transcription-job open, chunk push, finalize,
+  read, and backend worker flow. Finalized jobs resolve the per-key
+  transcription model, persist accepted audio durably, and materialize
+  successful jobs as voice notes with one coarse segment for v0.1.0 engines.
+- Track the temporary #40/#27 implementation deviation: successful
+  transcription jobs currently materialize voice notes and segments without a
+  current embedding. #27 remains the release-blocking work-unit that restores
+  the spec invariant requiring embeddings before `succeeded`.
 - Add authenticated tag and session management APIs, including owner-scoped
   CRUD, shared cursor pagination, case-insensitive tag identity with
   latest-spelling display updates, and metadata deletion cascades.

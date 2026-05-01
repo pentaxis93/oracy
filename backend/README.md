@@ -26,3 +26,8 @@ directory.
 Every API route requires `Authorization: Bearer <api_key>`. The bearer scheme is
 case-insensitive, and missing or invalid keys return the shared JSON
 `ErrorResponse` with `401 Unauthorized`.
+
+The backend runs an in-process transcription worker in the service binary. Jobs
+that reach `queued` are claimed with a processing lease, submitted to OpenAI
+using the per-API-key `transcription_model` captured at finalize time, and
+materialized as voice notes when transcription succeeds.

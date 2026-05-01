@@ -1,7 +1,8 @@
 use std::net::SocketAddr;
 
-use oracy_backend::bootstrap::load_runtime_from_env;
+use oracy_backend::bootstrap::{OPENAI_API_KEY_ENV_VAR, load_runtime_from_env};
 use oracy_backend::router::build_router;
+use oracy_backend::transcription_worker::{OpenAiTranscriptionEngine, run_transcription_worker};
 use tracing::error;
 
 #[tokio::main]
@@ -16,6 +17,12 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (listen_addr, state) = load_runtime_from_env().await?;
+    let openai_api_key = std::env::var(OPENAI_API_KEY_ENV_VAR)?;
+    let worker_storage = state.storage.clone();
+    tokio::spawn(run_transcription_worker(
+        worker_storage,
+        OpenAiTranscriptionEngine::new(openai_api_key),
+    ));
     serve(listen_addr, build_router(state)).await
 }
 

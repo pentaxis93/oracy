@@ -76,6 +76,24 @@ pub enum AcceptJobOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushChunkOutcome {
+    Accepted,
+    Replayed,
+    NotFound,
+    Conflict,
+    InvalidIndex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinalizeJobOutcome {
+    Finalized(TranscriptionJobRecord),
+    Replayed(TranscriptionJobRecord),
+    NotFound,
+    Conflict,
+    MissingChunks,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTagOutcome {
     Created(TagRecord),
     Existing(TagRecord),
@@ -124,6 +142,40 @@ pub struct NewTranscriptionJob {
 }
 
 #[derive(Debug, Clone)]
+pub struct NewOpenTranscriptionJob {
+    pub api_key_id: String,
+    pub idempotency_key: String,
+    pub recorded_at: OffsetDateTime,
+    pub session_id: Option<String>,
+    pub language: Option<String>,
+    pub audio_format: String,
+    pub chunk_count: i64,
+    pub max_retries: i64,
+    pub now: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcceptedChunk {
+    pub api_key_id: String,
+    pub job_id: String,
+    pub chunk_index: i64,
+    pub chunk_sha256: String,
+    pub path: PathBuf,
+    pub size_bytes: i64,
+    pub now: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct FinalizedJob {
+    pub api_key_id: String,
+    pub job_id: String,
+    pub audio_sha256_hex: String,
+    pub accepted_audio_path: PathBuf,
+    pub resolved_model: String,
+    pub now: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewTag {
     pub id: String,
     pub api_key_id: String,
@@ -149,7 +201,13 @@ pub struct TranscriptionJobRecord {
     pub recorded_at: OffsetDateTime,
     pub session_id: Option<String>,
     pub language: Option<String>,
+    pub audio_format: String,
+    pub chunk_count: i64,
+    pub chunks_received: i64,
     pub accepted_audio_path: PathBuf,
+    pub resolved_model: Option<String>,
+    pub finalized_at: Option<OffsetDateTime>,
+    pub processing_lease_expires_at: Option<OffsetDateTime>,
     pub status: String,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
@@ -451,6 +509,315 @@ impl Storage {
         }
     }
 
+    pub async fn open_transcription_job(
+        &self,
+        input: NewOpenTranscriptionJob,
+    ) -> Result<AcceptJobOutcome, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let id = new_id();
+        let now = format_timestamp(input.now)?;
+        let recorded_at = format_timestamp(input.recorded_at)?;
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO transcription_jobs (
+                id, api_key_id, idempotency_key, audio_sha256_hex,
+                audio_content_hash_algorithm, recorded_at, session_id, language,
+                audio_format, chunk_count, chunks_received, accepted_audio_path,
+                status, created_at, updated_at, retry_count, max_retries
+            )
+            SELECT ?, ?, ?, '', ?, ?, ?, ?, ?, ?, 0, '', 'accepting_chunks', ?, ?, 0, ?
+            WHERE ? IS NULL
+                OR EXISTS (
+                    SELECT 1 FROM sessions
+                    WHERE api_key_id = ? AND id = ?
+                )
+            ON CONFLICT(api_key_id, idempotency_key) DO NOTHING
+            "#,
+        )
+        .bind(&id)
+        .bind(&input.api_key_id)
+        .bind(&input.idempotency_key)
+        .bind(AUDIO_CONTENT_HASH_ALGORITHM_ID)
+        .bind(recorded_at)
+        .bind(&input.session_id)
+        .bind(&input.language)
+        .bind(&input.audio_format)
+        .bind(input.chunk_count)
+        .bind(&now)
+        .bind(&now)
+        .bind(input.max_retries)
+        .bind(&input.session_id)
+        .bind(&input.api_key_id)
+        .bind(&input.session_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let job = if result.rows_affected() == 1 {
+            let row = sqlx::query(
+                r#"
+                SELECT * FROM transcription_jobs
+                WHERE api_key_id = ? AND id = ?
+                "#,
+            )
+            .bind(&input.api_key_id)
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await?;
+            job_from_row(row)?
+        } else {
+            let row = sqlx::query(
+                r#"
+                SELECT * FROM transcription_jobs
+                WHERE api_key_id = ? AND idempotency_key = ?
+                "#,
+            )
+            .bind(&input.api_key_id)
+            .bind(&input.idempotency_key)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(job_from_row)
+            .transpose()?;
+            match row {
+                Some(job) => job,
+                None => {
+                    tx.commit().await?;
+                    return Ok(AcceptJobOutcome::SessionNotFound);
+                }
+            }
+        };
+        tx.commit().await?;
+
+        if result.rows_affected() == 1 {
+            Ok(AcceptJobOutcome::Created(job))
+        } else if job.matches_open_submission(&input) {
+            Ok(AcceptJobOutcome::Replayed(job))
+        } else {
+            Ok(AcceptJobOutcome::Conflict(SubmissionConflict {
+                job_id: job.id,
+            }))
+        }
+    }
+
+    pub async fn accept_chunk(
+        &self,
+        input: AcceptedChunk,
+    ) -> Result<PushChunkOutcome, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let Some(job) = sqlx::query(
+            r#"
+            SELECT * FROM transcription_jobs
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(&input.api_key_id)
+        .bind(&input.job_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(job_from_row)
+        .transpose()?
+        else {
+            tx.commit().await?;
+            return Ok(PushChunkOutcome::NotFound);
+        };
+
+        if job.status != "accepting_chunks" {
+            tx.commit().await?;
+            return Ok(PushChunkOutcome::Conflict);
+        }
+        if input.chunk_index < 0 || input.chunk_index >= job.chunk_count {
+            tx.commit().await?;
+            return Ok(PushChunkOutcome::InvalidIndex);
+        }
+
+        let existing = sqlx::query(
+            r#"
+            SELECT chunk_sha256
+            FROM transcription_job_chunks
+            WHERE api_key_id = ? AND job_id = ? AND chunk_index = ?
+            "#,
+        )
+        .bind(&input.api_key_id)
+        .bind(&input.job_id)
+        .bind(input.chunk_index)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(row) = existing {
+            let existing_hash: String = row.try_get("chunk_sha256")?;
+            tx.commit().await?;
+            return if existing_hash == input.chunk_sha256 {
+                Ok(PushChunkOutcome::Replayed)
+            } else {
+                Ok(PushChunkOutcome::Conflict)
+            };
+        }
+
+        let path = input.path.to_string_lossy().into_owned();
+        let now = format_timestamp(input.now)?;
+        sqlx::query(
+            r#"
+            INSERT INTO transcription_job_chunks (
+                job_id, api_key_id, chunk_index, chunk_sha256, path, size_bytes, accepted_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&input.job_id)
+        .bind(&input.api_key_id)
+        .bind(input.chunk_index)
+        .bind(&input.chunk_sha256)
+        .bind(path)
+        .bind(input.size_bytes)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET chunks_received = chunks_received + 1, updated_at = ?
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(&now)
+        .bind(&input.api_key_id)
+        .bind(&input.job_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(PushChunkOutcome::Accepted)
+    }
+
+    pub async fn chunk_hashes_in_order(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT chunk_sha256
+            FROM transcription_job_chunks
+            WHERE api_key_id = ? AND job_id = ?
+            ORDER BY chunk_index ASC
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| row.try_get("chunk_sha256").map_err(StorageError::from))
+            .collect()
+    }
+
+    pub async fn chunk_paths_in_order(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+    ) -> Result<Vec<PathBuf>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT path
+            FROM transcription_job_chunks
+            WHERE api_key_id = ? AND job_id = ?
+            ORDER BY chunk_index ASC
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                row.try_get::<String, _>("path")
+                    .map(PathBuf::from)
+                    .map_err(StorageError::from)
+            })
+            .collect()
+    }
+
+    pub async fn finalize_job(
+        &self,
+        input: FinalizedJob,
+    ) -> Result<FinalizeJobOutcome, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let Some(job) = sqlx::query(
+            r#"
+            SELECT * FROM transcription_jobs
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(&input.api_key_id)
+        .bind(&input.job_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(job_from_row)
+        .transpose()?
+        else {
+            tx.commit().await?;
+            return Ok(FinalizeJobOutcome::NotFound);
+        };
+
+        if job.status != "accepting_chunks" {
+            tx.commit().await?;
+            return if job.accepted_audio_path.as_os_str().is_empty() {
+                Ok(FinalizeJobOutcome::Conflict)
+            } else {
+                Ok(FinalizeJobOutcome::Replayed(job))
+            };
+        }
+        if job.chunks_received != job.chunk_count {
+            tx.commit().await?;
+            return Ok(FinalizeJobOutcome::MissingChunks);
+        }
+
+        let accepted_audio_path = input.accepted_audio_path.to_string_lossy().into_owned();
+        let now = format_timestamp(input.now)?;
+        let result = sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET audio_sha256_hex = ?,
+                accepted_audio_path = ?,
+                resolved_model = ?,
+                finalized_at = ?,
+                status = 'queued',
+                updated_at = ?
+            WHERE api_key_id = ? AND id = ? AND status = 'accepting_chunks'
+            "#,
+        )
+        .bind(&input.audio_sha256_hex)
+        .bind(accepted_audio_path)
+        .bind(&input.resolved_model)
+        .bind(&now)
+        .bind(&now)
+        .bind(&input.api_key_id)
+        .bind(&input.job_id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            tx.commit().await?;
+            return Ok(FinalizeJobOutcome::Conflict);
+        }
+
+        let row = sqlx::query(
+            r#"
+            SELECT * FROM transcription_jobs
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(&input.api_key_id)
+        .bind(&input.job_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let job = job_from_row(row)?;
+
+        tx.commit().await?;
+        Ok(FinalizeJobOutcome::Finalized(job))
+    }
+
     pub async fn find_job_by_idempotency_key(
         &self,
         api_key_id: &str,
@@ -487,6 +854,119 @@ impl Storage {
         .await?;
 
         row.map(job_from_row).transpose()
+    }
+
+    pub async fn claim_next_transcription_job(
+        &self,
+        now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
+    ) -> Result<Option<TranscriptionJobRecord>, StorageError> {
+        let now = format_timestamp(now)?;
+        let lease_expires_at = format_timestamp(lease_expires_at)?;
+        let row = sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET status = 'processing',
+                processing_lease_expires_at = ?,
+                next_attempt_at = NULL,
+                updated_at = ?
+            WHERE id = (
+                SELECT id
+                FROM transcription_jobs
+                WHERE status = 'queued'
+                    OR (status = 'retry_waiting' AND next_attempt_at <= ?)
+                    OR (status = 'processing' AND processing_lease_expires_at <= ?)
+                ORDER BY created_at ASC, id ASC
+                LIMIT 1
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(&lease_expires_at)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(job_from_row).transpose()
+    }
+
+    pub async fn record_transient_engine_failure(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+        now: OffsetDateTime,
+        next_attempt_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        let now = format_timestamp(now)?;
+        let next_attempt_at = format_timestamp(next_attempt_at)?;
+        sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET status = CASE
+                    WHEN retry_count + 1 < max_retries THEN 'retry_waiting'
+                    ELSE 'failed'
+                END,
+                retry_count = retry_count + 1,
+                next_attempt_at = CASE
+                    WHEN retry_count + 1 < max_retries THEN ?
+                    ELSE NULL
+                END,
+                processing_lease_expires_at = NULL,
+                failure_code = CASE
+                    WHEN retry_count + 1 < max_retries THEN NULL
+                    ELSE 'engine_error'
+                END,
+                failure_message = CASE
+                    WHEN retry_count + 1 < max_retries THEN NULL
+                    ELSE 'Transcription engine failed after backend retries.'
+                END,
+                retryable_by_client = CASE
+                    WHEN retry_count + 1 < max_retries THEN NULL
+                    ELSE 1
+                END,
+                updated_at = ?
+            WHERE api_key_id = ? AND id = ? AND status = 'processing'
+            "#,
+        )
+        .bind(&next_attempt_at)
+        .bind(&now)
+        .bind(api_key_id)
+        .bind(job_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn record_terminal_engine_failure(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+        now: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        let now = format_timestamp(now)?;
+        sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET status = 'failed',
+                next_attempt_at = NULL,
+                processing_lease_expires_at = NULL,
+                failure_code = 'audio_invalid',
+                failure_message = 'Transcription engine rejected the submitted audio.',
+                retryable_by_client = 0,
+                updated_at = ?
+            WHERE api_key_id = ? AND id = ? AND status = 'processing'
+            "#,
+        )
+        .bind(&now)
+        .bind(api_key_id)
+        .bind(job_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     pub async fn complete_job_with_transcript(
@@ -599,19 +1079,21 @@ impl Storage {
             .await?;
         }
 
-        sqlx::query(
-            r#"
-            INSERT INTO embeddings (transcript_id, api_key_id, model, vector, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&transcript.id)
-        .bind(api_key_id)
-        .bind(&materialization.embedding.model)
-        .bind(&materialization.embedding.vector)
-        .bind(format_timestamp(materialization.embedding.created_at)?)
-        .execute(&mut *tx)
-        .await?;
+        if !materialization.embedding.vector.is_empty() {
+            sqlx::query(
+                r#"
+                INSERT INTO embeddings (transcript_id, api_key_id, model, vector, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&transcript.id)
+            .bind(api_key_id)
+            .bind(&materialization.embedding.model)
+            .bind(&materialization.embedding.vector)
+            .bind(format_timestamp(materialization.embedding.created_at)?)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         let result = sqlx::query(
             r#"
@@ -1454,6 +1936,14 @@ impl TranscriptionJobRecord {
             && self.session_id == input.session_id
             && self.language == input.language
     }
+
+    fn matches_open_submission(&self, input: &NewOpenTranscriptionJob) -> bool {
+        self.recorded_at == input.recorded_at
+            && self.session_id == input.session_id
+            && self.language == input.language
+            && self.audio_format == input.audio_format
+            && self.chunk_count == input.chunk_count
+    }
 }
 
 fn validate_database_path(database_path: &Path) -> Result<(), StorageError> {
@@ -1554,7 +2044,19 @@ fn job_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TranscriptionJobRecord, 
         recorded_at: parse_timestamp(row.try_get("recorded_at")?)?,
         session_id: row.try_get("session_id")?,
         language: row.try_get("language")?,
+        audio_format: row.try_get("audio_format")?,
+        chunk_count: row.try_get("chunk_count")?,
+        chunks_received: row.try_get("chunks_received")?,
         accepted_audio_path: PathBuf::from(row.try_get::<String, _>("accepted_audio_path")?),
+        resolved_model: row.try_get("resolved_model")?,
+        finalized_at: row
+            .try_get::<Option<String>, _>("finalized_at")?
+            .map(parse_timestamp)
+            .transpose()?,
+        processing_lease_expires_at: row
+            .try_get::<Option<String>, _>("processing_lease_expires_at")?
+            .map(parse_timestamp)
+            .transpose()?,
         status: row.try_get("status")?,
         created_at: parse_timestamp(row.try_get("created_at")?)?,
         updated_at: parse_timestamp(row.try_get("updated_at")?)?,
