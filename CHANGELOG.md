@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add authenticated chunked transcription-job submission APIs for opening
+  attempts, accepting durable chunks, finalizing composed audio to queued jobs,
+  and reading upload progress.
 - Add authenticated tag and session management APIs, including owner-scoped
   CRUD, shared cursor pagination, case-insensitive tag identity with
   latest-spelling display updates, and metadata deletion cascades.

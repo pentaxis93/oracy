@@ -25,6 +25,14 @@ where
     Ok(hex_lower(&hasher.finalize()))
 }
 
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex_lower(&Sha256::digest(bytes))
+}
+
+pub fn validate_lowercase_sha256_hex(value: &str) -> Result<(), AudioContentHashError> {
+    decode_lowercase_sha256_hex(value, 0).map(|_| ())
+}
+
 fn decode_lowercase_sha256_hex(
     value: &str,
     index: usize,

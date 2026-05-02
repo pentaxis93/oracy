@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use oracy_backend::audio_hash::{AUDIO_CONTENT_HASH_ALGORITHM_ID, compose_audio_content_hash_hex};
 use oracy_backend::storage::{
-    AcceptJobOutcome, CreateTagOutcome, NewEmbedding, NewSegment, NewSession, NewTag,
-    NewTranscriptionJob, NewVoiceNote, NewVoiceNoteVersion, RenameTagOutcome,
-    ReplaceVoiceNoteTagsOutcome, Storage, StorageError, VoiceNoteMaterialization,
+    AcceptJobOutcome, AcceptedChunk, CreateTagOutcome, FinalizeJobOutcome, NewEmbedding,
+    NewOpenTranscriptionJob, NewSegment, NewSession, NewTag, NewTranscriptionJob, NewVoiceNote,
+    NewVoiceNoteVersion, OpenJobOutcome, RenameTagOutcome, ReplaceVoiceNoteTagsOutcome, Storage,
+    StorageError, StoreChunkOutcome, VoiceNoteMaterialization,
 };
 use sqlx::Row;
 use tempfile::TempDir;
@@ -276,6 +277,104 @@ async fn racing_acceptance_resolves_unique_conflicts_as_replay_or_submission_con
 
     assert_eq!(job_count_by_key(&storage, "owner-a", "attempt-1").await, 1);
     assert_eq!(job_count_by_key(&storage, "owner-a", "attempt-2").await, 1);
+}
+
+#[tokio::test]
+async fn racing_open_resolves_unique_conflicts_as_replay_or_submission_conflict() {
+    let (_tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-a", "session-a").await;
+    let input = new_open_job("owner-a", "attempt-open-1");
+
+    let replayed = open_while_uncommitted_row_exists(
+        &storage,
+        "racing-open-replay-job",
+        input.clone(),
+        input.clone(),
+    )
+    .await
+    .expect("racing open replay should not return storage error");
+    assert!(matches!(
+        replayed,
+        OpenJobOutcome::ReplayedOpen(job) if job.id == "racing-open-replay-job"
+    ));
+
+    let mut mismatched = new_open_job("owner-a", "attempt-open-2");
+    mismatched.chunk_count = 2;
+    let conflict = open_while_uncommitted_row_exists(
+        &storage,
+        "racing-open-conflict-job",
+        new_open_job("owner-a", "attempt-open-2"),
+        mismatched,
+    )
+    .await
+    .expect("racing open conflict should not return storage error");
+    assert_eq!(
+        conflict,
+        OpenJobOutcome::Conflict(oracy_backend::storage::SubmissionConflict {
+            job_id: "racing-open-conflict-job".to_owned()
+        })
+    );
+
+    assert_eq!(
+        job_count_by_key(&storage, "owner-a", "attempt-open-1").await,
+        1
+    );
+    assert_eq!(
+        job_count_by_key(&storage, "owner-a", "attempt-open-2").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn racing_same_hash_chunk_push_resolves_as_idempotent_replay() {
+    let (_tempdir, storage) = storage().await;
+    let job = opened_job(&storage, "owner-a", "attempt-racing-same-chunk").await;
+    let chunk = accepted_chunk(&job.id, "chunk-hash-a");
+
+    let outcome = store_chunk_while_uncommitted_chunk_exists(&storage, chunk.clone(), chunk)
+        .await
+        .expect("racing same-hash chunk should not return storage error");
+
+    assert_eq!(outcome, StoreChunkOutcome::Replayed);
+    assert_eq!(chunk_count_by_job(&storage, "owner-a", &job.id).await, 1);
+}
+
+#[tokio::test]
+async fn racing_different_hash_chunk_push_resolves_as_conflict() {
+    let (_tempdir, storage) = storage().await;
+    let job = opened_job(&storage, "owner-a", "attempt-racing-conflicting-chunk").await;
+
+    let outcome = store_chunk_while_uncommitted_chunk_exists(
+        &storage,
+        accepted_chunk(&job.id, "chunk-hash-a"),
+        accepted_chunk(&job.id, "chunk-hash-b"),
+    )
+    .await
+    .expect("racing conflicting chunk should not return storage error");
+
+    assert_eq!(outcome, StoreChunkOutcome::Conflict);
+    assert_eq!(chunk_count_by_job(&storage, "owner-a", &job.id).await, 1);
+}
+
+#[tokio::test]
+async fn racing_finalize_resolves_as_idempotent_replay() {
+    let (_tempdir, storage) = storage().await;
+    let job = opened_job(&storage, "owner-a", "attempt-racing-finalize").await;
+    storage
+        .store_chunk(accepted_chunk(&job.id, "chunk-hash-a"))
+        .await
+        .expect("store accepted chunk");
+
+    let outcome =
+        finalize_while_uncommitted_finalize_exists(&storage, &job.id, "accepted-audio-hash")
+            .await
+            .expect("racing finalize should not return storage error");
+
+    assert!(matches!(
+        outcome,
+        FinalizeJobOutcome::Replayed(job) if job.status == "queued"
+            && job.audio_sha256_hex == "accepted-audio-hash"
+    ));
 }
 
 #[tokio::test]
@@ -1272,6 +1371,22 @@ async fn created_job(
     }
 }
 
+async fn opened_job(
+    storage: &Storage,
+    owner: &str,
+    idempotency_key: &str,
+) -> oracy_backend::storage::TranscriptionJobRecord {
+    insert_session_row(storage, owner, "session-a").await;
+    match storage
+        .open_job(new_open_job(owner, idempotency_key))
+        .await
+        .expect("open job")
+    {
+        OpenJobOutcome::Created(job) => job,
+        other => panic!("expected opened job, got {other:?}"),
+    }
+}
+
 async fn accept_while_uncommitted_row_exists(
     storage: &Storage,
     existing_job_id: &str,
@@ -1309,6 +1424,136 @@ async fn accept_while_uncommitted_row_exists(
     sleep(Duration::from_millis(100)).await;
     tx.commit().await.expect("commit accepted row");
     handle.await.expect("accept task should not panic")
+}
+
+async fn open_while_uncommitted_row_exists(
+    storage: &Storage,
+    existing_job_id: &str,
+    stored: NewOpenTranscriptionJob,
+    attempted: NewOpenTranscriptionJob,
+) -> Result<OpenJobOutcome, oracy_backend::storage::StorageError> {
+    let mut tx = storage.pool().begin().await.expect("begin transaction");
+    sqlx::query(
+        r#"
+        INSERT INTO transcription_jobs (
+            id, api_key_id, idempotency_key, recorded_at, session_id,
+            language, status, created_at, updated_at, retry_count,
+            max_retries, chunk_count, audio_format
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'accepting_chunks', ?, ?, 0, ?, ?, ?)
+        "#,
+    )
+    .bind(existing_job_id)
+    .bind(&stored.api_key_id)
+    .bind(&stored.idempotency_key)
+    .bind("2026-04-24T17:59:00Z")
+    .bind(&stored.session_id)
+    .bind(&stored.language)
+    .bind("2026-04-24T18:00:00Z")
+    .bind("2026-04-24T18:00:00Z")
+    .bind(stored.max_retries)
+    .bind(stored.chunk_count)
+    .bind(&stored.audio_format)
+    .execute(&mut *tx)
+    .await
+    .expect("insert uncommitted open row");
+
+    let racing_storage = storage.clone();
+    let handle = tokio::spawn(async move { racing_storage.open_job(attempted).await });
+    sleep(Duration::from_millis(100)).await;
+    tx.commit().await.expect("commit open row");
+    handle.await.expect("open task should not panic")
+}
+
+async fn store_chunk_while_uncommitted_chunk_exists(
+    storage: &Storage,
+    stored: AcceptedChunk,
+    attempted: AcceptedChunk,
+) -> Result<StoreChunkOutcome, oracy_backend::storage::StorageError> {
+    let mut tx = storage.pool().begin().await.expect("begin transaction");
+    insert_chunk(&mut tx, &stored).await;
+
+    let racing_storage = storage.clone();
+    let handle = tokio::spawn(async move { racing_storage.store_chunk(attempted).await });
+    sleep(Duration::from_millis(100)).await;
+    assert!(
+        !handle.is_finished(),
+        "racing chunk push should wait on the held write"
+    );
+    tx.commit().await.expect("commit accepted chunk row");
+    handle.await.expect("store chunk task should not panic")
+}
+
+async fn finalize_while_uncommitted_finalize_exists(
+    storage: &Storage,
+    job_id: &str,
+    audio_sha256_hex: &str,
+) -> Result<FinalizeJobOutcome, oracy_backend::storage::StorageError> {
+    let mut tx = storage.pool().begin().await.expect("begin transaction");
+    sqlx::query(
+        r#"
+        UPDATE transcription_jobs
+        SET audio_sha256_hex = ?,
+            accepted_audio_path = ?,
+            transcription_model = ?,
+            status = 'queued',
+            updated_at = ?
+        WHERE api_key_id = 'owner-a' AND id = ?
+        "#,
+    )
+    .bind(audio_sha256_hex)
+    .bind("/var/lib/oracy/accepted-audio/racing-finalized.wav")
+    .bind("gpt-4o-mini-transcribe")
+    .bind("2026-04-24T18:00:05Z")
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await
+    .expect("update uncommitted finalized row");
+
+    let racing_storage = storage.clone();
+    let job_id = job_id.to_owned();
+    let audio_sha256_hex = audio_sha256_hex.to_owned();
+    let handle = tokio::spawn(async move {
+        racing_storage
+            .finalize_job(
+                "owner-a",
+                &job_id,
+                &audio_sha256_hex,
+                std::path::Path::new("/var/lib/oracy/accepted-audio/racing-finalized.wav"),
+                "gpt-4o-mini-transcribe",
+                datetime!(2026-04-24 18:00:05 UTC),
+            )
+            .await
+    });
+    sleep(Duration::from_millis(100)).await;
+    assert!(
+        !handle.is_finished(),
+        "racing finalize should wait on the held write"
+    );
+    tx.commit().await.expect("commit finalized row");
+    handle.await.expect("finalize task should not panic")
+}
+
+async fn insert_chunk(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, chunk: &AcceptedChunk) {
+    sqlx::query(
+        r#"
+        INSERT INTO transcription_job_chunks (
+            api_key_id, job_id, chunk_index, chunk_sha256_hex,
+            chunk_path, chunk_size_bytes, accepted_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&chunk.api_key_id)
+    .bind(&chunk.job_id)
+    .bind(chunk.chunk_index)
+    .bind(&chunk.chunk_sha256_hex)
+    .bind(chunk.chunk_path.to_string_lossy().into_owned())
+    .bind(chunk.chunk_size_bytes)
+    .bind("2026-04-24T18:00:01Z")
+    .execute(&mut **tx)
+    .await
+    .expect("insert uncommitted chunk row");
 }
 
 async fn insert_voice_note_only(storage: &Storage, owner: &str, voice_note_id: &str) {
@@ -1395,6 +1640,22 @@ async fn job_count_by_key(storage: &Storage, owner: &str, idempotency_key: &str)
     .get("count")
 }
 
+async fn chunk_count_by_job(storage: &Storage, owner: &str, job_id: &str) -> i64 {
+    sqlx::query(
+        r#"
+        SELECT COUNT(*) AS count
+        FROM transcription_job_chunks
+        WHERE api_key_id = ? AND job_id = ?
+        "#,
+    )
+    .bind(owner)
+    .bind(job_id)
+    .fetch_one(storage.pool())
+    .await
+    .expect("count chunks")
+    .get("count")
+}
+
 async fn row_count(storage: &Storage, table: &str, id: &str) -> i64 {
     let sql = format!("SELECT COUNT(*) AS count FROM {table} WHERE id = ?");
     sqlx::query(&sql)
@@ -1426,6 +1687,34 @@ fn new_job(owner: &str, idempotency_key: &str, hash: &str) -> NewTranscriptionJo
         accepted_audio_path: PathBuf::from("/var/lib/oracy/accepted-audio/job-a"),
         max_retries: 3,
         now: datetime!(2026-04-24 18:00:00 UTC),
+    }
+}
+
+fn new_open_job(owner: &str, idempotency_key: &str) -> NewOpenTranscriptionJob {
+    NewOpenTranscriptionJob {
+        api_key_id: owner.to_owned(),
+        idempotency_key: idempotency_key.to_owned(),
+        recorded_at: datetime!(2026-04-24 17:59:00 UTC),
+        session_id: Some("session-a".to_owned()),
+        language: Some("en".to_owned()),
+        chunk_count: 1,
+        audio_format: "wav".to_owned(),
+        max_retries: 3,
+        now: datetime!(2026-04-24 18:00:00 UTC),
+    }
+}
+
+fn accepted_chunk(job_id: &str, hash: &str) -> AcceptedChunk {
+    AcceptedChunk {
+        api_key_id: "owner-a".to_owned(),
+        job_id: job_id.to_owned(),
+        chunk_index: 0,
+        chunk_sha256_hex: hash.to_owned(),
+        chunk_path: PathBuf::from(format!(
+            "/var/lib/oracy/accepted-audio/{job_id}/chunks/0.chunk"
+        )),
+        chunk_size_bytes: 12,
+        accepted_at: datetime!(2026-04-24 18:00:01 UTC),
     }
 }
 
