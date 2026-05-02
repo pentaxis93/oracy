@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use oracy_backend::audio_store::MAX_CHUNK_BYTES;
 use oracy_backend::auth::AuthStore;
 use oracy_backend::config::ApiKeyConfig;
 use oracy_backend::router::build_router;
@@ -60,6 +61,95 @@ async fn chunked_submission_reaches_queued_after_all_chunks_are_finalized() {
     assert_eq!(fetched["chunk_count"], 2);
     assert_eq!(fetched["chunks_received"], 2);
     assert_eq!(fetched["retry_count"], 0);
+}
+
+#[tokio::test]
+async fn spec_ceiling_chunk_is_accepted_through_the_multipart_route_limit() {
+    let fixture = TranscriptionJobFixture::new().await;
+    let opened = fixture
+        .json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-spec-ceiling-chunk"),
+            Some(json!({
+                "recorded_at": "2026-04-24T17:59:00Z",
+                "chunk_count": 1,
+                "audio_format": "wav"
+            })),
+        )
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED);
+    let job_id = opened.body["id"].as_str().expect("job id");
+    let bytes = vec![0xA5; MAX_CHUNK_BYTES];
+
+    let response = fixture.push_chunk_response(job_id, 0, &bytes).await;
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let chunk_path = fixture.accepted_chunk_path(job_id, 0).await;
+    assert_eq!(
+        std::fs::metadata(&chunk_path)
+            .expect("accepted chunk metadata")
+            .len(),
+        MAX_CHUNK_BYTES as u64
+    );
+}
+
+#[tokio::test]
+async fn finalize_composes_large_multi_chunk_submission_in_chunk_order() {
+    let fixture = TranscriptionJobFixture::new().await;
+    let opened = fixture
+        .json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-large-finalize"),
+            Some(json!({
+                "recorded_at": "2026-04-24T17:59:00Z",
+                "chunk_count": 3,
+                "audio_format": "wav"
+            })),
+        )
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED);
+    let job_id = opened.body["id"].as_str().expect("job id");
+    let chunks = [
+        vec![0x11; 10 * 1024 * 1024],
+        vec![0x22; 10 * 1024 * 1024],
+        vec![0x33; 10 * 1024 * 1024],
+    ];
+    for (index, bytes) in chunks.iter().enumerate() {
+        fixture.push_chunk(job_id, index, bytes).await;
+    }
+
+    let finalized = fixture
+        .request(
+            "POST",
+            &format!("/api/v1/transcription-jobs/{job_id}/finalize"),
+            None,
+            Body::empty(),
+            None,
+        )
+        .await;
+
+    assert_eq!(finalized.status(), StatusCode::ACCEPTED);
+    let accepted_audio_path = fixture.accepted_audio_path(job_id).await;
+    assert_eq!(
+        std::fs::metadata(&accepted_audio_path)
+            .expect("accepted audio metadata")
+            .len(),
+        chunks.iter().map(|chunk| chunk.len() as u64).sum::<u64>()
+    );
+    assert_eq!(
+        fixture.file_prefix(&accepted_audio_path, 4).await,
+        vec![0x11; 4]
+    );
+    assert_eq!(
+        fixture.file_suffix(&accepted_audio_path, 4).await,
+        vec![0x33; 4]
+    );
+    assert_eq!(
+        fixture.stored_audio_hash(job_id).await,
+        composed_audio_hash_hex(&chunks)
+    );
 }
 
 #[tokio::test]
@@ -599,6 +689,57 @@ impl TranscriptionJobFixture {
         std::path::PathBuf::from(path)
     }
 
+    async fn accepted_audio_path(&self, job_id: &str) -> std::path::PathBuf {
+        let path: String = sqlx::query_scalar(
+            r#"
+            SELECT accepted_audio_path
+            FROM transcription_jobs
+            WHERE api_key_id = 'alpha' AND id = ?
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("accepted audio path");
+        std::path::PathBuf::from(path)
+    }
+
+    async fn stored_audio_hash(&self, job_id: &str) -> String {
+        sqlx::query_scalar(
+            r#"
+            SELECT audio_sha256_hex
+            FROM transcription_jobs
+            WHERE api_key_id = 'alpha' AND id = ?
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("stored audio hash")
+    }
+
+    async fn file_prefix(&self, path: &std::path::Path, len: usize) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+
+        let mut file = tokio::fs::File::open(path).await.expect("open file");
+        let mut prefix = vec![0; len];
+        file.read_exact(&mut prefix).await.expect("read prefix");
+        prefix
+    }
+
+    async fn file_suffix(&self, path: &std::path::Path, len: usize) -> Vec<u8> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let mut file = tokio::fs::File::open(path).await.expect("open file");
+        let size = file.metadata().await.expect("file metadata").len();
+        file.seek(std::io::SeekFrom::Start(size - len as u64))
+            .await
+            .expect("seek suffix");
+        let mut suffix = vec![0; len];
+        file.read_exact(&mut suffix).await.expect("read suffix");
+        suffix
+    }
+
     async fn chunk_count(&self, job_id: &str) -> i64 {
         sqlx::query_scalar(
             r#"
@@ -684,5 +825,15 @@ fn multipart_body(boundary: &str, chunk_index: usize, chunk_sha256: &str, bytes:
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn composed_audio_hash_hex(chunks: &[Vec<u8>]) -> String {
+    let mut hasher = Sha256::new();
+    for chunk in chunks {
+        let chunk_hash = Sha256::digest(chunk);
+        hasher.update(chunk_hash);
+    }
+    let digest = hasher.finalize();
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
