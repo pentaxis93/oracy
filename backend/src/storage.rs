@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use caseless::Caseless;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{QueryBuilder, Row, SqlitePool};
+use sqlx::{Column, QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -76,6 +76,33 @@ pub enum AcceptJobOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenJobOutcome {
+    Created(TranscriptionJobRecord),
+    ReplayedOpen(TranscriptionJobRecord),
+    ReplayedFinalized(TranscriptionJobRecord),
+    Conflict(SubmissionConflict),
+    SessionNotFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreChunkOutcome {
+    Stored,
+    Replayed,
+    Conflict,
+    NotFound,
+    NotAcceptingChunks,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinalizeJobOutcome {
+    Accepted(TranscriptionJobRecord),
+    Replayed(TranscriptionJobRecord),
+    MissingChunks,
+    NotFound,
+    NotAcceptingChunks,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTagOutcome {
     Created(TagRecord),
     Existing(TagRecord),
@@ -124,6 +151,30 @@ pub struct NewTranscriptionJob {
 }
 
 #[derive(Debug, Clone)]
+pub struct NewOpenTranscriptionJob {
+    pub api_key_id: String,
+    pub idempotency_key: String,
+    pub recorded_at: OffsetDateTime,
+    pub session_id: Option<String>,
+    pub language: Option<String>,
+    pub chunk_count: i64,
+    pub audio_format: String,
+    pub max_retries: i64,
+    pub now: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcceptedChunk {
+    pub api_key_id: String,
+    pub job_id: String,
+    pub chunk_index: i64,
+    pub chunk_sha256_hex: String,
+    pub chunk_path: PathBuf,
+    pub chunk_size_bytes: i64,
+    pub accepted_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewTag {
     pub id: String,
     pub api_key_id: String,
@@ -160,6 +211,18 @@ pub struct TranscriptionJobRecord {
     pub failure_message: Option<String>,
     pub retryable_by_client: Option<bool>,
     pub voice_note_id: Option<String>,
+    pub chunk_count: i64,
+    pub audio_format: String,
+    pub transcription_model: String,
+    pub chunks_received: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkRecord {
+    pub chunk_index: i64,
+    pub chunk_sha256_hex: String,
+    pub chunk_path: PathBuf,
+    pub chunk_size_bytes: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +423,78 @@ impl Storage {
         self.get_settings(api_key_id).await
     }
 
+    pub async fn open_job(
+        &self,
+        input: NewOpenTranscriptionJob,
+    ) -> Result<OpenJobOutcome, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let existing =
+            select_job_by_idempotency_key(&mut tx, &input.api_key_id, &input.idempotency_key)
+                .await?;
+        if let Some(job) = existing {
+            tx.commit().await?;
+            if !job.matches_open_submission(&input) {
+                return Ok(OpenJobOutcome::Conflict(SubmissionConflict {
+                    job_id: job.id,
+                }));
+            }
+            if job.status == "accepting_chunks" {
+                return Ok(OpenJobOutcome::ReplayedOpen(job));
+            }
+            return Ok(OpenJobOutcome::ReplayedFinalized(job));
+        }
+
+        if let Some(session_id) = input.session_id.as_deref() {
+            let exists: Option<i64> = sqlx::query_scalar(
+                r#"
+                SELECT 1
+                FROM sessions
+                WHERE api_key_id = ? AND id = ?
+                "#,
+            )
+            .bind(&input.api_key_id)
+            .bind(session_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if exists.is_none() {
+                tx.commit().await?;
+                return Ok(OpenJobOutcome::SessionNotFound);
+            }
+        }
+
+        let id = new_id();
+        let now = format_timestamp(input.now)?;
+        sqlx::query(
+            r#"
+            INSERT INTO transcription_jobs (
+                id, api_key_id, idempotency_key, recorded_at, session_id,
+                language, status, created_at, updated_at, retry_count,
+                max_retries, chunk_count, audio_format
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'accepting_chunks', ?, ?, 0, ?, ?, ?)
+            "#,
+        )
+        .bind(&id)
+        .bind(&input.api_key_id)
+        .bind(&input.idempotency_key)
+        .bind(format_timestamp(input.recorded_at)?)
+        .bind(&input.session_id)
+        .bind(&input.language)
+        .bind(&now)
+        .bind(&now)
+        .bind(input.max_retries)
+        .bind(input.chunk_count)
+        .bind(&input.audio_format)
+        .execute(&mut *tx)
+        .await?;
+
+        let job = select_job_by_id(&mut tx, &input.api_key_id, &id)
+            .await?
+            .expect("inserted job is visible");
+        tx.commit().await?;
+        Ok(OpenJobOutcome::Created(job))
+    }
+
     pub async fn accept_job(
         &self,
         input: NewTranscriptionJob,
@@ -456,18 +591,10 @@ impl Storage {
         api_key_id: &str,
         idempotency_key: &str,
     ) -> Result<Option<TranscriptionJobRecord>, StorageError> {
-        let row = sqlx::query(
-            r#"
-            SELECT * FROM transcription_jobs
-            WHERE api_key_id = ? AND idempotency_key = ?
-            "#,
-        )
-        .bind(api_key_id)
-        .bind(idempotency_key)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(job_from_row).transpose()
+        let mut tx = self.pool.begin().await?;
+        let job = select_job_by_idempotency_key(&mut tx, api_key_id, idempotency_key).await?;
+        tx.commit().await?;
+        Ok(job)
     }
 
     pub async fn get_job(
@@ -475,18 +602,199 @@ impl Storage {
         api_key_id: &str,
         job_id: &str,
     ) -> Result<Option<TranscriptionJobRecord>, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let job = select_job_by_id(&mut tx, api_key_id, job_id).await?;
+        tx.commit().await?;
+        Ok(job)
+    }
+
+    pub async fn get_chunk(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+        chunk_index: i64,
+    ) -> Result<Option<ChunkRecord>, StorageError> {
         let row = sqlx::query(
             r#"
-            SELECT * FROM transcription_jobs
-            WHERE api_key_id = ? AND id = ?
+            SELECT chunk_index, chunk_sha256_hex, chunk_path, chunk_size_bytes
+            FROM transcription_job_chunks
+            WHERE api_key_id = ? AND job_id = ? AND chunk_index = ?
             "#,
         )
         .bind(api_key_id)
         .bind(job_id)
+        .bind(chunk_index)
         .fetch_optional(&self.pool)
         .await?;
 
-        row.map(job_from_row).transpose()
+        row.map(chunk_from_row).transpose()
+    }
+
+    pub async fn store_chunk(
+        &self,
+        chunk: AcceptedChunk,
+    ) -> Result<StoreChunkOutcome, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let Some(job) = select_job_by_id(&mut tx, &chunk.api_key_id, &chunk.job_id).await? else {
+            tx.commit().await?;
+            return Ok(StoreChunkOutcome::NotFound);
+        };
+        if job.status != "accepting_chunks" {
+            tx.commit().await?;
+            return Ok(StoreChunkOutcome::NotAcceptingChunks);
+        }
+
+        let accepted_at = format_timestamp(chunk.accepted_at)?;
+        let chunk_path = chunk.chunk_path.to_string_lossy().into_owned();
+        let result = sqlx::query(
+            r#"
+            INSERT INTO transcription_job_chunks (
+                api_key_id, job_id, chunk_index, chunk_sha256_hex,
+                chunk_path, chunk_size_bytes, accepted_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(api_key_id, job_id, chunk_index) DO NOTHING
+            "#,
+        )
+        .bind(&chunk.api_key_id)
+        .bind(&chunk.job_id)
+        .bind(chunk.chunk_index)
+        .bind(&chunk.chunk_sha256_hex)
+        .bind(&chunk_path)
+        .bind(chunk.chunk_size_bytes)
+        .bind(&accepted_at)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            sqlx::query(
+                r#"
+                UPDATE transcription_jobs
+                SET updated_at = ?
+                WHERE api_key_id = ? AND id = ?
+                "#,
+            )
+            .bind(&accepted_at)
+            .bind(&chunk.api_key_id)
+            .bind(&chunk.job_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(StoreChunkOutcome::Stored);
+        }
+
+        let existing =
+            select_chunk_by_index(&mut tx, &chunk.api_key_id, &chunk.job_id, chunk.chunk_index)
+                .await?
+                .expect("conflicting chunk row exists");
+        tx.commit().await?;
+        if existing.chunk_sha256_hex == chunk.chunk_sha256_hex {
+            Ok(StoreChunkOutcome::Replayed)
+        } else {
+            Ok(StoreChunkOutcome::Conflict)
+        }
+    }
+
+    pub async fn list_chunks_for_finalize(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+    ) -> Result<Option<(TranscriptionJobRecord, Vec<ChunkRecord>)>, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let Some(job) = select_job_by_id(&mut tx, api_key_id, job_id).await? else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let rows = sqlx::query(
+            r#"
+            SELECT chunk_index, chunk_sha256_hex, chunk_path, chunk_size_bytes
+            FROM transcription_job_chunks
+            WHERE api_key_id = ? AND job_id = ?
+            ORDER BY chunk_index ASC
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(job_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let chunks = rows
+            .into_iter()
+            .map(chunk_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        tx.commit().await?;
+        Ok(Some((job, chunks)))
+    }
+
+    pub async fn finalize_job(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+        audio_sha256_hex: &str,
+        accepted_audio_path: &Path,
+        transcription_model: &str,
+        now: OffsetDateTime,
+    ) -> Result<FinalizeJobOutcome, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let Some(job) = select_job_by_id(&mut tx, api_key_id, job_id).await? else {
+            tx.commit().await?;
+            return Ok(FinalizeJobOutcome::NotFound);
+        };
+        if job.status != "accepting_chunks" {
+            tx.commit().await?;
+            if job.audio_sha256_hex == audio_sha256_hex && !job.audio_sha256_hex.is_empty() {
+                return Ok(FinalizeJobOutcome::Replayed(job));
+            }
+            return Ok(FinalizeJobOutcome::NotAcceptingChunks);
+        }
+
+        let accepted_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM transcription_job_chunks
+            WHERE api_key_id = ? AND job_id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(job_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if accepted_count != job.chunk_count {
+            tx.commit().await?;
+            return Ok(FinalizeJobOutcome::MissingChunks);
+        }
+
+        let now = format_timestamp(now)?;
+        let accepted_audio_path = accepted_audio_path.to_string_lossy().into_owned();
+        sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET audio_sha256_hex = ?,
+                accepted_audio_path = ?,
+                transcription_model = ?,
+                status = 'queued',
+                session_id = (
+                    SELECT sessions.id
+                    FROM sessions
+                    WHERE sessions.api_key_id = transcription_jobs.api_key_id
+                        AND sessions.id = transcription_jobs.session_id
+                ),
+                updated_at = ?
+            WHERE api_key_id = ? AND id = ? AND status = 'accepting_chunks'
+            "#,
+        )
+        .bind(audio_sha256_hex)
+        .bind(accepted_audio_path)
+        .bind(transcription_model)
+        .bind(&now)
+        .bind(api_key_id)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+        let job = select_job_by_id(&mut tx, api_key_id, job_id)
+            .await?
+            .expect("finalized job is visible");
+        tx.commit().await?;
+        Ok(FinalizeJobOutcome::Accepted(job))
     }
 
     pub async fn complete_job_with_voice_note(
@@ -1454,6 +1762,89 @@ impl TranscriptionJobRecord {
             && self.session_id == input.session_id
             && self.language == input.language
     }
+
+    fn matches_open_submission(&self, input: &NewOpenTranscriptionJob) -> bool {
+        self.recorded_at == input.recorded_at
+            && self.session_id == input.session_id
+            && self.language == input.language
+            && self.chunk_count == input.chunk_count
+            && self.audio_format == input.audio_format
+    }
+}
+
+async fn select_job_by_id(
+    tx: &mut Transaction<'_, Sqlite>,
+    api_key_id: &str,
+    job_id: &str,
+) -> Result<Option<TranscriptionJobRecord>, StorageError> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            transcription_jobs.*,
+            COUNT(transcription_job_chunks.chunk_index) AS chunks_received
+        FROM transcription_jobs
+        LEFT JOIN transcription_job_chunks
+            ON transcription_job_chunks.api_key_id = transcription_jobs.api_key_id
+            AND transcription_job_chunks.job_id = transcription_jobs.id
+        WHERE transcription_jobs.api_key_id = ? AND transcription_jobs.id = ?
+        GROUP BY transcription_jobs.id
+        "#,
+    )
+    .bind(api_key_id)
+    .bind(job_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    row.map(job_from_row).transpose()
+}
+
+async fn select_job_by_idempotency_key(
+    tx: &mut Transaction<'_, Sqlite>,
+    api_key_id: &str,
+    idempotency_key: &str,
+) -> Result<Option<TranscriptionJobRecord>, StorageError> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            transcription_jobs.*,
+            COUNT(transcription_job_chunks.chunk_index) AS chunks_received
+        FROM transcription_jobs
+        LEFT JOIN transcription_job_chunks
+            ON transcription_job_chunks.api_key_id = transcription_jobs.api_key_id
+            AND transcription_job_chunks.job_id = transcription_jobs.id
+        WHERE transcription_jobs.api_key_id = ?
+            AND transcription_jobs.idempotency_key = ?
+        GROUP BY transcription_jobs.id
+        "#,
+    )
+    .bind(api_key_id)
+    .bind(idempotency_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    row.map(job_from_row).transpose()
+}
+
+async fn select_chunk_by_index(
+    tx: &mut Transaction<'_, Sqlite>,
+    api_key_id: &str,
+    job_id: &str,
+    chunk_index: i64,
+) -> Result<Option<ChunkRecord>, StorageError> {
+    let row = sqlx::query(
+        r#"
+        SELECT chunk_index, chunk_sha256_hex, chunk_path, chunk_size_bytes
+        FROM transcription_job_chunks
+        WHERE api_key_id = ? AND job_id = ? AND chunk_index = ?
+        "#,
+    )
+    .bind(api_key_id)
+    .bind(job_id)
+    .bind(chunk_index)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    row.map(chunk_from_row).transpose()
 }
 
 fn validate_database_path(database_path: &Path) -> Result<(), StorageError> {
@@ -1568,7 +1959,35 @@ fn job_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TranscriptionJobRecord, 
         failure_message: row.try_get("failure_message")?,
         retryable_by_client,
         voice_note_id: row.try_get("voice_note_id")?,
+        chunk_count: row.try_get("chunk_count")?,
+        audio_format: row.try_get("audio_format")?,
+        transcription_model: row.try_get("transcription_model")?,
+        chunks_received: optional_i64(&row, "chunks_received")?.unwrap_or(0),
     })
+}
+
+fn chunk_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ChunkRecord, StorageError> {
+    Ok(ChunkRecord {
+        chunk_index: row.try_get("chunk_index")?,
+        chunk_sha256_hex: row.try_get("chunk_sha256_hex")?,
+        chunk_path: PathBuf::from(row.try_get::<String, _>("chunk_path")?),
+        chunk_size_bytes: row.try_get("chunk_size_bytes")?,
+    })
+}
+
+fn optional_i64(
+    row: &sqlx::sqlite::SqliteRow,
+    column_name: &str,
+) -> Result<Option<i64>, StorageError> {
+    if row
+        .columns()
+        .iter()
+        .any(|column| column.name() == column_name)
+    {
+        Ok(Some(row.try_get(column_name)?))
+    } else {
+        Ok(None)
+    }
 }
 
 fn settings_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SettingsRecord, StorageError> {

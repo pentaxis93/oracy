@@ -138,7 +138,7 @@ impl ApiError {
         }
     }
 
-    fn payload_too_large() -> Self {
+    pub fn payload_too_large() -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             body: ErrorResponse {
