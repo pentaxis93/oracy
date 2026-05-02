@@ -537,9 +537,9 @@ impl Storage {
                 id, api_key_id, idempotency_key, audio_sha256_hex,
                 audio_content_hash_algorithm, recorded_at, session_id, language,
                 accepted_audio_path, status, created_at, updated_at, retry_count,
-                max_retries
+                max_retries, accepted_at
             )
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?, ?
             WHERE ? IS NULL
                 OR EXISTS (
                     SELECT 1 FROM sessions
@@ -560,6 +560,7 @@ impl Storage {
         .bind(&now)
         .bind(&now)
         .bind(input.max_retries)
+        .bind(&now)
         .bind(&input.session_id)
         .bind(&input.api_key_id)
         .bind(&input.session_id)
@@ -827,6 +828,7 @@ impl Storage {
                 accepted_audio_path = ?,
                 transcription_model = ?,
                 status = 'queued',
+                accepted_at = ?,
                 updated_at = ?
             WHERE api_key_id = ? AND id = ? AND status = 'accepting_chunks'
             "#,
@@ -834,6 +836,7 @@ impl Storage {
         .bind(audio_sha256_hex)
         .bind(accepted_audio_path)
         .bind(transcription_model)
+        .bind(&now)
         .bind(&now)
         .bind(api_key_id)
         .bind(job_id)
@@ -868,7 +871,9 @@ impl Storage {
                     WHEN 'retry_waiting' THEN 1
                     ELSE 2
                 END,
-                created_at ASC,
+                CASE WHEN status = 'processing' THEN processing_lease_expires_at END ASC,
+                CASE WHEN status = 'retry_waiting' THEN next_attempt_at END ASC,
+                COALESCE(accepted_at, created_at) ASC,
                 id ASC
             LIMIT 1
             "#,
@@ -909,6 +914,35 @@ impl Storage {
             .expect("claimed job remains visible");
         tx.commit().await?;
         Ok(Some(claimed))
+    }
+
+    pub async fn renew_processing_lease(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+        lease_token: &str,
+        _now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let lease_expires_at_text = format_timestamp(lease_expires_at)?;
+        let result = sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET processing_lease_expires_at = ?
+            WHERE api_key_id = ?
+                AND id = ?
+                AND status = 'processing'
+                AND processing_lease_token = ?
+            "#,
+        )
+        .bind(&lease_expires_at_text)
+        .bind(api_key_id)
+        .bind(job_id)
+        .bind(lease_token)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn complete_job_with_voice_note(
@@ -1064,6 +1098,10 @@ impl Storage {
             UPDATE transcription_jobs
             SET status = 'succeeded',
                 voice_note_id = ?,
+                next_attempt_at = NULL,
+                failure_code = NULL,
+                failure_message = NULL,
+                retryable_by_client = NULL,
                 processing_lease_token = NULL,
                 processing_lease_expires_at = NULL,
                 updated_at = ?

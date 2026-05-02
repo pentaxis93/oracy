@@ -1,12 +1,21 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use axum::extract::Multipart;
+use axum::response::IntoResponse;
+use axum::routing::post;
+use axum::{Json, Router};
 use oracy_backend::storage::{AcceptJobOutcome, NewTranscriptionJob, Storage};
 use oracy_backend::transcription_worker::{
-    DurationProbe, DurationProbeError, EngineFailure, ProcessOutcome, TranscriptionEngine,
-    TranscriptionInput, TranscriptionOutput, WorkerConfig, process_one_available_job,
+    AudioSliceError, AudioSlicer, DurationProbe, DurationProbeError, EngineFailure,
+    OpenAiTranscriptionEngine, ProcessOutcome, TranscriptionEngine, TranscriptionInput,
+    TranscriptionOutput, WorkerConfig, process_one_available_job,
 };
+use serde_json::json;
 use tempfile::TempDir;
+use time::Duration as TimeDuration;
+use time::OffsetDateTime;
 use time::macros::datetime;
 
 #[tokio::test]
@@ -134,6 +143,128 @@ async fn worker_routes_transient_engine_failure_to_retry_waiting() {
     assert!(retrying.next_attempt_at.is_some());
 }
 
+#[tokio::test]
+async fn stalled_openai_request_records_transient_timeout_and_worker_processes_next_job() {
+    let fixture = WorkerFixture::new().await;
+    let stalled_job = fixture
+        .create_queued_job("attempt-stalled-openai", b"stalled audio")
+        .await;
+    let next_job = fixture
+        .create_queued_job("attempt-next-openai", b"next audio")
+        .await;
+    let base_url = spawn_stalling_openai().await;
+    let engine = OpenAiTranscriptionEngine::with_request_timeout(
+        base_url,
+        "test-openai-key".to_owned(),
+        PassthroughSlicer,
+        Duration::from_millis(50),
+    );
+    let probe = FakeDurationProbe::success(1_480);
+
+    let first = tokio::time::timeout(
+        Duration::from_secs(1),
+        process_one_available_job(&fixture.storage, &engine, &probe, WorkerConfig::test()),
+    )
+    .await
+    .expect("stalled request should be bounded")
+    .expect("process stalled job");
+    assert_eq!(
+        first,
+        ProcessOutcome::RetryWaiting {
+            job_id: stalled_job.id.clone()
+        }
+    );
+    let retrying = fixture
+        .storage
+        .get_job("owner-a", &stalled_job.id)
+        .await
+        .expect("stalled job lookup")
+        .expect("stalled job exists");
+    assert_eq!(retrying.status, "retry_waiting");
+    assert_eq!(retrying.failure_code.as_deref(), Some("engine_timeout"));
+
+    let second = tokio::time::timeout(
+        Duration::from_secs(1),
+        process_one_available_job(&fixture.storage, &engine, &probe, WorkerConfig::test()),
+    )
+    .await
+    .expect("worker should remain available after timeout")
+    .expect("process next job");
+    assert_eq!(
+        second,
+        ProcessOutcome::Succeeded {
+            job_id: next_job.id.clone()
+        }
+    );
+    let completed = fixture
+        .storage
+        .get_job("owner-a", &next_job.id)
+        .await
+        .expect("next job lookup")
+        .expect("next job exists");
+    assert_eq!(completed.status, "succeeded");
+    let voice_note = fixture
+        .storage
+        .get_voice_note(
+            "owner-a",
+            completed.voice_note_id.as_deref().expect("voice note id"),
+        )
+        .await
+        .expect("voice note lookup")
+        .expect("voice note exists");
+    assert_eq!(voice_note.text, "transcribed after timeout");
+}
+
+#[tokio::test]
+async fn worker_renews_processing_lease_while_transcription_outlives_initial_lease() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_queued_job("attempt-long-transcription", b"long audio")
+        .await;
+    let storage_for_worker = fixture.storage.clone();
+    let engine = SlowEngine::new(Duration::from_millis(140), "long transcription");
+    let probe = FakeDurationProbe::success(1_480);
+    let config = WorkerConfig {
+        lease_duration: TimeDuration::milliseconds(50),
+        lease_renewal_interval: Duration::from_millis(10),
+        idle_sleep: Duration::from_millis(10),
+        error_sleep: Duration::from_millis(10),
+    };
+
+    let handle = tokio::spawn(async move {
+        process_one_available_job(&storage_for_worker, &engine, &probe, config).await
+    });
+    tokio::time::sleep(Duration::from_millis(75)).await;
+
+    assert!(
+        fixture
+            .storage
+            .claim_next_transcription_job(
+                "competing-lease",
+                OffsetDateTime::now_utc(),
+                OffsetDateTime::now_utc() + TimeDuration::milliseconds(50),
+            )
+            .await
+            .expect("competing claim")
+            .is_none()
+    );
+
+    let outcome = handle.await.expect("worker task").expect("process job");
+    assert_eq!(
+        outcome,
+        ProcessOutcome::Succeeded {
+            job_id: job.id.clone()
+        }
+    );
+    let completed = fixture
+        .storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(completed.status, "succeeded");
+}
+
 struct WorkerFixture {
     _tempdir: TempDir,
     accepted_audio_dir: PathBuf,
@@ -230,6 +361,33 @@ impl TranscriptionEngine for FakeEngine {
 }
 
 #[derive(Clone)]
+struct SlowEngine {
+    delay: Duration,
+    text: String,
+}
+
+impl SlowEngine {
+    fn new(delay: Duration, text: &str) -> Self {
+        Self {
+            delay,
+            text: text.to_owned(),
+        }
+    }
+}
+
+impl TranscriptionEngine for SlowEngine {
+    async fn transcribe(
+        &self,
+        _input: TranscriptionInput,
+    ) -> Result<TranscriptionOutput, EngineFailure> {
+        tokio::time::sleep(self.delay).await;
+        Ok(TranscriptionOutput {
+            text: self.text.clone(),
+        })
+    }
+}
+
+#[derive(Clone)]
 struct FakeDurationProbe {
     result: Result<i64, DurationProbeError>,
 }
@@ -256,4 +414,44 @@ impl DurationProbe for FakeDurationProbe {
     ) -> Result<i64, DurationProbeError> {
         self.result.clone()
     }
+}
+
+#[derive(Clone)]
+struct PassthroughSlicer;
+
+impl AudioSlicer for PassthroughSlicer {
+    async fn slices(
+        &self,
+        input: &std::path::Path,
+        _audio_format: &str,
+    ) -> Result<Vec<PathBuf>, AudioSliceError> {
+        Ok(vec![input.to_path_buf()])
+    }
+}
+
+async fn spawn_stalling_openai() -> String {
+    let app = Router::new().route("/v1/audio/transcriptions", post(stalling_transcription));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake openai");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve fake openai");
+    });
+    format!("http://{addr}")
+}
+
+async fn stalling_transcription(mut multipart: Multipart) -> impl IntoResponse {
+    let mut file_bytes = Vec::new();
+    while let Some(field) = multipart.next_field().await.expect("multipart field") {
+        if field.name() == Some("file") {
+            file_bytes = field.bytes().await.expect("file bytes").to_vec();
+        }
+    }
+
+    if file_bytes == b"stalled audio" {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+
+    Json(json!({ "text": "transcribed after timeout" }))
 }

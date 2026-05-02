@@ -97,6 +97,70 @@ async fn openai_engine_preserves_retry_after_rate_limit_semantics() {
     );
 }
 
+#[tokio::test]
+async fn openai_engine_cleans_generated_slices_when_slice_transcription_fails() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let accepted_audio = tempdir.path().join("accepted.wav");
+    tokio::fs::write(&accepted_audio, b"accepted-audio")
+        .await
+        .expect("write accepted audio");
+    let slice_dir = tempdir.path().join(".oracy-slices-test");
+    tokio::fs::create_dir(&slice_dir)
+        .await
+        .expect("create generated slice dir");
+    let first = slice_dir.join("slice-0.wav");
+    let second = slice_dir.join("slice-1.wav");
+    tokio::fs::write(&first, b"first-audio")
+        .await
+        .expect("write first slice");
+    tokio::fs::write(&second, b"second-audio")
+        .await
+        .expect("write second slice");
+
+    let app = Router::new()
+        .route(
+            "/v1/audio/transcriptions",
+            post(fail_after_first_transcription),
+        )
+        .with_state(Arc::new(Mutex::new(0_usize)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake openai");
+    let addr: SocketAddr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve fake openai");
+    });
+    let engine = OpenAiTranscriptionEngine::new(
+        format!("http://{addr}"),
+        "test-openai-key".to_owned(),
+        FakeSlicer {
+            slices: vec![first.clone(), second.clone()],
+        },
+    );
+
+    let error = engine
+        .transcribe(TranscriptionInput {
+            audio_path: accepted_audio,
+            audio_format: "wav".to_owned(),
+            language: None,
+            model: "gpt-4o-mini-transcribe".to_owned(),
+        })
+        .await
+        .expect_err("second slice failure should be returned");
+
+    assert_eq!(
+        error,
+        EngineFailure::Transient {
+            failure_code: "engine_error".to_owned(),
+            message: "engine unavailable".to_owned(),
+            retry_after_seconds: None,
+        }
+    );
+    assert!(!first.exists());
+    assert!(!second.exists());
+    assert!(!slice_dir.exists());
+}
+
 #[derive(Clone)]
 struct ObservedRequest {
     model: String,
@@ -158,6 +222,18 @@ async fn rate_limited() -> impl IntoResponse {
         [("retry-after", HeaderValue::from_static("7"))],
         "slow down",
     )
+}
+
+async fn fail_after_first_transcription(
+    State(count): State<Arc<Mutex<usize>>>,
+) -> impl IntoResponse {
+    let mut count = count.lock().expect("transcription count");
+    *count += 1;
+    if *count == 1 {
+        Json(json!({ "text": "first slice" })).into_response()
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, "engine unavailable").into_response()
+    }
 }
 
 #[derive(Clone)]

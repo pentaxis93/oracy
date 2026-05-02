@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Harden transcription worker reliability so stalled OpenAI requests enter the
+  backend retry path, processing leases renew during long transcriptions,
+  successful retries expose no stale failure metadata, failed sliced
+  transcriptions release generated slice files, and queued chunked jobs are
+  claimed by finalize order.
 - Add authenticated chunked transcription-job submission APIs for opening
   attempts, accepting durable chunks, finalizing composed audio to queued jobs,
   and reading upload progress.

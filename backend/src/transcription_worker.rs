@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -14,9 +15,12 @@ use crate::storage::{
     TerminalJobFailure, TransientJobFailure, VoiceNoteMaterialization,
 };
 
+const DEFAULT_OPENAI_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
     pub lease_duration: Duration,
+    pub lease_renewal_interval: std::time::Duration,
     pub idle_sleep: std::time::Duration,
     pub error_sleep: std::time::Duration,
 }
@@ -25,6 +29,7 @@ impl WorkerConfig {
     pub fn test() -> Self {
         Self {
             lease_duration: Duration::minutes(5),
+            lease_renewal_interval: std::time::Duration::from_secs(60),
             idle_sleep: std::time::Duration::from_millis(10),
             error_sleep: std::time::Duration::from_millis(10),
         }
@@ -35,6 +40,7 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             lease_duration: Duration::minutes(5),
+            lease_renewal_interval: std::time::Duration::from_secs(60),
             idle_sleep: std::time::Duration::from_secs(5),
             error_sleep: std::time::Duration::from_secs(30),
         }
@@ -53,6 +59,8 @@ pub enum ProcessOutcome {
 pub enum WorkerError {
     #[error("{0}")]
     Storage(#[from] StorageError),
+    #[error("processing lease was lost for transcription job {job_id}")]
+    LeaseLost { job_id: String },
     #[error("failed to read accepted audio metadata: {0}")]
     AudioMetadata(std::io::Error),
     #[error("duration probe failed: {0}")]
@@ -135,15 +143,26 @@ pub struct OpenAiTranscriptionEngine<S> {
     api_key: String,
     slicer: S,
     client: reqwest::Client,
+    request_timeout: std::time::Duration,
 }
 
 impl<S> OpenAiTranscriptionEngine<S> {
     pub fn new(base_url: String, api_key: String, slicer: S) -> Self {
+        Self::with_request_timeout(base_url, api_key, slicer, DEFAULT_OPENAI_REQUEST_TIMEOUT)
+    }
+
+    pub fn with_request_timeout(
+        base_url: String,
+        api_key: String,
+        slicer: S,
+        request_timeout: std::time::Duration,
+    ) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             api_key,
             slicer,
             client: reqwest::Client::new(),
+            request_timeout,
         }
     }
 }
@@ -164,14 +183,18 @@ where
                 failure_code: "audio_invalid".to_owned(),
                 message: error.to_string(),
             })?;
-        let mut texts = Vec::with_capacity(slices.len());
-        for slice in &slices {
-            texts.push(self.transcribe_slice(&input, slice).await?);
+        let result: Result<TranscriptionOutput, EngineFailure> = async {
+            let mut texts = Vec::with_capacity(slices.len());
+            for slice in &slices {
+                texts.push(self.transcribe_slice(&input, slice).await?);
+            }
+            Ok(TranscriptionOutput {
+                text: texts.join("\n"),
+            })
         }
+        .await;
         cleanup_generated_slices(&input.audio_path, &slices).await;
-        Ok(TranscriptionOutput {
-            text: texts.join("\n"),
-        })
+        result
     }
 }
 
@@ -368,12 +391,20 @@ impl<S> OpenAiTranscriptionEngine<S> {
             .post(format!("{}/v1/audio/transcriptions", self.base_url))
             .bearer_auth(&self.api_key)
             .multipart(form)
+            .timeout(self.request_timeout)
             .send()
             .await
-            .map_err(|error| EngineFailure::Transient {
-                failure_code: "engine_error".to_owned(),
-                message: error.to_string(),
-                retry_after_seconds: None,
+            .map_err(|error| {
+                let failure_code = if error.is_timeout() {
+                    "engine_timeout"
+                } else {
+                    "engine_error"
+                };
+                EngineFailure::Transient {
+                    failure_code: failure_code.to_owned(),
+                    message: error.to_string(),
+                    retry_after_seconds: None,
+                }
             })?;
 
         if !response.status().is_success() {
@@ -436,6 +467,61 @@ async fn classify_openai_error(response: reqwest::Response) -> EngineFailure {
     }
 }
 
+async fn run_with_processing_lease_renewal<T, F>(
+    storage: &Storage,
+    api_key_id: &str,
+    job_id: &str,
+    lease_token: &str,
+    config: &WorkerConfig,
+    work: F,
+) -> Result<T, WorkerError>
+where
+    F: Future<Output = T>,
+{
+    let renewal_interval = effective_lease_renewal_interval(config);
+    let mut renewal = tokio::time::interval_at(
+        tokio::time::Instant::now() + renewal_interval,
+        renewal_interval,
+    );
+    renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tokio::pin!(work);
+
+    loop {
+        tokio::select! {
+            biased;
+
+            result = &mut work => return Ok(result),
+            _ = renewal.tick() => {
+                let now = OffsetDateTime::now_utc();
+                let renewed = storage
+                    .renew_processing_lease(
+                        api_key_id,
+                        job_id,
+                        lease_token,
+                        now,
+                        now + config.lease_duration,
+                    )
+                    .await?;
+                if !renewed {
+                    return Err(WorkerError::LeaseLost {
+                        job_id: job_id.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn effective_lease_renewal_interval(config: &WorkerConfig) -> std::time::Duration {
+    let configured = if config.lease_renewal_interval.is_zero() {
+        std::time::Duration::from_millis(1)
+    } else {
+        config.lease_renewal_interval
+    };
+    let half_lease_ms = (config.lease_duration.whole_milliseconds().max(1) as u64 / 2).max(1);
+    configured.min(std::time::Duration::from_millis(half_lease_ms))
+}
+
 pub async fn process_one_available_job<E, D>(
     storage: &Storage,
     engine: &E,
@@ -455,11 +541,31 @@ where
         return Ok(ProcessOutcome::NoJob);
     };
 
-    let duration_ms = match duration_probe
-        .duration_ms(&job.accepted_audio_path, &job.audio_format)
-        .await
-    {
-        Ok(duration_ms) => duration_ms,
+    let active_work = run_with_processing_lease_renewal(
+        storage,
+        &job.api_key_id,
+        &job.id,
+        &lease_token,
+        &config,
+        async {
+            let duration_ms = duration_probe
+                .duration_ms(&job.accepted_audio_path, &job.audio_format)
+                .await?;
+            let transcription = engine
+                .transcribe(TranscriptionInput {
+                    audio_path: job.accepted_audio_path.clone(),
+                    audio_format: job.audio_format.clone(),
+                    language: job.language.clone(),
+                    model: job.transcription_model.clone(),
+                })
+                .await;
+            Ok::<_, DurationProbeError>((duration_ms, transcription))
+        },
+    )
+    .await?;
+
+    let (duration_ms, transcription) = match active_work {
+        Ok(active_work) => active_work,
         Err(error) => {
             storage
                 .fail_leased_job(TerminalJobFailure {
@@ -475,15 +581,7 @@ where
             return Ok(ProcessOutcome::Failed { job_id: job.id });
         }
     };
-    let transcription = match engine
-        .transcribe(TranscriptionInput {
-            audio_path: job.accepted_audio_path.clone(),
-            audio_format: job.audio_format.clone(),
-            language: job.language.clone(),
-            model: job.transcription_model.clone(),
-        })
-        .await
-    {
+    let transcription = match transcription {
         Ok(transcription) => transcription,
         Err(EngineFailure::Transient {
             failure_code,
