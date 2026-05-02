@@ -374,6 +374,10 @@ impl Storage {
         &self.pool
     }
 
+    async fn begin_immediate_tx(&self) -> Result<Transaction<'static, Sqlite>, StorageError> {
+        Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
+    }
+
     pub async fn get_settings(&self, api_key_id: &str) -> Result<SettingsRecord, StorageError> {
         let row = sqlx::query(
             r#"
@@ -626,7 +630,7 @@ impl Storage {
         &self,
         chunk: AcceptedChunk,
     ) -> Result<StoreChunkOutcome, StorageError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_immediate_tx().await?;
         let Some(job) = select_job_by_id(&mut tx, &chunk.api_key_id, &chunk.job_id).await? else {
             tx.commit().await?;
             return Ok(StoreChunkOutcome::NotFound);
@@ -726,7 +730,7 @@ impl Storage {
         transcription_model: &str,
         now: OffsetDateTime,
     ) -> Result<FinalizeJobOutcome, StorageError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_immediate_tx().await?;
         let Some(job) = select_job_by_id(&mut tx, api_key_id, job_id).await? else {
             tx.commit().await?;
             return Ok(FinalizeJobOutcome::NotFound);
