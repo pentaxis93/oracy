@@ -63,6 +63,59 @@ async fn chunked_submission_reaches_queued_after_all_chunks_are_finalized() {
 }
 
 #[tokio::test]
+async fn session_scoped_submission_finalizes_without_mutating_replay_tuple() {
+    let fixture = TranscriptionJobFixture::new().await;
+    let created_session = fixture
+        .json_request(
+            "POST",
+            "/api/v1/sessions",
+            None,
+            Some(json!({"name": "Planning"})),
+        )
+        .await;
+    assert_eq!(created_session.status, StatusCode::CREATED);
+    let session_id = created_session.body["id"].as_str().expect("session id");
+
+    let opened = fixture
+        .json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-session-finalize"),
+            Some(json!({
+                "recorded_at": "2026-04-24T17:59:00Z",
+                "chunk_count": 1,
+                "audio_format": "wav",
+                "session_id": session_id
+            })),
+        )
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED);
+    let job_id = opened.body["id"].as_str().expect("job id");
+
+    fixture.push_chunk(job_id, 0, b"audio").await;
+    let finalized = fixture
+        .request(
+            "POST",
+            &format!("/api/v1/transcription-jobs/{job_id}/finalize"),
+            None,
+            Body::empty(),
+            None,
+        )
+        .await;
+    assert_eq!(finalized.status(), StatusCode::ACCEPTED);
+    assert_eq!(json_body(finalized).await["status"], "queued");
+
+    let stored_session_id: Option<String> = sqlx::query_scalar(
+        "SELECT session_id FROM transcription_jobs WHERE api_key_id = 'alpha' AND id = ?",
+    )
+    .bind(job_id)
+    .fetch_one(fixture.storage.pool())
+    .await
+    .expect("job row");
+    assert_eq!(stored_session_id.as_deref(), Some(session_id));
+}
+
+#[tokio::test]
 async fn open_replays_matching_idempotency_keys_and_rejects_mismatched_bodies() {
     let fixture = TranscriptionJobFixture::new().await;
     let body = json!({
@@ -123,6 +176,41 @@ async fn open_replays_matching_idempotency_keys_and_rejects_mismatched_bodies() 
 }
 
 #[tokio::test]
+async fn concurrent_open_replays_return_the_same_job() {
+    let fixture = TranscriptionJobFixture::new().await;
+    let body = json!({
+        "recorded_at": "2026-04-24T17:59:00Z",
+        "chunk_count": 1,
+        "audio_format": "wav"
+    });
+
+    let (first, second) = tokio::join!(
+        fixture.json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-concurrent-open"),
+            Some(body.clone()),
+        ),
+        fixture.json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-concurrent-open"),
+            Some(body),
+        ),
+    );
+
+    assert_eq!(first.status, StatusCode::CREATED);
+    assert_eq!(second.status, StatusCode::CREATED);
+    assert_eq!(first.body["id"], second.body["id"]);
+    assert_eq!(
+        fixture
+            .job_count_by_idempotency_key("attempt-concurrent-open")
+            .await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn malformed_job_ids_are_rejected_before_existence_checks() {
     let fixture = TranscriptionJobFixture::new().await;
 
@@ -176,11 +264,7 @@ async fn chunk_replay_is_noop_and_conflicting_chunk_preserves_accepted_file() {
     let job_id = opened.body["id"].as_str().expect("job id");
 
     fixture.push_chunk(job_id, 0, b"accepted bytes").await;
-    let chunk_path = fixture
-        .accepted_audio_dir
-        .join(job_id)
-        .join("chunks")
-        .join("0.chunk");
+    let chunk_path = fixture.accepted_chunk_path(job_id, 0).await;
     assert_eq!(
         std::fs::read(&chunk_path).expect("accepted chunk"),
         b"accepted bytes"
@@ -199,6 +283,66 @@ async fn chunk_replay_is_noop_and_conflicting_chunk_preserves_accepted_file() {
         std::fs::read(&chunk_path).expect("accepted chunk unchanged"),
         b"accepted bytes"
     );
+}
+
+#[tokio::test]
+async fn concurrent_same_hash_chunk_pushes_are_both_idempotent_successes() {
+    let fixture = TranscriptionJobFixture::new().await;
+    let opened = fixture
+        .json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-concurrent-same-chunk"),
+            Some(json!({
+                "recorded_at": "2026-04-24T17:59:00Z",
+                "chunk_count": 1,
+                "audio_format": "wav"
+            })),
+        )
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED);
+    let job_id = opened.body["id"].as_str().expect("job id");
+
+    let (first, second) = tokio::join!(
+        fixture.push_chunk_response(job_id, 0, b"accepted bytes"),
+        fixture.push_chunk_response(job_id, 0, b"accepted bytes"),
+    );
+
+    assert_eq!(first.status(), StatusCode::NO_CONTENT);
+    assert_eq!(second.status(), StatusCode::NO_CONTENT);
+    assert_eq!(fixture.chunk_count(job_id).await, 1);
+}
+
+#[tokio::test]
+async fn concurrent_different_hash_chunk_pushes_return_success_and_conflict() {
+    let fixture = TranscriptionJobFixture::new().await;
+    let opened = fixture
+        .json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-concurrent-conflicting-chunk"),
+            Some(json!({
+                "recorded_at": "2026-04-24T17:59:00Z",
+                "chunk_count": 1,
+                "audio_format": "wav"
+            })),
+        )
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED);
+    let job_id = opened.body["id"].as_str().expect("job id");
+
+    let (first, second) = tokio::join!(
+        fixture.push_chunk_response(job_id, 0, b"accepted bytes"),
+        fixture.push_chunk_response(job_id, 0, b"different bytes"),
+    );
+    let mut statuses = [first.status(), second.status()];
+    statuses.sort_by_key(|status| status.as_u16());
+
+    assert_eq!(statuses, [StatusCode::NO_CONTENT, StatusCode::CONFLICT]);
+    assert_eq!(fixture.chunk_count(job_id).await, 1);
+    let accepted_path = fixture.accepted_chunk_path(job_id, 0).await;
+    let accepted_bytes = std::fs::read(&accepted_path).expect("accepted chunk");
+    assert!(accepted_bytes == b"accepted bytes" || accepted_bytes == b"different bytes");
 }
 
 #[tokio::test]
@@ -330,8 +474,25 @@ async fn finalize_captures_current_settings_and_nulls_sessions_deleted_after_ope
     .fetch_one(fixture.storage.pool())
     .await
     .expect("job row");
-    assert_eq!(row.0, None);
+    assert_eq!(row.0.as_deref(), Some(session_id));
     assert_eq!(row.1, "gpt-4o-transcribe");
+
+    let replayed = fixture
+        .json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-settings-and-session"),
+            Some(json!({
+                "recorded_at": "2026-04-24T17:59:00Z",
+                "chunk_count": 1,
+                "audio_format": "wav",
+                "session_id": session_id
+            })),
+        )
+        .await;
+    assert_eq!(replayed.status, StatusCode::OK);
+    assert_eq!(replayed.body["id"], job_id);
+    assert_eq!(replayed.body["status"], "queued");
 }
 
 struct JsonResponse {
@@ -341,7 +502,6 @@ struct JsonResponse {
 
 struct TranscriptionJobFixture {
     _tempdir: TempDir,
-    accepted_audio_dir: std::path::PathBuf,
     storage: Storage,
     app: axum::Router,
 }
@@ -367,7 +527,6 @@ impl TranscriptionJobFixture {
 
         Self {
             _tempdir: tempdir,
-            accepted_audio_dir,
             storage,
             app,
         }
@@ -422,6 +581,50 @@ impl TranscriptionJobFixture {
             Some(&format!("multipart/form-data; boundary={boundary}")),
         )
         .await
+    }
+
+    async fn accepted_chunk_path(&self, job_id: &str, chunk_index: usize) -> std::path::PathBuf {
+        let path: String = sqlx::query_scalar(
+            r#"
+            SELECT chunk_path
+            FROM transcription_job_chunks
+            WHERE api_key_id = 'alpha' AND job_id = ? AND chunk_index = ?
+            "#,
+        )
+        .bind(job_id)
+        .bind(chunk_index as i64)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("accepted chunk path");
+        std::path::PathBuf::from(path)
+    }
+
+    async fn chunk_count(&self, job_id: &str) -> i64 {
+        sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM transcription_job_chunks
+            WHERE api_key_id = 'alpha' AND job_id = ?
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("chunk count")
+    }
+
+    async fn job_count_by_idempotency_key(&self, idempotency_key: &str) -> i64 {
+        sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM transcription_jobs
+            WHERE api_key_id = 'alpha' AND idempotency_key = ?
+            "#,
+        )
+        .bind(idempotency_key)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("job count")
     }
 
     async fn request(

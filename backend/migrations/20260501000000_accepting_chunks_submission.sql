@@ -70,20 +70,8 @@ CREATE INDEX transcription_jobs_ready_idx
     ON transcription_jobs (status, next_attempt_at, created_at, id);
 
 CREATE TRIGGER transcription_jobs_open_tuple_immutable
-BEFORE UPDATE OF api_key_id, idempotency_key, recorded_at, language, chunk_count, audio_format
+BEFORE UPDATE OF api_key_id, idempotency_key, recorded_at, session_id, language, chunk_count, audio_format
 ON transcription_jobs
-BEGIN
-    SELECT RAISE(ABORT, 'open submission tuple is immutable');
-END;
-
-CREATE TRIGGER transcription_jobs_session_tuple_immutable
-BEFORE UPDATE OF session_id
-ON transcription_jobs
-WHEN NOT (
-    OLD.status = 'accepting_chunks'
-    AND NEW.status = 'queued'
-    AND NEW.session_id IS NULL
-)
 BEGIN
     SELECT RAISE(ABORT, 'open submission tuple is immutable');
 END;

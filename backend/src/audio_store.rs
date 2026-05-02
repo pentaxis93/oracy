@@ -16,30 +16,20 @@ pub async fn persist_chunk(
 ) -> std::io::Result<PathBuf> {
     let chunk_dir = accepted_audio_dir.join(job_id).join("chunks");
     tokio::fs::create_dir_all(&chunk_dir).await?;
-    let final_path = chunk_dir.join(format!("{chunk_index}.chunk"));
-    let temp_path = chunk_dir.join(format!(".{chunk_index}.{}.tmp", Ulid::new()));
+    let final_path = chunk_dir.join(format!("{chunk_index}.{}.chunk", Ulid::new()));
 
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&temp_path)
+        .open(&final_path)
         .await?;
     file.write_all(bytes).await?;
     file.flush().await?;
     file.sync_all().await?;
     drop(file);
 
-    match std::fs::hard_link(&temp_path, &final_path) {
-        Ok(()) => {
-            std::fs::remove_file(&temp_path)?;
-            sync_directory(&chunk_dir)?;
-            Ok(final_path)
-        }
-        Err(error) => {
-            let _ = std::fs::remove_file(&temp_path);
-            Err(error)
-        }
-    }
+    sync_directory(&chunk_dir)?;
+    Ok(final_path)
 }
 
 pub async fn compose_chunks(

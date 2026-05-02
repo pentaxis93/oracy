@@ -428,42 +428,9 @@ impl Storage {
         input: NewOpenTranscriptionJob,
     ) -> Result<OpenJobOutcome, StorageError> {
         let mut tx = self.pool.begin().await?;
-        let existing =
-            select_job_by_idempotency_key(&mut tx, &input.api_key_id, &input.idempotency_key)
-                .await?;
-        if let Some(job) = existing {
-            tx.commit().await?;
-            if !job.matches_open_submission(&input) {
-                return Ok(OpenJobOutcome::Conflict(SubmissionConflict {
-                    job_id: job.id,
-                }));
-            }
-            if job.status == "accepting_chunks" {
-                return Ok(OpenJobOutcome::ReplayedOpen(job));
-            }
-            return Ok(OpenJobOutcome::ReplayedFinalized(job));
-        }
-
-        if let Some(session_id) = input.session_id.as_deref() {
-            let exists: Option<i64> = sqlx::query_scalar(
-                r#"
-                SELECT 1
-                FROM sessions
-                WHERE api_key_id = ? AND id = ?
-                "#,
-            )
-            .bind(&input.api_key_id)
-            .bind(session_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            if exists.is_none() {
-                tx.commit().await?;
-                return Ok(OpenJobOutcome::SessionNotFound);
-            }
-        }
-
         let id = new_id();
         let now = format_timestamp(input.now)?;
+        let recorded_at = format_timestamp(input.recorded_at)?;
         sqlx::query(
             r#"
             INSERT INTO transcription_jobs (
@@ -471,13 +438,19 @@ impl Storage {
                 language, status, created_at, updated_at, retry_count,
                 max_retries, chunk_count, audio_format
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'accepting_chunks', ?, ?, 0, ?, ?, ?)
+            SELECT ?, ?, ?, ?, ?, ?, 'accepting_chunks', ?, ?, 0, ?, ?, ?
+            WHERE ? IS NULL
+                OR EXISTS (
+                    SELECT 1 FROM sessions
+                    WHERE api_key_id = ? AND id = ?
+                )
+            ON CONFLICT(api_key_id, idempotency_key) DO NOTHING
             "#,
         )
         .bind(&id)
         .bind(&input.api_key_id)
         .bind(&input.idempotency_key)
-        .bind(format_timestamp(input.recorded_at)?)
+        .bind(recorded_at)
         .bind(&input.session_id)
         .bind(&input.language)
         .bind(&now)
@@ -485,14 +458,33 @@ impl Storage {
         .bind(input.max_retries)
         .bind(input.chunk_count)
         .bind(&input.audio_format)
+        .bind(&input.session_id)
+        .bind(&input.api_key_id)
+        .bind(&input.session_id)
         .execute(&mut *tx)
         .await?;
 
-        let job = select_job_by_id(&mut tx, &input.api_key_id, &id)
-            .await?
-            .expect("inserted job is visible");
+        let Some(job) =
+            select_job_by_idempotency_key(&mut tx, &input.api_key_id, &input.idempotency_key)
+                .await?
+        else {
+            tx.commit().await?;
+            return Ok(OpenJobOutcome::SessionNotFound);
+        };
         tx.commit().await?;
-        Ok(OpenJobOutcome::Created(job))
+
+        if !job.matches_open_submission(&input) {
+            return Ok(OpenJobOutcome::Conflict(SubmissionConflict {
+                job_id: job.id,
+            }));
+        }
+        if job.id == id {
+            return Ok(OpenJobOutcome::Created(job));
+        }
+        if job.status == "accepting_chunks" {
+            return Ok(OpenJobOutcome::ReplayedOpen(job));
+        }
+        Ok(OpenJobOutcome::ReplayedFinalized(job))
     }
 
     pub async fn accept_job(
@@ -772,12 +764,6 @@ impl Storage {
                 accepted_audio_path = ?,
                 transcription_model = ?,
                 status = 'queued',
-                session_id = (
-                    SELECT sessions.id
-                    FROM sessions
-                    WHERE sessions.api_key_id = transcription_jobs.api_key_id
-                        AND sessions.id = transcription_jobs.session_id
-                ),
                 updated_at = ?
             WHERE api_key_id = ? AND id = ? AND status = 'accepting_chunks'
             "#,

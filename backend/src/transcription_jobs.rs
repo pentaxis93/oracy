@@ -186,31 +186,50 @@ async fn push_chunk(
     )
     .await
     .map_err(|_| ApiError::internal("Failed to persist chunk."))?;
-    let outcome = state
+    let outcome = match state
         .storage
         .store_chunk(AcceptedChunk {
             api_key_id,
             job_id,
             chunk_index: parsed.chunk_index,
             chunk_sha256_hex: parsed.chunk_sha256,
-            chunk_path,
+            chunk_path: chunk_path.clone(),
             chunk_size_bytes: parsed.bytes.len() as i64,
             accepted_at: OffsetDateTime::now_utc(),
         })
         .await
-        .map_err(|_| ApiError::internal("Failed to persist chunk state."))?;
+    {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            discard_chunk_candidate(&chunk_path).await;
+            return Err(ApiError::internal("Failed to persist chunk state."));
+        }
+    };
 
     match outcome {
-        StoreChunkOutcome::Stored | StoreChunkOutcome::Replayed => Ok(StatusCode::NO_CONTENT),
-        StoreChunkOutcome::Conflict => Err(ApiError::conflict(
-            "Chunk index already has different accepted bytes.",
-            None,
-        )),
-        StoreChunkOutcome::NotFound => Err(ApiError::not_found("Transcription job not found.")),
-        StoreChunkOutcome::NotAcceptingChunks => Err(ApiError::conflict(
-            "Transcription job is not accepting chunks.",
-            None,
-        )),
+        StoreChunkOutcome::Stored => Ok(StatusCode::NO_CONTENT),
+        StoreChunkOutcome::Replayed => {
+            discard_chunk_candidate(&chunk_path).await;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        StoreChunkOutcome::Conflict => {
+            discard_chunk_candidate(&chunk_path).await;
+            Err(ApiError::conflict(
+                "Chunk index already has different accepted bytes.",
+                None,
+            ))
+        }
+        StoreChunkOutcome::NotFound => {
+            discard_chunk_candidate(&chunk_path).await;
+            Err(ApiError::not_found("Transcription job not found."))
+        }
+        StoreChunkOutcome::NotAcceptingChunks => {
+            discard_chunk_candidate(&chunk_path).await;
+            Err(ApiError::conflict(
+                "Transcription job is not accepting chunks.",
+                None,
+            ))
+        }
     }
 }
 
@@ -328,6 +347,10 @@ fn validate_open_body(body: &OpenTranscriptionJobRequest) -> Result<(), ApiError
     }
 
     Ok(())
+}
+
+async fn discard_chunk_candidate(path: &std::path::Path) {
+    let _ = tokio::fs::remove_file(path).await;
 }
 
 fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {

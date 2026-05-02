@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use oracy_backend::audio_hash::{AUDIO_CONTENT_HASH_ALGORITHM_ID, compose_audio_content_hash_hex};
 use oracy_backend::storage::{
-    AcceptJobOutcome, CreateTagOutcome, NewEmbedding, NewSegment, NewSession, NewTag,
-    NewTranscriptionJob, NewVoiceNote, NewVoiceNoteVersion, RenameTagOutcome,
-    ReplaceVoiceNoteTagsOutcome, Storage, StorageError, VoiceNoteMaterialization,
+    AcceptJobOutcome, CreateTagOutcome, NewEmbedding, NewOpenTranscriptionJob, NewSegment,
+    NewSession, NewTag, NewTranscriptionJob, NewVoiceNote, NewVoiceNoteVersion, OpenJobOutcome,
+    RenameTagOutcome, ReplaceVoiceNoteTagsOutcome, Storage, StorageError, VoiceNoteMaterialization,
 };
 use sqlx::Row;
 use tempfile::TempDir;
@@ -276,6 +276,52 @@ async fn racing_acceptance_resolves_unique_conflicts_as_replay_or_submission_con
 
     assert_eq!(job_count_by_key(&storage, "owner-a", "attempt-1").await, 1);
     assert_eq!(job_count_by_key(&storage, "owner-a", "attempt-2").await, 1);
+}
+
+#[tokio::test]
+async fn racing_open_resolves_unique_conflicts_as_replay_or_submission_conflict() {
+    let (_tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-a", "session-a").await;
+    let input = new_open_job("owner-a", "attempt-open-1");
+
+    let replayed = open_while_uncommitted_row_exists(
+        &storage,
+        "racing-open-replay-job",
+        input.clone(),
+        input.clone(),
+    )
+    .await
+    .expect("racing open replay should not return storage error");
+    assert!(matches!(
+        replayed,
+        OpenJobOutcome::ReplayedOpen(job) if job.id == "racing-open-replay-job"
+    ));
+
+    let mut mismatched = new_open_job("owner-a", "attempt-open-2");
+    mismatched.chunk_count = 2;
+    let conflict = open_while_uncommitted_row_exists(
+        &storage,
+        "racing-open-conflict-job",
+        new_open_job("owner-a", "attempt-open-2"),
+        mismatched,
+    )
+    .await
+    .expect("racing open conflict should not return storage error");
+    assert_eq!(
+        conflict,
+        OpenJobOutcome::Conflict(oracy_backend::storage::SubmissionConflict {
+            job_id: "racing-open-conflict-job".to_owned()
+        })
+    );
+
+    assert_eq!(
+        job_count_by_key(&storage, "owner-a", "attempt-open-1").await,
+        1
+    );
+    assert_eq!(
+        job_count_by_key(&storage, "owner-a", "attempt-open-2").await,
+        1
+    );
 }
 
 #[tokio::test]
@@ -1311,6 +1357,45 @@ async fn accept_while_uncommitted_row_exists(
     handle.await.expect("accept task should not panic")
 }
 
+async fn open_while_uncommitted_row_exists(
+    storage: &Storage,
+    existing_job_id: &str,
+    stored: NewOpenTranscriptionJob,
+    attempted: NewOpenTranscriptionJob,
+) -> Result<OpenJobOutcome, oracy_backend::storage::StorageError> {
+    let mut tx = storage.pool().begin().await.expect("begin transaction");
+    sqlx::query(
+        r#"
+        INSERT INTO transcription_jobs (
+            id, api_key_id, idempotency_key, recorded_at, session_id,
+            language, status, created_at, updated_at, retry_count,
+            max_retries, chunk_count, audio_format
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'accepting_chunks', ?, ?, 0, ?, ?, ?)
+        "#,
+    )
+    .bind(existing_job_id)
+    .bind(&stored.api_key_id)
+    .bind(&stored.idempotency_key)
+    .bind("2026-04-24T17:59:00Z")
+    .bind(&stored.session_id)
+    .bind(&stored.language)
+    .bind("2026-04-24T18:00:00Z")
+    .bind("2026-04-24T18:00:00Z")
+    .bind(stored.max_retries)
+    .bind(stored.chunk_count)
+    .bind(&stored.audio_format)
+    .execute(&mut *tx)
+    .await
+    .expect("insert uncommitted open row");
+
+    let racing_storage = storage.clone();
+    let handle = tokio::spawn(async move { racing_storage.open_job(attempted).await });
+    sleep(Duration::from_millis(100)).await;
+    tx.commit().await.expect("commit open row");
+    handle.await.expect("open task should not panic")
+}
+
 async fn insert_voice_note_only(storage: &Storage, owner: &str, voice_note_id: &str) {
     sqlx::query(
         r#"
@@ -1424,6 +1509,20 @@ fn new_job(owner: &str, idempotency_key: &str, hash: &str) -> NewTranscriptionJo
         session_id: Some("session-a".to_owned()),
         language: Some("en".to_owned()),
         accepted_audio_path: PathBuf::from("/var/lib/oracy/accepted-audio/job-a"),
+        max_retries: 3,
+        now: datetime!(2026-04-24 18:00:00 UTC),
+    }
+}
+
+fn new_open_job(owner: &str, idempotency_key: &str) -> NewOpenTranscriptionJob {
+    NewOpenTranscriptionJob {
+        api_key_id: owner.to_owned(),
+        idempotency_key: idempotency_key.to_owned(),
+        recorded_at: datetime!(2026-04-24 17:59:00 UTC),
+        session_id: Some("session-a".to_owned()),
+        language: Some("en".to_owned()),
+        chunk_count: 1,
+        audio_format: "wav".to_owned(),
         max_retries: 3,
         now: datetime!(2026-04-24 18:00:00 UTC),
     }
