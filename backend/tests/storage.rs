@@ -326,6 +326,63 @@ async fn racing_open_resolves_unique_conflicts_as_replay_or_submission_conflict(
 }
 
 #[tokio::test]
+async fn abandonment_candidates_are_accepting_chunks_jobs_created_before_the_cutoff() {
+    let (_tempdir, storage) = storage().await;
+    let old_alpha = opened_job_at(
+        &storage,
+        "owner-a",
+        "attempt-old-alpha",
+        datetime!(2026-04-24 17:00:00 UTC),
+    )
+    .await;
+    let queued_old = opened_job_at(
+        &storage,
+        "owner-a",
+        "attempt-queued-old",
+        datetime!(2026-04-24 17:15:00 UTC),
+    )
+    .await;
+    mark_open_job_queued(&storage, &queued_old.id).await;
+    let old_beta = opened_job_at(
+        &storage,
+        "owner-b",
+        "attempt-old-beta",
+        datetime!(2026-04-24 17:30:00 UTC),
+    )
+    .await;
+    opened_job_at(
+        &storage,
+        "owner-a",
+        "attempt-at-cutoff",
+        datetime!(2026-04-24 18:00:00 UTC),
+    )
+    .await;
+    opened_job_at(
+        &storage,
+        "owner-a",
+        "attempt-recent",
+        datetime!(2026-04-24 18:30:00 UTC),
+    )
+    .await;
+
+    let candidates = storage
+        .list_accepting_chunks_jobs_eligible_for_abandonment(datetime!(2026-04-24 18:00:00 UTC))
+        .await
+        .expect("abandonment candidates");
+
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|job| (job.api_key_id.as_str(), job.id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("owner-a", old_alpha.id.as_str()),
+            ("owner-b", old_beta.id.as_str())
+        ]
+    );
+}
+
+#[tokio::test]
 async fn racing_same_hash_chunk_push_resolves_as_idempotent_replay() {
     let (_tempdir, storage) = storage().await;
     let job = opened_job(&storage, "owner-a", "attempt-racing-same-chunk").await;
@@ -1376,12 +1433,31 @@ async fn opened_job(
     owner: &str,
     idempotency_key: &str,
 ) -> oracy_backend::storage::TranscriptionJobRecord {
-    insert_session_row(storage, owner, "session-a").await;
-    match storage
-        .open_job(new_open_job(owner, idempotency_key))
-        .await
-        .expect("open job")
-    {
+    opened_job_at(
+        storage,
+        owner,
+        idempotency_key,
+        datetime!(2026-04-24 18:00:00 UTC),
+    )
+    .await
+}
+
+async fn opened_job_at(
+    storage: &Storage,
+    owner: &str,
+    idempotency_key: &str,
+    now: OffsetDateTime,
+) -> oracy_backend::storage::TranscriptionJobRecord {
+    let session_id = if owner == "owner-a" {
+        "session-a".to_owned()
+    } else {
+        format!("{owner}-session-a")
+    };
+    insert_session_row(storage, owner, &session_id).await;
+    let mut input = new_open_job(owner, idempotency_key);
+    input.session_id = Some(session_id);
+    input.now = now;
+    match storage.open_job(input).await.expect("open job") {
         OpenJobOutcome::Created(job) => job,
         other => panic!("expected opened job, got {other:?}"),
     }
@@ -1621,6 +1697,23 @@ async fn mark_job_retry_waiting(storage: &Storage, job_id: &str) {
     .execute(storage.pool())
     .await
     .expect("mark job retry waiting");
+    assert_eq!(result.rows_affected(), 1);
+}
+
+async fn mark_open_job_queued(storage: &Storage, job_id: &str) {
+    let result = sqlx::query(
+        r#"
+        UPDATE transcription_jobs
+        SET audio_sha256_hex = 'queued-open-job-hash',
+            accepted_audio_path = '/var/lib/oracy/accepted-audio/queued-open-job.wav',
+            status = 'queued'
+        WHERE api_key_id = 'owner-a' AND id = ?
+        "#,
+    )
+    .bind(job_id)
+    .execute(storage.pool())
+    .await
+    .expect("mark open job queued");
     assert_eq!(result.rows_affected(), 1);
 }
 

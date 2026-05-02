@@ -721,6 +721,35 @@ impl Storage {
         Ok(Some((job, chunks)))
     }
 
+    pub async fn list_accepting_chunks_jobs_eligible_for_abandonment(
+        &self,
+        cutoff: OffsetDateTime,
+    ) -> Result<Vec<TranscriptionJobRecord>, StorageError> {
+        let cutoff = format_timestamp(cutoff)?;
+        // #59 supplies the cutoff from its configured window. Eligibility is
+        // strictly older than that cutoff; jobs created exactly at it are not eligible.
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                transcription_jobs.*,
+                COUNT(transcription_job_chunks.chunk_index) AS chunks_received
+            FROM transcription_jobs
+            LEFT JOIN transcription_job_chunks
+                ON transcription_job_chunks.api_key_id = transcription_jobs.api_key_id
+                AND transcription_job_chunks.job_id = transcription_jobs.id
+            WHERE transcription_jobs.status = 'accepting_chunks'
+                AND transcription_jobs.created_at < ?
+            GROUP BY transcription_jobs.id
+            ORDER BY transcription_jobs.created_at ASC, transcription_jobs.id ASC
+            "#,
+        )
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(job_from_row).collect()
+    }
+
     pub async fn finalize_job(
         &self,
         api_key_id: &str,
