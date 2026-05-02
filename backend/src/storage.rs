@@ -103,6 +103,12 @@ pub enum FinalizeJobOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryOutcome {
+    RetryWaiting(TranscriptionJobRecord),
+    Failed(TranscriptionJobRecord),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTagOutcome {
     Created(TagRecord),
     Existing(TagRecord),
@@ -175,6 +181,28 @@ pub struct AcceptedChunk {
 }
 
 #[derive(Debug, Clone)]
+pub struct TransientJobFailure {
+    pub api_key_id: String,
+    pub job_id: String,
+    pub lease_token: String,
+    pub failure_code: String,
+    pub failure_message: String,
+    pub now: OffsetDateTime,
+    pub next_attempt_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct TerminalJobFailure {
+    pub api_key_id: String,
+    pub job_id: String,
+    pub lease_token: String,
+    pub failure_code: String,
+    pub failure_message: String,
+    pub retryable_by_client: bool,
+    pub now: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewTag {
     pub id: String,
     pub api_key_id: String,
@@ -214,6 +242,8 @@ pub struct TranscriptionJobRecord {
     pub chunk_count: i64,
     pub audio_format: String,
     pub transcription_model: String,
+    pub processing_lease_token: Option<String>,
+    pub processing_lease_expires_at: Option<OffsetDateTime>,
     pub chunks_received: i64,
 }
 
@@ -230,7 +260,7 @@ pub struct VoiceNoteMaterialization {
     pub voice_note: NewVoiceNote,
     pub initial_version: NewVoiceNoteVersion,
     pub segments: Vec<NewSegment>,
-    pub embedding: NewEmbedding,
+    pub embedding: Option<NewEmbedding>,
 }
 
 #[derive(Debug, Clone)]
@@ -816,10 +846,102 @@ impl Storage {
         Ok(FinalizeJobOutcome::Accepted(job))
     }
 
+    pub async fn claim_next_transcription_job(
+        &self,
+        lease_token: &str,
+        now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
+    ) -> Result<Option<TranscriptionJobRecord>, StorageError> {
+        let mut tx = self.begin_immediate_tx().await?;
+        let now_text = format_timestamp(now)?;
+        let lease_expires_at_text = format_timestamp(lease_expires_at)?;
+
+        let candidate = sqlx::query(
+            r#"
+            SELECT * FROM transcription_jobs
+            WHERE status = 'queued'
+                OR (status = 'retry_waiting' AND julianday(next_attempt_at) <= julianday(?))
+                OR (status = 'processing' AND julianday(processing_lease_expires_at) < julianday(?))
+            ORDER BY
+                CASE status
+                    WHEN 'processing' THEN 0
+                    WHEN 'retry_waiting' THEN 1
+                    ELSE 2
+                END,
+                created_at ASC,
+                id ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(&now_text)
+        .bind(&now_text)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(job_from_row)
+        .transpose()?;
+
+        let Some(candidate) = candidate else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+
+        sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET status = 'processing',
+                next_attempt_at = NULL,
+                processing_lease_token = ?,
+                processing_lease_expires_at = ?,
+                updated_at = ?
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(lease_token)
+        .bind(&lease_expires_at_text)
+        .bind(&now_text)
+        .bind(&candidate.api_key_id)
+        .bind(&candidate.id)
+        .execute(&mut *tx)
+        .await?;
+
+        let claimed = select_job_by_id(&mut tx, &candidate.api_key_id, &candidate.id)
+            .await?
+            .expect("claimed job remains visible");
+        tx.commit().await?;
+        Ok(Some(claimed))
+    }
+
     pub async fn complete_job_with_voice_note(
         &self,
         api_key_id: &str,
         job_id: &str,
+        materialization: VoiceNoteMaterialization,
+    ) -> Result<(), StorageError> {
+        self.complete_job_with_voice_note_by_lease(api_key_id, job_id, None, materialization)
+            .await
+    }
+
+    pub async fn complete_leased_job_with_voice_note(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+        lease_token: &str,
+        materialization: VoiceNoteMaterialization,
+    ) -> Result<(), StorageError> {
+        self.complete_job_with_voice_note_by_lease(
+            api_key_id,
+            job_id,
+            Some(lease_token),
+            materialization,
+        )
+        .await
+    }
+
+    async fn complete_job_with_voice_note_by_lease(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+        lease_token: Option<&str>,
         materialization: VoiceNoteMaterialization,
     ) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
@@ -827,22 +949,17 @@ impl Storage {
         let version = materialization.initial_version;
         let now = format_timestamp(voice_note.created_at)?;
 
-        let result = sqlx::query(
-            r#"
-            UPDATE transcription_jobs
-            SET updated_at = ?
-            WHERE api_key_id = ?
-                AND id = ?
-                AND status = 'processing'
-                AND voice_note_id IS NULL
-            "#,
-        )
-        .bind(&now)
-        .bind(api_key_id)
-        .bind(job_id)
-        .execute(&mut *tx)
-        .await?;
-        if result.rows_affected() != 1 {
+        let Some(job) = select_job_by_id(&mut tx, api_key_id, job_id).await? else {
+            return Err(StorageError::JobNotCompletable {
+                job_id: job_id.to_owned(),
+            });
+        };
+        if job.status != "processing"
+            || job.voice_note_id.is_some()
+            || lease_token.is_some_and(|lease_token| {
+                job.processing_lease_token.as_deref() != Some(lease_token)
+            })
+        {
             return Err(StorageError::JobNotCompletable {
                 job_id: job_id.to_owned(),
             });
@@ -926,24 +1043,30 @@ impl Storage {
             .await?;
         }
 
-        sqlx::query(
-            r#"
-            INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&voice_note.id)
-        .bind(api_key_id)
-        .bind(&materialization.embedding.model)
-        .bind(&materialization.embedding.vector)
-        .bind(format_timestamp(materialization.embedding.created_at)?)
-        .execute(&mut *tx)
-        .await?;
+        if let Some(embedding) = materialization.embedding {
+            sqlx::query(
+                r#"
+                INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&voice_note.id)
+            .bind(api_key_id)
+            .bind(&embedding.model)
+            .bind(&embedding.vector)
+            .bind(format_timestamp(embedding.created_at)?)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         let result = sqlx::query(
             r#"
             UPDATE transcription_jobs
-            SET status = 'succeeded', voice_note_id = ?, updated_at = ?
+            SET status = 'succeeded',
+                voice_note_id = ?,
+                processing_lease_token = NULL,
+                processing_lease_expires_at = NULL,
+                updated_at = ?
             WHERE api_key_id = ?
                 AND id = ?
                 AND status = 'processing'
@@ -964,6 +1087,138 @@ impl Storage {
 
         tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn record_transient_job_failure(
+        &self,
+        failure: TransientJobFailure,
+    ) -> Result<RetryOutcome, StorageError> {
+        let mut tx = self.begin_immediate_tx().await?;
+        let Some(job) = select_job_by_id(&mut tx, &failure.api_key_id, &failure.job_id).await?
+        else {
+            return Err(StorageError::JobNotCompletable {
+                job_id: failure.job_id,
+            });
+        };
+        if job.status != "processing"
+            || job.processing_lease_token.as_deref() != Some(failure.lease_token.as_str())
+        {
+            return Err(StorageError::JobNotCompletable {
+                job_id: failure.job_id,
+            });
+        }
+
+        let retry_count = job.retry_count + 1;
+        let now = format_timestamp(failure.now)?;
+        if retry_count >= job.max_retries {
+            sqlx::query(
+                r#"
+                UPDATE transcription_jobs
+                SET status = 'failed',
+                    retry_count = ?,
+                    next_attempt_at = NULL,
+                    failure_code = ?,
+                    failure_message = ?,
+                    retryable_by_client = 1,
+                    processing_lease_token = NULL,
+                    processing_lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE api_key_id = ? AND id = ? AND status = 'processing'
+                "#,
+            )
+            .bind(retry_count)
+            .bind(&failure.failure_code)
+            .bind(&failure.failure_message)
+            .bind(&now)
+            .bind(&failure.api_key_id)
+            .bind(&failure.job_id)
+            .execute(&mut *tx)
+            .await?;
+            let failed = select_job_by_id(&mut tx, &failure.api_key_id, &failure.job_id)
+                .await?
+                .expect("failed job remains visible");
+            tx.commit().await?;
+            return Ok(RetryOutcome::Failed(failed));
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET status = 'retry_waiting',
+                retry_count = ?,
+                next_attempt_at = ?,
+                failure_code = ?,
+                failure_message = ?,
+                retryable_by_client = NULL,
+                processing_lease_token = NULL,
+                processing_lease_expires_at = NULL,
+                updated_at = ?
+            WHERE api_key_id = ? AND id = ? AND status = 'processing'
+            "#,
+        )
+        .bind(retry_count)
+        .bind(format_timestamp(failure.next_attempt_at)?)
+        .bind(&failure.failure_code)
+        .bind(&failure.failure_message)
+        .bind(&now)
+        .bind(&failure.api_key_id)
+        .bind(&failure.job_id)
+        .execute(&mut *tx)
+        .await?;
+        let retry_waiting = select_job_by_id(&mut tx, &failure.api_key_id, &failure.job_id)
+            .await?
+            .expect("retry-waiting job remains visible");
+        tx.commit().await?;
+        Ok(RetryOutcome::RetryWaiting(retry_waiting))
+    }
+
+    pub async fn fail_leased_job(
+        &self,
+        failure: TerminalJobFailure,
+    ) -> Result<TranscriptionJobRecord, StorageError> {
+        let mut tx = self.begin_immediate_tx().await?;
+        let Some(job) = select_job_by_id(&mut tx, &failure.api_key_id, &failure.job_id).await?
+        else {
+            return Err(StorageError::JobNotCompletable {
+                job_id: failure.job_id,
+            });
+        };
+        if job.status != "processing"
+            || job.processing_lease_token.as_deref() != Some(failure.lease_token.as_str())
+        {
+            return Err(StorageError::JobNotCompletable {
+                job_id: failure.job_id,
+            });
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET status = 'failed',
+                next_attempt_at = NULL,
+                failure_code = ?,
+                failure_message = ?,
+                retryable_by_client = ?,
+                processing_lease_token = NULL,
+                processing_lease_expires_at = NULL,
+                updated_at = ?
+            WHERE api_key_id = ? AND id = ? AND status = 'processing'
+            "#,
+        )
+        .bind(&failure.failure_code)
+        .bind(&failure.failure_message)
+        .bind(if failure.retryable_by_client { 1 } else { 0 })
+        .bind(format_timestamp(failure.now)?)
+        .bind(&failure.api_key_id)
+        .bind(&failure.job_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let failed = select_job_by_id(&mut tx, &failure.api_key_id, &failure.job_id)
+            .await?
+            .expect("failed job remains visible");
+        tx.commit().await?;
+        Ok(failed)
     }
 
     pub async fn get_voice_note(
@@ -1981,6 +2236,11 @@ fn job_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TranscriptionJobRecord, 
         chunk_count: row.try_get("chunk_count")?,
         audio_format: row.try_get("audio_format")?,
         transcription_model: row.try_get("transcription_model")?,
+        processing_lease_token: row.try_get("processing_lease_token")?,
+        processing_lease_expires_at: row
+            .try_get::<Option<String>, _>("processing_lease_expires_at")?
+            .map(parse_timestamp)
+            .transpose()?,
         chunks_received: optional_i64(&row, "chunks_received")?.unwrap_or(0),
     })
 }

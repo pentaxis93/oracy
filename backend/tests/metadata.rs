@@ -474,6 +474,7 @@ impl MetadataFixture {
         let app = build_router(AppState {
             accepted_audio_dir,
             auth_store: Arc::new(auth_store),
+            openai_api_key: "test-openai-key".to_owned(),
             storage: storage.clone(),
         });
 

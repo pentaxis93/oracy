@@ -22,6 +22,8 @@ pub enum BootstrapError {
     MissingOpenAiApiKeyEnv,
     #[error("{OPENAI_API_KEY_ENV_VAR} must not be empty")]
     EmptyOpenAiApiKeyEnv,
+    #[error("required media tool is unavailable: {tool}")]
+    MissingMediaTool { tool: &'static str },
     #[error("failed to read config file {path}: {source}")]
     ReadConfig {
         path: PathBuf,
@@ -58,11 +60,19 @@ pub async fn load_runtime_from_env() -> Result<(std::net::SocketAddr, AppState),
         return Err(BootstrapError::EmptyOpenAiApiKeyEnv);
     }
 
-    load_runtime_from_path(Path::new(&config_path)).await
+    let openai_api_key = openai_api_key.to_string_lossy().into_owned();
+    load_runtime_from_path_with_openai_key(Path::new(&config_path), openai_api_key).await
 }
 
 pub async fn load_runtime_from_path(
     config_path: &Path,
+) -> Result<(std::net::SocketAddr, AppState), BootstrapError> {
+    load_runtime_from_path_with_openai_key(config_path, "test-openai-key".to_owned()).await
+}
+
+async fn load_runtime_from_path_with_openai_key(
+    config_path: &Path,
+    openai_api_key: String,
 ) -> Result<(std::net::SocketAddr, AppState), BootstrapError> {
     let raw = fs::read_to_string(config_path).map_err(|source| BootstrapError::ReadConfig {
         path: config_path.to_path_buf(),
@@ -87,6 +97,8 @@ pub async fn load_runtime_from_path(
     );
 
     validate_settings(&settings)?;
+    ensure_media_tool("ffmpeg")?;
+    ensure_media_tool("ffprobe")?;
     ensure_writable_directory(&settings.accepted_audio_dir)?;
     let auth_store = AuthStore::try_from_configs(&settings.api_keys)
         .map_err(|error| BootstrapError::InvalidConfiguration(error.to_string()))?;
@@ -95,10 +107,23 @@ pub async fn load_runtime_from_path(
     let state = AppState {
         accepted_audio_dir: settings.accepted_audio_dir.clone(),
         auth_store: Arc::new(auth_store),
+        openai_api_key,
         storage,
     };
 
     Ok((settings.listen_addr, state))
+}
+
+fn ensure_media_tool(tool: &'static str) -> Result<(), BootstrapError> {
+    match std::process::Command::new(tool)
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        _ => Err(BootstrapError::MissingMediaTool { tool }),
+    }
 }
 
 fn resolve_config_relative_path(

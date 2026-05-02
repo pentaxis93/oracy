@@ -99,6 +99,13 @@ carry the credential. The value should not be exposed in version control,
 shared logs, copied configuration, shell history, or diagnostic output produced
 by provisioning and deployment tooling outside the backend.
 
+## Media Tools
+
+The backend uses FFmpeg tooling for audio duration probing and format-safe
+splitting before OpenAI transcription requests. Operators must provide
+`ffmpeg` and `ffprobe` on `PATH` for the backend process. Startup fails if
+either tool is missing or cannot execute.
+
 ## Worked Example
 
 `tesserine/ops` documents one concrete deployment pattern in
