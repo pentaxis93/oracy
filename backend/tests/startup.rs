@@ -198,8 +198,29 @@ async fn startup_rejects_ipv6_wildcard_listener_that_overlaps_ipv4_operator_list
 }
 
 #[tokio::test]
+async fn startup_rejects_ipv4_mapped_ipv6_listener_that_overlaps_ipv4_listener() {
+    assert_listener_pair_rejected("[::ffff:127.0.0.1]:8080", "127.0.0.1:8080").await;
+    assert_listener_pair_rejected("127.0.0.1:8080", "[::ffff:127.0.0.1]:8080").await;
+}
+
+#[tokio::test]
+async fn startup_rejects_ipv4_mapped_ipv6_wildcard_listener_that_overlaps_ipv4_wildcard_listener() {
+    assert_listener_pair_rejected("[::ffff:0.0.0.0]:8080", "0.0.0.0:8080").await;
+}
+
+#[tokio::test]
 async fn startup_accepts_ipv4_wildcard_and_ipv6_concrete_listeners_on_same_port() {
     assert_listener_pair_accepted("0.0.0.0:8080", "[::1]:8080").await;
+}
+
+#[tokio::test]
+async fn startup_accepts_ipv4_mapped_ipv6_and_ipv4_listeners_on_different_ports() {
+    assert_listener_pair_accepted("[::ffff:127.0.0.1]:8080", "127.0.0.1:8081").await;
+}
+
+#[tokio::test]
+async fn startup_accepts_ipv4_mapped_ipv6_and_ipv6_loopback_listeners_on_same_port() {
+    assert_listener_pair_accepted("[::ffff:127.0.0.1]:8080", "[::1]:8080").await;
 }
 
 #[tokio::test]

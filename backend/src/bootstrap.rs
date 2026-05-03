@@ -185,6 +185,9 @@ fn listener_binds_overlap(left: SocketAddr, right: SocketAddr) -> bool {
 }
 
 fn bind_addresses_overlap(left: IpAddr, right: IpAddr) -> bool {
+    let left = normalize_bind_ip(left);
+    let right = normalize_bind_ip(right);
+
     match (left, right) {
         (IpAddr::V4(left), IpAddr::V4(right)) => {
             left.is_unspecified() || right.is_unspecified() || left == right
@@ -194,6 +197,16 @@ fn bind_addresses_overlap(left: IpAddr, right: IpAddr) -> bool {
         }
         (IpAddr::V6(left), IpAddr::V4(_)) => left.is_unspecified(),
         (IpAddr::V4(_), IpAddr::V6(right)) => right.is_unspecified(),
+    }
+}
+
+fn normalize_bind_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(addr) => addr
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(addr)),
     }
 }
 
