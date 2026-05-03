@@ -31,6 +31,8 @@ case-insensitive, and missing or invalid keys return the shared JSON
 
 Operator metrics are exposed separately from the public API listener. Scrape
 `GET /metrics` from `operator_listen_addr`; the default is loopback
-`127.0.0.1:9090`. Startup rejects configurations where `operator_listen_addr`
-overlaps the public `listen_addr` bind set. The public listener does not expose
-`/metrics`.
+`127.0.0.1:9090`. The metric set covers transcription worker outcomes,
+abandoned pre-finalize transcription jobs, retention-cleanup outcomes, and
+retained-audio capacity. Startup rejects configurations where
+`operator_listen_addr` overlaps the public `listen_addr` bind set. The public
+listener does not expose `/metrics`.

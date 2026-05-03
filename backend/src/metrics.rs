@@ -4,7 +4,9 @@ use std::path::Path;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
-use prometheus::{IntCounterVec, IntGauge, Opts, Registry, TextEncoder, core::Collector};
+use prometheus::{
+    IntCounter, IntCounterVec, IntGauge, Opts, Registry, TextEncoder, core::Collector,
+};
 
 use crate::state::AppState;
 
@@ -19,6 +21,7 @@ pub struct Metrics {
     registry: Registry,
     worker_jobs_total: IntCounterVec,
     retention_cleanup_artifacts_total: IntCounterVec,
+    transcription_abandonments_total: IntCounter,
     retained_audio_bytes: IntGauge,
 }
 
@@ -56,6 +59,11 @@ impl Metrics {
             &[CLEANUP_OUTCOME, ARTIFACT],
         )
         .expect("retention cleanup metric definition is valid");
+        let transcription_abandonments_total = IntCounter::new(
+            "oracy_transcription_abandonments_total",
+            "Transcription jobs abandoned before finalize.",
+        )
+        .expect("abandonment metric definition is valid");
         let retained_audio_bytes = IntGauge::new(
             "oracy_retained_audio_bytes",
             "Current retained accepted-audio bytes.",
@@ -64,12 +72,14 @@ impl Metrics {
 
         register(&registry, worker_jobs_total.clone());
         register(&registry, retention_cleanup_artifacts_total.clone());
+        register(&registry, transcription_abandonments_total.clone());
         register(&registry, retained_audio_bytes.clone());
 
         let metrics = Self {
             registry,
             worker_jobs_total,
             retention_cleanup_artifacts_total,
+            transcription_abandonments_total,
             retained_audio_bytes,
         };
         metrics.initialize_series();
@@ -104,6 +114,10 @@ impl Metrics {
         self.retention_cleanup_artifacts_total
             .with_label_values(&["failed", artifact.as_label()])
             .inc();
+    }
+
+    pub fn record_transcription_abandoned(&self) {
+        self.transcription_abandonments_total.inc();
     }
 
     fn refresh_retained_audio_bytes(&self, accepted_audio_dir: &Path) -> io::Result<()> {

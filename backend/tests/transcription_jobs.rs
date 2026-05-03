@@ -2,9 +2,11 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use oracy_backend::abandonment_sweeper::{AbandonmentSweeperConfig, sweep_abandoned_jobs_once};
 use oracy_backend::audio_store::MAX_CHUNK_BYTES;
 use oracy_backend::auth::AuthStore;
 use oracy_backend::config::ApiKeyConfig;
+use oracy_backend::metrics::Metrics;
 use oracy_backend::router::build_router;
 use oracy_backend::state::AppState;
 use oracy_backend::storage::Storage;
@@ -585,6 +587,42 @@ async fn finalize_captures_current_settings_and_nulls_sessions_deleted_after_ope
     assert_eq!(replayed.body["status"], "queued");
 }
 
+#[tokio::test]
+async fn open_replay_returns_original_failed_job_after_abandonment_sweep() {
+    let fixture = TranscriptionJobFixture::new().await;
+    let body = json!({
+        "recorded_at": "2026-04-24T17:59:00Z",
+        "chunk_count": 1,
+        "audio_format": "wav"
+    });
+    let opened = fixture
+        .json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-abandoned-replay"),
+            Some(body.clone()),
+        )
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED);
+    let job_id = opened.body["id"].as_str().expect("job id");
+    fixture.sweep_abandoned_jobs().await;
+
+    let replayed = fixture
+        .json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-abandoned-replay"),
+            Some(body),
+        )
+        .await;
+
+    assert_eq!(replayed.status, StatusCode::OK);
+    assert_eq!(replayed.body["id"], job_id);
+    assert_eq!(replayed.body["status"], "failed");
+    assert_eq!(replayed.body["failure_code"], "submission_abandoned");
+    assert_eq!(replayed.body["retryable_by_client"], true);
+}
+
 struct JsonResponse {
     status: StatusCode,
     body: Value,
@@ -592,6 +630,7 @@ struct JsonResponse {
 
 struct TranscriptionJobFixture {
     _tempdir: TempDir,
+    metrics: Metrics,
     storage: Storage,
     app: axum::Router,
 }
@@ -609,10 +648,11 @@ impl TranscriptionJobFixture {
             key: "alpha-secret".to_owned(),
         }])
         .expect("auth config");
+        let metrics = Metrics::new();
         let app = build_router(AppState {
             accepted_audio_dir: accepted_audio_dir.clone(),
             auth_store: Arc::new(auth_store),
-            metrics: oracy_backend::metrics::Metrics::new(),
+            metrics: metrics.clone(),
             operator_listen_addr: "127.0.0.1:9090".parse().expect("operator listen addr"),
             openai_api_key: "test-openai-key".to_owned(),
             storage: storage.clone(),
@@ -620,6 +660,7 @@ impl TranscriptionJobFixture {
 
         Self {
             _tempdir: tempdir,
+            metrics,
             storage,
             app,
         }
@@ -769,6 +810,20 @@ impl TranscriptionJobFixture {
         .fetch_one(self.storage.pool())
         .await
         .expect("job count")
+    }
+
+    async fn sweep_abandoned_jobs(&self) {
+        sweep_abandoned_jobs_once(
+            &self.storage,
+            &self.metrics,
+            AbandonmentSweeperConfig {
+                window: time::Duration::ZERO,
+                interval: std::time::Duration::from_secs(300),
+            },
+            time::OffsetDateTime::now_utc() + time::Duration::seconds(1),
+        )
+        .await
+        .expect("sweep abandoned jobs");
     }
 
     async fn request(

@@ -785,6 +785,121 @@ async fn abandonment_candidates_are_accepting_chunks_jobs_created_before_the_cut
 }
 
 #[tokio::test]
+async fn accepting_chunks_jobs_can_be_abandoned_once_with_terminal_failure_metadata() {
+    let (_tempdir, storage) = storage().await;
+    let job = opened_job_at(
+        &storage,
+        "owner-a",
+        "attempt-abandon-once",
+        datetime!(2026-04-24 17:00:00 UTC),
+    )
+    .await;
+
+    let abandoned = storage
+        .abandon_accepting_chunks_job(
+            "owner-a",
+            &job.id,
+            datetime!(2026-04-25 17:00:00 UTC),
+            datetime!(2026-04-25 18:00:00 UTC),
+        )
+        .await
+        .expect("abandon job")
+        .expect("job abandoned");
+    assert_eq!(abandoned.status, "failed");
+    assert_eq!(
+        abandoned.failure_code.as_deref(),
+        Some("submission_abandoned")
+    );
+    assert_eq!(abandoned.retryable_by_client, Some(true));
+    assert!(
+        abandoned
+            .failure_message
+            .as_deref()
+            .is_some_and(|message| { message.contains("abandonment window") })
+    );
+    assert_eq!(abandoned.updated_at, datetime!(2026-04-25 18:00:00 UTC));
+
+    let duplicate = storage
+        .abandon_accepting_chunks_job(
+            "owner-a",
+            &job.id,
+            datetime!(2026-04-25 17:01:00 UTC),
+            datetime!(2026-04-25 18:01:00 UTC),
+        )
+        .await
+        .expect("duplicate abandon");
+    assert_eq!(duplicate, None);
+}
+
+#[tokio::test]
+async fn abandonment_transition_requires_created_at_before_cutoff() {
+    let (_tempdir, storage) = storage().await;
+    let recent = opened_job_at(
+        &storage,
+        "owner-a",
+        "attempt-abandon-recent",
+        datetime!(2026-04-25 17:30:00 UTC),
+    )
+    .await;
+
+    let outcome = storage
+        .abandon_accepting_chunks_job(
+            "owner-a",
+            &recent.id,
+            datetime!(2026-04-25 17:00:00 UTC),
+            datetime!(2026-04-25 18:00:00 UTC),
+        )
+        .await
+        .expect("abandon recent job");
+
+    assert_eq!(outcome, None);
+    assert_eq!(
+        storage
+            .get_job("owner-a", &recent.id)
+            .await
+            .expect("get job")
+            .expect("job exists")
+            .status,
+        "accepting_chunks"
+    );
+}
+
+#[tokio::test]
+async fn abandoned_jobs_remain_addressable_by_idempotency_replay() {
+    let (_tempdir, storage) = storage().await;
+    let job = opened_job_at(
+        &storage,
+        "owner-a",
+        "attempt-abandoned-replay",
+        datetime!(2026-04-24 17:00:00 UTC),
+    )
+    .await;
+    storage
+        .abandon_accepting_chunks_job(
+            "owner-a",
+            &job.id,
+            datetime!(2026-04-25 17:00:00 UTC),
+            datetime!(2026-04-25 18:00:00 UTC),
+        )
+        .await
+        .expect("abandon job")
+        .expect("job abandoned");
+
+    let replay = storage
+        .open_job(new_open_job("owner-a", "attempt-abandoned-replay"))
+        .await
+        .expect("replay open");
+
+    assert!(matches!(
+        replay,
+        OpenJobOutcome::ReplayedFinalized(replayed)
+            if replayed.id == job.id
+                && replayed.status == "failed"
+                && replayed.failure_code.as_deref() == Some("submission_abandoned")
+    ));
+}
+
+#[tokio::test]
 async fn racing_same_hash_chunk_push_resolves_as_idempotent_replay() {
     let (_tempdir, storage) = storage().await;
     let job = opened_job(&storage, "owner-a", "attempt-racing-same-chunk").await;

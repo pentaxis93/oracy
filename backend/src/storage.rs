@@ -797,6 +797,52 @@ impl Storage {
         rows.into_iter().map(job_from_row).collect()
     }
 
+    pub async fn abandon_accepting_chunks_job(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+        cutoff: OffsetDateTime,
+        now: OffsetDateTime,
+    ) -> Result<Option<TranscriptionJobRecord>, StorageError> {
+        let mut tx = self.begin_immediate_tx().await?;
+        let cutoff = format_timestamp(cutoff)?;
+        let now = format_timestamp(now)?;
+        let result = sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET status = 'failed',
+                next_attempt_at = NULL,
+                failure_code = 'submission_abandoned',
+                failure_message = 'Submission exceeded the abandonment window before finalize.',
+                retryable_by_client = 1,
+                processing_lease_token = NULL,
+                processing_lease_expires_at = NULL,
+                updated_at = ?
+            WHERE api_key_id = ?
+                AND id = ?
+                AND status = 'accepting_chunks'
+                AND created_at < ?
+            "#,
+        )
+        .bind(&now)
+        .bind(api_key_id)
+        .bind(job_id)
+        .bind(&cutoff)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            tx.commit().await?;
+            return Ok(None);
+        }
+
+        let abandoned = select_job_by_id(&mut tx, api_key_id, job_id)
+            .await?
+            .expect("abandoned job remains visible");
+        tx.commit().await?;
+        Ok(Some(abandoned))
+    }
+
     pub async fn finalize_job(
         &self,
         api_key_id: &str,
