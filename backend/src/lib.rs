@@ -10,6 +10,7 @@ pub mod errors;
 pub mod json;
 pub mod metadata;
 pub mod metrics;
+pub mod retention_cleanup;
 pub mod router;
 pub mod settings;
 pub mod state;

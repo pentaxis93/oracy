@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use oracy_backend::bootstrap::load_runtime_from_env;
+use oracy_backend::retention_cleanup::{RetentionCleanupConfig, run_retention_cleanup_loop};
 use oracy_backend::router::{build_operator_router, build_router};
 use oracy_backend::transcription_worker::{
     FfmpegAudioSlicer, FfprobeDurationProbe, OpenAiTranscriptionEngine, WorkerConfig,
@@ -27,8 +28,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         state.openai_api_key.clone(),
         FfmpegAudioSlicer::openai_limit(),
     );
+    tokio::spawn(run_retention_cleanup_loop(
+        state.storage.clone(),
+        state.accepted_audio_dir.clone(),
+        state.metrics.clone(),
+        RetentionCleanupConfig::default(),
+    ));
     tokio::spawn(run_worker_loop(
         worker_storage,
+        state.accepted_audio_dir.clone(),
         worker_engine,
         FfprobeDurationProbe,
         WorkerConfig::default(),
