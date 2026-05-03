@@ -1,4 +1,5 @@
 use std::fs;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -53,7 +54,7 @@ pub enum BootstrapError {
     Storage(#[from] StorageError),
 }
 
-pub async fn load_runtime_from_env() -> Result<(std::net::SocketAddr, AppState), BootstrapError> {
+pub async fn load_runtime_from_env() -> Result<(SocketAddr, AppState), BootstrapError> {
     let config_path = std::env::var_os(CONFIG_ENV_VAR).ok_or(BootstrapError::MissingConfigEnv)?;
     let openai_api_key =
         std::env::var_os(OPENAI_API_KEY_ENV_VAR).ok_or(BootstrapError::MissingOpenAiApiKeyEnv)?;
@@ -67,7 +68,7 @@ pub async fn load_runtime_from_env() -> Result<(std::net::SocketAddr, AppState),
 
 pub async fn load_runtime_from_path(
     config_path: &Path,
-) -> Result<(std::net::SocketAddr, AppState), BootstrapError> {
+) -> Result<(SocketAddr, AppState), BootstrapError> {
     load_runtime_from_path_with_openai_key(config_path, "test-openai-key".to_owned()).await
 }
 
@@ -171,12 +172,29 @@ fn validate_settings(settings: &Settings) -> Result<(), BootstrapError> {
             "at least one api_keys entry is required".to_owned(),
         ));
     }
-    if settings.listen_addr == settings.operator_listen_addr {
+    if listener_binds_overlap(settings.listen_addr, settings.operator_listen_addr) {
         return Err(BootstrapError::InvalidConfiguration(
-            "operator_listen_addr must differ from listen_addr".to_owned(),
+            "operator_listen_addr must not overlap listen_addr".to_owned(),
         ));
     }
     Ok(())
+}
+
+fn listener_binds_overlap(left: SocketAddr, right: SocketAddr) -> bool {
+    left.port() == right.port() && bind_addresses_overlap(left.ip(), right.ip())
+}
+
+fn bind_addresses_overlap(left: IpAddr, right: IpAddr) -> bool {
+    match (left, right) {
+        (IpAddr::V4(left), IpAddr::V4(right)) => {
+            left.is_unspecified() || right.is_unspecified() || left == right
+        }
+        (IpAddr::V6(left), IpAddr::V6(right)) => {
+            left.is_unspecified() || right.is_unspecified() || left == right
+        }
+        (IpAddr::V6(left), IpAddr::V4(_)) => left.is_unspecified(),
+        (IpAddr::V4(_), IpAddr::V6(right)) => right.is_unspecified(),
+    }
 }
 
 fn ensure_writable_directory(path: &Path) -> Result<(), BootstrapError> {

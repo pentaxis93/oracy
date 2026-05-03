@@ -80,7 +80,7 @@ required, not optional.
   public API listener.
 - The default operator listener is `127.0.0.1:9090`; operators may
   override it with `operator_listen_addr`.
-- `operator_listen_addr` must not equal the public `listen_addr`.
+- `operator_listen_addr` must not overlap the public `listen_addr` bind set.
 - `GET /metrics` on the operator listener returns Prometheus text
   exposition format version `0.0.4`.
 - `/metrics` is not part of the public API surface and must not be

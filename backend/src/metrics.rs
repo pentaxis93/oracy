@@ -110,6 +110,8 @@ impl Metrics {
         // v0.1.0 favors scrape-time filesystem truth over maintaining a second
         // byte ledger. If scrape latency matters later, this metric can be
         // moved behind a cached walk without changing the exposition contract.
+        // Concurrent mutation during the walk is normal; missing entries are
+        // skipped silently.
         self.retained_audio_bytes
             .set(retained_audio_bytes(accepted_audio_dir)?);
         Ok(())
@@ -210,16 +212,142 @@ where
         .expect("metric registration is valid");
 }
 
-fn retained_audio_bytes(path: &Path) -> io::Result<i64> {
-    let mut total = 0_i64;
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedAudioEntryMetadata {
+    Directory,
+    File { len: u64 },
+    Other,
+}
+
+trait RetainedAudioFilesystem {
+    fn read_dir_paths(&self, path: &Path) -> io::Result<Vec<std::path::PathBuf>>;
+
+    fn metadata(&self, path: &Path) -> io::Result<RetainedAudioEntryMetadata>;
+}
+
+struct StdRetainedAudioFilesystem;
+
+impl RetainedAudioFilesystem for StdRetainedAudioFilesystem {
+    fn read_dir_paths(&self, path: &Path) -> io::Result<Vec<std::path::PathBuf>> {
+        std::fs::read_dir(path)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect()
+    }
+
+    fn metadata(&self, path: &Path) -> io::Result<RetainedAudioEntryMetadata> {
+        let metadata = std::fs::symlink_metadata(path)?;
         if metadata.is_dir() {
-            total += retained_audio_bytes(&entry.path())?;
+            Ok(RetainedAudioEntryMetadata::Directory)
         } else if metadata.is_file() {
-            total += metadata.len() as i64;
+            Ok(RetainedAudioEntryMetadata::File {
+                len: metadata.len(),
+            })
+        } else {
+            Ok(RetainedAudioEntryMetadata::Other)
         }
     }
+}
+
+fn retained_audio_bytes(path: &Path) -> io::Result<i64> {
+    retained_audio_bytes_in(path, &StdRetainedAudioFilesystem)
+}
+
+fn retained_audio_bytes_in(
+    path: &Path,
+    filesystem: &impl RetainedAudioFilesystem,
+) -> io::Result<i64> {
+    let mut total = 0_i64;
+    for entry_path in filesystem.read_dir_paths(path)? {
+        total += retained_audio_entry_bytes_in(&entry_path, filesystem)?;
+    }
     Ok(total)
+}
+
+#[cfg(test)]
+fn retained_audio_entry_bytes(path: &Path) -> io::Result<i64> {
+    retained_audio_entry_bytes_in(path, &StdRetainedAudioFilesystem)
+}
+
+fn retained_audio_entry_bytes_in(
+    path: &Path,
+    filesystem: &impl RetainedAudioFilesystem,
+) -> io::Result<i64> {
+    let metadata = match filesystem.metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+
+    match metadata {
+        RetainedAudioEntryMetadata::Directory => match retained_audio_bytes_in(path, filesystem) {
+            Ok(bytes) => Ok(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error),
+        },
+        RetainedAudioEntryMetadata::File { len } => Ok(len as i64),
+        RetainedAudioEntryMetadata::Other => Ok(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    use super::{
+        RetainedAudioEntryMetadata, RetainedAudioFilesystem, retained_audio_bytes_in,
+        retained_audio_entry_bytes,
+    };
+
+    struct MockRetainedAudioFilesystem {
+        root: PathBuf,
+        remaining: PathBuf,
+        vanished: PathBuf,
+    }
+
+    impl RetainedAudioFilesystem for MockRetainedAudioFilesystem {
+        fn read_dir_paths(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+            if path == self.root {
+                Ok(vec![self.remaining.clone(), self.vanished.clone()])
+            } else {
+                panic!("unexpected read_dir path: {}", path.display());
+            }
+        }
+
+        fn metadata(&self, path: &Path) -> io::Result<RetainedAudioEntryMetadata> {
+            if path == self.remaining {
+                Ok(RetainedAudioEntryMetadata::File { len: 5 })
+            } else if path == self.vanished {
+                Err(io::Error::new(io::ErrorKind::NotFound, "vanished"))
+            } else {
+                panic!("unexpected metadata path: {}", path.display());
+            }
+        }
+    }
+
+    #[test]
+    fn retained_audio_entry_bytes_skips_entries_removed_before_metadata_read() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let vanished = tempdir.path().join("vanished.wav");
+
+        let bytes = retained_audio_entry_bytes(&vanished).expect("vanished entry is ignored");
+
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn retained_audio_bytes_skips_entries_removed_after_directory_snapshot() {
+        let root = PathBuf::from("/accepted-audio");
+        let remaining = root.join("remaining.wav");
+        let vanished = root.join("vanished.wav");
+        let filesystem = MockRetainedAudioFilesystem {
+            root: root.clone(),
+            remaining,
+            vanished,
+        };
+
+        let bytes = retained_audio_bytes_in(&root, &filesystem).expect("walk should succeed");
+
+        assert_eq!(bytes, 5);
+    }
 }

@@ -118,7 +118,7 @@ Operators must provision the operator listener with these properties:
 - The default address is `127.0.0.1:9090`.
 - `operator_listen_addr` may override the default when the scraper runs
   outside the backend host namespace.
-- `operator_listen_addr` must differ from public `listen_addr`.
+- `operator_listen_addr` must not overlap the public `listen_addr` bind set.
 - The scrape path is `GET /metrics`.
 - The exposition format is Prometheus text format version `0.0.4`.
 - The recommended scrape interval is `15s`.

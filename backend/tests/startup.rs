@@ -179,13 +179,74 @@ key = "key-one"
 
 #[tokio::test]
 async fn startup_rejects_operator_listener_that_collides_with_public_listener() {
+    assert_listener_pair_rejected("127.0.0.1:8088", "127.0.0.1:8088").await;
+}
+
+#[tokio::test]
+async fn startup_rejects_ipv4_wildcard_listener_that_overlaps_concrete_operator_listener() {
+    assert_listener_pair_rejected("0.0.0.0:8080", "127.0.0.1:8080").await;
+}
+
+#[tokio::test]
+async fn startup_rejects_ipv6_wildcard_listener_that_overlaps_concrete_operator_listener() {
+    assert_listener_pair_rejected("[::]:8080", "[::1]:8080").await;
+}
+
+#[tokio::test]
+async fn startup_rejects_ipv6_wildcard_listener_that_overlaps_ipv4_operator_listener() {
+    assert_listener_pair_rejected("[::]:8080", "127.0.0.1:8080").await;
+}
+
+#[tokio::test]
+async fn startup_accepts_ipv4_wildcard_and_ipv6_concrete_listeners_on_same_port() {
+    assert_listener_pair_accepted("0.0.0.0:8080", "[::1]:8080").await;
+}
+
+#[tokio::test]
+async fn startup_accepts_loopback_listeners_on_different_ports() {
+    assert_listener_pair_accepted("127.0.0.1:8080", "127.0.0.1:8081").await;
+}
+
+#[tokio::test]
+async fn startup_accepts_wildcard_listeners_on_different_ports() {
+    assert_listener_pair_accepted("0.0.0.0:8080", "0.0.0.0:8081").await;
+}
+
+async fn assert_listener_pair_rejected(listen_addr: &str, operator_listen_addr: &str) {
     let tempdir = TempDir::new().expect("tempdir");
-    let config_path = write_config(
-        &tempdir,
+    let config_path = write_listener_config(&tempdir, listen_addr, operator_listen_addr);
+
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("overlapping public and operator listeners should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("operator_listen_addr must not overlap listen_addr")
+    );
+}
+
+async fn assert_listener_pair_accepted(listen_addr: &str, operator_listen_addr: &str) {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_listener_config(&tempdir, listen_addr, operator_listen_addr);
+
+    load_runtime_from_path(&config_path)
+        .await
+        .expect("non-overlapping public and operator listeners should be accepted");
+}
+
+fn write_listener_config(
+    tempdir: &TempDir,
+    listen_addr: &str,
+    operator_listen_addr: &str,
+) -> std::path::PathBuf {
+    write_config(
+        tempdir,
         format!(
             r#"
-listen_addr = "127.0.0.1:8088"
-operator_listen_addr = "127.0.0.1:8088"
+listen_addr = "{listen_addr}"
+operator_listen_addr = "{operator_listen_addr}"
 accepted_audio_dir = "{}"
 
 [[api_keys]]
@@ -194,17 +255,7 @@ key = "key-one"
 "#,
             tempdir.path().display()
         ),
-    );
-
-    let error = load_runtime_from_path(&config_path)
-        .await
-        .expect_err("colliding public and operator listeners should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("operator_listen_addr must differ from listen_addr")
-    );
+    )
 }
 
 #[tokio::test]
