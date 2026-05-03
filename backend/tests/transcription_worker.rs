@@ -241,7 +241,7 @@ async fn worker_releases_chunks_and_composed_audio_after_failure() {
     assert_eq!(failed.chunks_received, 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn retained_terminal_audio_is_released_by_restart_sweep() {
     let fixture = WorkerFixture::new().await;
     let job = fixture
@@ -430,7 +430,7 @@ async fn overlapping_cleaners_record_success_once_for_one_retained_artifact() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn cleanup_failures_retry_without_changing_terminal_state_and_log_attempt_count() {
     let fixture = WorkerFixture::new().await;
     let job = fixture
