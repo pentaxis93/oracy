@@ -168,7 +168,7 @@ pub async fn patch_voice_note(
         .await
         .map_err(|_| ApiError::internal("Failed to update voice note."))?
     {
-        UpdateVoiceNoteTextOutcome::Updated(record) => record,
+        UpdateVoiceNoteTextOutcome::Updated(record) => *record,
         UpdateVoiceNoteTextOutcome::NotFound => {
             return Err(ApiError::not_found("Voice note not found."));
         }

@@ -130,7 +130,7 @@ pub enum ReplaceVoiceNoteTagsOutcome {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UpdateVoiceNoteTextOutcome {
-    Updated(VoiceNoteRecord),
+    Updated(Box<VoiceNoteRecord>),
     NotFound,
 }
 
@@ -1664,7 +1664,7 @@ impl Storage {
         let updated = voice_note_from_row(row)?;
         tx.commit().await?;
 
-        Ok(UpdateVoiceNoteTextOutcome::Updated(updated))
+        Ok(UpdateVoiceNoteTextOutcome::Updated(Box::new(updated)))
     }
 
     pub async fn list_voice_notes(
