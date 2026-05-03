@@ -106,6 +106,28 @@ splitting before OpenAI transcription requests. Operators must provide
 `ffmpeg` and `ffprobe` on `PATH` for the backend process. Startup fails if
 either tool is missing or cannot execute.
 
+## Operator Metrics
+
+The backend exposes Prometheus-compatible metrics from an operator listener
+separate from the public API listener.
+
+Operators must provision the operator listener with these properties:
+
+- The listener is reachable by the Prometheus scraper.
+- The listener is not exposed as an internet-facing public API surface.
+- The default address is `127.0.0.1:9090`.
+- `operator_listen_addr` may override the default when the scraper runs
+  outside the backend host namespace.
+- `operator_listen_addr` must not overlap the public `listen_addr` bind set.
+- The scrape path is `GET /metrics`.
+- The exposition format is Prometheus text format version `0.0.4`.
+- The recommended scrape interval is `15s`.
+
+Access control for v0.1.0 is network placement. The backend does not require
+an application-level scrape token for `/metrics`; operators protect the surface
+through loopback binding, firewall policy, reverse-proxy policy, or equivalent
+deployment controls.
+
 ## Worked Example
 
 `tesserine/ops` documents one concrete deployment pattern in

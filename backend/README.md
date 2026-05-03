@@ -8,6 +8,7 @@ Run the service with `ORACY_CONFIG` set to a TOML configuration file and
 
 ```toml
 listen_addr = "127.0.0.1:8080"
+operator_listen_addr = "127.0.0.1:9090"
 accepted_audio_dir = "/var/lib/oracy/accepted-audio"
 database_path = "/var/lib/oracy/oracy.sqlite"
 
@@ -27,3 +28,9 @@ paths resolve from the real configuration file directory.
 Every API route requires `Authorization: Bearer <api_key>`. The bearer scheme is
 case-insensitive, and missing or invalid keys return the shared JSON
 `ErrorResponse` with `401 Unauthorized`.
+
+Operator metrics are exposed separately from the public API listener. Scrape
+`GET /metrics` from `operator_listen_addr`; the default is loopback
+`127.0.0.1:9090`. Startup rejects configurations where `operator_listen_addr`
+overlaps the public `listen_addr` bind set. The public listener does not expose
+`/metrics`.

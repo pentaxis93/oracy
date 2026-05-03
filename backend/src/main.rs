@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use oracy_backend::bootstrap::load_runtime_from_env;
-use oracy_backend::router::build_router;
+use oracy_backend::router::{build_operator_router, build_router};
 use oracy_backend::transcription_worker::{
     FfmpegAudioSlicer, FfprobeDurationProbe, OpenAiTranscriptionEngine, WorkerConfig,
     run_worker_loop,
@@ -20,6 +20,7 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (listen_addr, state) = load_runtime_from_env().await?;
+    let operator_listen_addr = state.operator_listen_addr;
     let worker_storage = state.storage.clone();
     let worker_engine = OpenAiTranscriptionEngine::new(
         "https://api.openai.com".to_owned(),
@@ -31,8 +32,28 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         worker_engine,
         FfprobeDurationProbe,
         WorkerConfig::default(),
+        state.metrics.clone(),
     ));
-    serve(listen_addr, build_router(state)).await
+    serve_public_and_operator(
+        listen_addr,
+        build_router(state.clone()),
+        operator_listen_addr,
+        build_operator_router(state),
+    )
+    .await
+}
+
+async fn serve_public_and_operator(
+    listen_addr: SocketAddr,
+    app: axum::Router,
+    operator_listen_addr: SocketAddr,
+    operator_app: axum::Router,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tokio::try_join!(
+        serve(listen_addr, app),
+        serve(operator_listen_addr, operator_app),
+    )?;
+    Ok(())
 }
 
 async fn serve(

@@ -10,6 +10,7 @@ use time::{Duration, OffsetDateTime};
 use tokio::process::Command;
 use ulid::Ulid;
 
+use crate::metrics::Metrics;
 use crate::storage::{
     NewSegment, NewVoiceNote, NewVoiceNoteVersion, RetryOutcome, Storage, StorageError,
     TerminalJobFailure, TransientJobFailure, VoiceNoteMaterialization,
@@ -527,6 +528,7 @@ pub async fn process_one_available_job<E, D>(
     engine: &E,
     duration_probe: &D,
     config: WorkerConfig,
+    metrics: &Metrics,
 ) -> Result<ProcessOutcome, WorkerError>
 where
     E: TranscriptionEngine,
@@ -578,6 +580,7 @@ where
                     now: OffsetDateTime::now_utc(),
                 })
                 .await?;
+            metrics.record_worker_failed("audio_invalid");
             return Ok(ProcessOutcome::Failed { job_id: job.id });
         }
     };
@@ -588,6 +591,7 @@ where
             message,
             retry_after_seconds,
         }) => {
+            let metric_failure_code = failure_code.clone();
             let now = OffsetDateTime::now_utc();
             let next_attempt_at = now + Duration::seconds(retry_after_seconds.unwrap_or(60).max(1));
             let outcome = storage
@@ -603,15 +607,20 @@ where
                 .await?;
             return match outcome {
                 RetryOutcome::RetryWaiting(job) => {
+                    metrics.record_worker_retry_waiting(&metric_failure_code);
                     Ok(ProcessOutcome::RetryWaiting { job_id: job.id })
                 }
-                RetryOutcome::Failed(job) => Ok(ProcessOutcome::Failed { job_id: job.id }),
+                RetryOutcome::Failed(job) => {
+                    metrics.record_worker_failed(&metric_failure_code);
+                    Ok(ProcessOutcome::Failed { job_id: job.id })
+                }
             };
         }
         Err(EngineFailure::Terminal {
             failure_code,
             message,
         }) => {
+            let metric_failure_code = failure_code.clone();
             storage
                 .fail_leased_job(TerminalJobFailure {
                     api_key_id: job.api_key_id.clone(),
@@ -623,6 +632,7 @@ where
                     now: OffsetDateTime::now_utc(),
                 })
                 .await?;
+            metrics.record_worker_failed(&metric_failure_code);
             return Ok(ProcessOutcome::Failed { job_id: job.id });
         }
     };
@@ -668,6 +678,7 @@ where
         )
         .await?;
 
+    metrics.record_worker_succeeded();
     Ok(ProcessOutcome::Succeeded { job_id: job.id })
 }
 
@@ -676,12 +687,21 @@ pub async fn run_worker_loop<E, D>(
     engine: E,
     duration_probe: D,
     config: WorkerConfig,
+    metrics: Metrics,
 ) where
     E: TranscriptionEngine + Sync,
     D: DurationProbe + Sync,
 {
     loop {
-        match process_one_available_job(&storage, &engine, &duration_probe, config.clone()).await {
+        match process_one_available_job(
+            &storage,
+            &engine,
+            &duration_probe,
+            config.clone(),
+            &metrics,
+        )
+        .await
+        {
             Ok(ProcessOutcome::NoJob) => tokio::time::sleep(config.idle_sleep).await,
             Ok(_) => {}
             Err(error) => {

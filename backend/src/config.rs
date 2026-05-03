@@ -9,11 +9,19 @@ fn default_listen_addr() -> SocketAddr {
         .expect("default listen addr is valid")
 }
 
+fn default_operator_listen_addr() -> SocketAddr {
+    "127.0.0.1:9090"
+        .parse()
+        .expect("default operator listen addr is valid")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     #[serde(default = "default_listen_addr")]
     pub listen_addr: SocketAddr,
+    #[serde(default = "default_operator_listen_addr")]
+    pub operator_listen_addr: SocketAddr,
     pub accepted_audio_dir: PathBuf,
     pub database_path: PathBuf,
     pub api_keys: Vec<ApiKeyConfig>,

@@ -74,6 +74,35 @@ required, not optional.
   shell history, and diagnostics produced by deployment tooling
   outside the backend.
 
+### Operator Metrics
+
+- The backend exposes operator metrics on a listener separate from the
+  public API listener.
+- The default operator listener is `127.0.0.1:9090`; operators may
+  override it with `operator_listen_addr`.
+- `operator_listen_addr` must not overlap the public `listen_addr` bind set.
+- `GET /metrics` on the operator listener returns Prometheus text
+  exposition format version `0.0.4`.
+- `/metrics` is not part of the public API surface and must not be
+  reachable through the public listener.
+- v0.1.0 operator metrics rely on network placement as their access
+  boundary. The backend does not require a separate metrics scrape
+  token.
+- Metric names use the Oracy product prefix and Prometheus naming
+  rules: counters end in `_total`, byte gauges end in `_bytes`, and
+  base units are encoded in the metric name when units exist.
+- Metric label values must be bounded enumerations. Safe dimensions
+  include outcome, failure class, artifact type, and documented engine
+  identifiers. Job IDs, API key IDs, idempotency keys, filesystem
+  paths, user content, and free-form error text must not appear as
+  labels.
+- The initial metric set includes transcription-worker job counters
+  for success, retry, and terminal failure outcomes; retention-cleanup
+  artifact counters for success and failure outcomes; and a retained-
+  audio byte gauge for current accepted-audio capacity tracking.
+- Every metric exposed by `/metrics` carries a `# HELP` line and a
+  `# TYPE` line.
+
 ## Constraints
 
 ### Authentication and Ownership
@@ -655,6 +684,9 @@ following are true:
 - Audio retention semantics are explicit: chunks and composed audio
   are released promptly once the originating job reaches `succeeded`
   or `failed`.
+- Operator metrics are exposed only on the operator listener, use the
+  documented naming and cardinality policy, and include the initial
+  worker, retention-cleanup, and retained-audio capacity metrics.
 - Supported audio formats, per-chunk size ceiling, language-hint
   semantics, pagination shape, and error-envelope semantics are
   named concretely.

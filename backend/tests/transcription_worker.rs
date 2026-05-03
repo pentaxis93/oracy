@@ -2,10 +2,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::Multipart;
+use axum::http::Request;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
+use oracy_backend::auth::AuthStore;
+use oracy_backend::config::ApiKeyConfig;
+use oracy_backend::metrics::Metrics;
+use oracy_backend::router::build_operator_router;
+use oracy_backend::state::AppState;
 use oracy_backend::storage::{AcceptJobOutcome, NewTranscriptionJob, Storage};
 use oracy_backend::transcription_worker::{
     AudioSliceError, AudioSlicer, DurationProbe, DurationProbeError, EngineFailure,
@@ -17,6 +24,7 @@ use tempfile::TempDir;
 use time::Duration as TimeDuration;
 use time::OffsetDateTime;
 use time::macros::datetime;
+use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn worker_materializes_a_queued_job_with_a_fake_engine() {
@@ -25,10 +33,15 @@ async fn worker_materializes_a_queued_job_with_a_fake_engine() {
     let engine = FakeEngine::success("transcribed text");
     let probe = FakeDurationProbe::success(1_480);
 
-    let outcome =
-        process_one_available_job(&fixture.storage, &engine, &probe, WorkerConfig::test())
-            .await
-            .expect("process one job");
+    let outcome = process_one_available_job(
+        &fixture.storage,
+        &engine,
+        &probe,
+        WorkerConfig::test(),
+        &Metrics::new(),
+    )
+    .await
+    .expect("process one job");
 
     assert_eq!(
         outcome,
@@ -80,6 +93,99 @@ async fn worker_materializes_a_queued_job_with_a_fake_engine() {
 }
 
 #[tokio::test]
+async fn worker_success_increments_operator_success_counter() {
+    let fixture = WorkerFixture::new().await;
+    fixture
+        .create_queued_job("attempt-metrics", b"hello audio")
+        .await;
+    let engine = FakeEngine::success("transcribed text");
+    let probe = FakeDurationProbe::success(1_480);
+    let metrics = Metrics::new();
+
+    process_one_available_job(
+        &fixture.storage,
+        &engine,
+        &probe,
+        WorkerConfig::test(),
+        &metrics,
+    )
+    .await
+    .expect("process one job");
+
+    let body = operator_metrics_text(&fixture, metrics).await;
+
+    assert_metric_sample_has_value(
+        &body,
+        "oracy_transcription_worker_jobs_total",
+        &[r#"outcome="succeeded""#, r#"failure_class="none""#],
+        "1",
+    );
+}
+
+#[tokio::test]
+async fn worker_retry_increments_operator_retry_counter_with_failure_class() {
+    let fixture = WorkerFixture::new().await;
+    fixture
+        .create_queued_job("attempt-metrics-retry", b"hello audio")
+        .await;
+    let engine = FakeEngine::transient("engine_error", "temporary engine failure", Some(30));
+    let probe = FakeDurationProbe::success(1_480);
+    let metrics = Metrics::new();
+
+    process_one_available_job(
+        &fixture.storage,
+        &engine,
+        &probe,
+        WorkerConfig::test(),
+        &metrics,
+    )
+    .await
+    .expect("process one job");
+
+    let body = operator_metrics_text(&fixture, metrics).await;
+
+    assert_metric_sample_has_value(
+        &body,
+        "oracy_transcription_worker_jobs_total",
+        &[
+            r#"outcome="retry_waiting""#,
+            r#"failure_class="engine_error""#,
+        ],
+        "1",
+    );
+}
+
+#[tokio::test]
+async fn worker_terminal_failure_increments_operator_failure_counter_with_failure_class() {
+    let fixture = WorkerFixture::new().await;
+    fixture
+        .create_queued_job("attempt-metrics-failure", b"not audio")
+        .await;
+    let engine = FakeEngine::success("unused");
+    let probe = FakeDurationProbe::invalid_audio();
+    let metrics = Metrics::new();
+
+    process_one_available_job(
+        &fixture.storage,
+        &engine,
+        &probe,
+        WorkerConfig::test(),
+        &metrics,
+    )
+    .await
+    .expect("process one job");
+
+    let body = operator_metrics_text(&fixture, metrics).await;
+
+    assert_metric_sample_has_value(
+        &body,
+        "oracy_transcription_worker_jobs_total",
+        &[r#"outcome="failed""#, r#"failure_class="audio_invalid""#],
+        "1",
+    );
+}
+
+#[tokio::test]
 async fn worker_marks_duration_probe_failure_as_audio_invalid() {
     let fixture = WorkerFixture::new().await;
     let job = fixture
@@ -88,10 +194,15 @@ async fn worker_marks_duration_probe_failure_as_audio_invalid() {
     let engine = FakeEngine::success("unused");
     let probe = FakeDurationProbe::invalid_audio();
 
-    let outcome =
-        process_one_available_job(&fixture.storage, &engine, &probe, WorkerConfig::test())
-            .await
-            .expect("process one job");
+    let outcome = process_one_available_job(
+        &fixture.storage,
+        &engine,
+        &probe,
+        WorkerConfig::test(),
+        &Metrics::new(),
+    )
+    .await
+    .expect("process one job");
 
     assert_eq!(
         outcome,
@@ -120,10 +231,15 @@ async fn worker_routes_transient_engine_failure_to_retry_waiting() {
     let engine = FakeEngine::transient("engine_error", "temporary engine failure", Some(30));
     let probe = FakeDurationProbe::success(1_480);
 
-    let outcome =
-        process_one_available_job(&fixture.storage, &engine, &probe, WorkerConfig::test())
-            .await
-            .expect("process one job");
+    let outcome = process_one_available_job(
+        &fixture.storage,
+        &engine,
+        &probe,
+        WorkerConfig::test(),
+        &Metrics::new(),
+    )
+    .await
+    .expect("process one job");
 
     assert_eq!(
         outcome,
@@ -163,7 +279,13 @@ async fn stalled_openai_request_records_transient_timeout_and_worker_processes_n
 
     let first = tokio::time::timeout(
         Duration::from_secs(1),
-        process_one_available_job(&fixture.storage, &engine, &probe, WorkerConfig::test()),
+        process_one_available_job(
+            &fixture.storage,
+            &engine,
+            &probe,
+            WorkerConfig::test(),
+            &Metrics::new(),
+        ),
     )
     .await
     .expect("stalled request should be bounded")
@@ -185,7 +307,13 @@ async fn stalled_openai_request_records_transient_timeout_and_worker_processes_n
 
     let second = tokio::time::timeout(
         Duration::from_secs(1),
-        process_one_available_job(&fixture.storage, &engine, &probe, WorkerConfig::test()),
+        process_one_available_job(
+            &fixture.storage,
+            &engine,
+            &probe,
+            WorkerConfig::test(),
+            &Metrics::new(),
+        ),
     )
     .await
     .expect("worker should remain available after timeout")
@@ -232,7 +360,14 @@ async fn worker_renews_processing_lease_while_transcription_outlives_initial_lea
     };
 
     let handle = tokio::spawn(async move {
-        process_one_available_job(&storage_for_worker, &engine, &probe, config).await
+        process_one_available_job(
+            &storage_for_worker,
+            &engine,
+            &probe,
+            config,
+            &Metrics::new(),
+        )
+        .await
     });
     tokio::time::sleep(Duration::from_millis(75)).await;
 
@@ -320,6 +455,46 @@ impl WorkerFixture {
             other => panic!("expected created job, got {other:?}"),
         }
     }
+}
+
+async fn operator_metrics_text(fixture: &WorkerFixture, metrics: Metrics) -> String {
+    let auth_store = AuthStore::try_from_configs(&[ApiKeyConfig {
+        api_key_id: "owner-a".to_owned(),
+        key: "owner-secret".to_owned(),
+    }])
+    .expect("auth config");
+    let state = AppState {
+        accepted_audio_dir: fixture.accepted_audio_dir.clone(),
+        auth_store: Arc::new(auth_store),
+        metrics,
+        operator_listen_addr: "127.0.0.1:9090".parse().expect("operator listen addr"),
+        openai_api_key: "test-openai-key".to_owned(),
+        storage: fixture.storage.clone(),
+    };
+    let response = build_operator_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    String::from_utf8(bytes.to_vec()).expect("utf8 body")
+}
+
+fn assert_metric_sample_has_value(body: &str, name: &str, labels: &[&str], value: &str) {
+    assert!(
+        body.lines().any(|line| {
+            line.starts_with(name)
+                && labels.iter().all(|label| line.contains(label))
+                && line.ends_with(&format!(" {value}"))
+        }),
+        "expected {name} with labels {labels:?} and value {value} in:\n{body}"
+    );
 }
 
 #[derive(Clone)]

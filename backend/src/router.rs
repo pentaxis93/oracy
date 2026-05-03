@@ -6,6 +6,7 @@ use crate::metadata::{
     create_session, create_tag, delete_session, delete_tag, get_session, get_tag, list_sessions,
     list_tags, patch_session, patch_tag,
 };
+use crate::metrics::prometheus_metrics;
 use crate::settings::{get_settings, patch_settings};
 use crate::state::AppState;
 use crate::transcription_jobs;
@@ -44,5 +45,11 @@ pub fn build_router(state: AppState) -> Router {
         )
         .fallback(|| async { Err::<(), _>(ApiError::not_found("Resource not found.")) })
         .method_not_allowed_fallback(|| async { Err::<(), _>(ApiError::method_not_allowed()) })
+        .with_state(state)
+}
+
+pub fn build_operator_router(state: AppState) -> Router {
+    Router::new()
+        .route("/metrics", get(prometheus_metrics))
         .with_state(state)
 }

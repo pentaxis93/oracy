@@ -612,6 +612,8 @@ impl TranscriptionJobFixture {
         let app = build_router(AppState {
             accepted_audio_dir: accepted_audio_dir.clone(),
             auth_store: Arc::new(auth_store),
+            metrics: oracy_backend::metrics::Metrics::new(),
+            operator_listen_addr: "127.0.0.1:9090".parse().expect("operator listen addr"),
             openai_api_key: "test-openai-key".to_owned(),
             storage: storage.clone(),
         });
