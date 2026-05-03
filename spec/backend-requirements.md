@@ -608,6 +608,9 @@ Semantics:
   `retry_waiting`.
 - Once a job reaches `succeeded` or `failed`, the backend must
   promptly delete the retained audio chunks and composed audio.
+- Retained audio is recorded as released only after the backend has
+  made the file's absence crash-durable on the accepted-audio
+  filesystem.
 - Failure to delete retained audio does not create a new public job
   state. The job remains terminal while cleanup is retried internally
   and surfaced to operators through logs and metrics.

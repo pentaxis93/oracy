@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Release retained transcription audio when jobs reach `succeeded` or `failed`,
+  retry cleanup after transient release failures, and surface per-artifact
+  cleanup outcomes through structured logs and retention metrics.
 - Add an operator-only Prometheus metrics listener with initial worker,
   retention-cleanup, retained-audio capacity metrics, and overlapping bind
   validation.

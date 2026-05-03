@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -11,20 +11,33 @@ use axum::{Json, Router};
 use oracy_backend::auth::AuthStore;
 use oracy_backend::config::ApiKeyConfig;
 use oracy_backend::metrics::Metrics;
+use oracy_backend::retention_cleanup::{
+    RetainedAudioReleaser, RetentionCleanupError, cleanup_retained_audio_once,
+    cleanup_retained_audio_once_with_releaser,
+};
 use oracy_backend::router::build_operator_router;
 use oracy_backend::state::AppState;
-use oracy_backend::storage::{AcceptJobOutcome, NewTranscriptionJob, Storage};
+use oracy_backend::storage::{
+    AcceptJobOutcome, AcceptedChunk, FinalizeJobOutcome, NewOpenTranscriptionJob,
+    NewTranscriptionJob, OpenJobOutcome, Storage, StoreChunkOutcome,
+};
 use oracy_backend::transcription_worker::{
     AudioSliceError, AudioSlicer, DurationProbe, DurationProbeError, EngineFailure,
     OpenAiTranscriptionEngine, ProcessOutcome, TranscriptionEngine, TranscriptionInput,
     TranscriptionOutput, WorkerConfig, process_one_available_job,
 };
 use serde_json::json;
+use sqlx::Row;
 use tempfile::TempDir;
 use time::Duration as TimeDuration;
 use time::OffsetDateTime;
 use time::macros::datetime;
+use tokio::sync::Barrier;
 use tower::util::ServiceExt;
+use tracing::Subscriber;
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::{Layer, Registry};
 
 #[tokio::test]
 async fn worker_materializes_a_queued_job_with_a_fake_engine() {
@@ -35,6 +48,7 @@ async fn worker_materializes_a_queued_job_with_a_fake_engine() {
 
     let outcome = process_one_available_job(
         &fixture.storage,
+        &fixture.accepted_audio_dir,
         &engine,
         &probe,
         WorkerConfig::test(),
@@ -93,6 +107,386 @@ async fn worker_materializes_a_queued_job_with_a_fake_engine() {
 }
 
 #[tokio::test]
+async fn worker_releases_chunks_and_composed_audio_after_success() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_chunked_queued_job(
+            "attempt-success-cleanup",
+            &[b"first audio", b"second audio"],
+        )
+        .await;
+    let artifacts = fixture.retained_artifact_paths(&job.id).await;
+    for artifact in &artifacts {
+        assert!(
+            tokio::fs::try_exists(artifact)
+                .await
+                .expect("artifact existence check"),
+            "expected retained artifact before processing: {}",
+            artifact.display()
+        );
+    }
+    let engine = FakeEngine::success("transcribed text");
+    let probe = FakeDurationProbe::success(1_480);
+
+    let metrics = Metrics::new();
+
+    let outcome = process_one_available_job(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &engine,
+        &probe,
+        WorkerConfig::test(),
+        &metrics,
+    )
+    .await
+    .expect("process one job");
+
+    assert_eq!(
+        outcome,
+        ProcessOutcome::Succeeded {
+            job_id: job.id.clone()
+        }
+    );
+    for artifact in &artifacts {
+        assert!(
+            !tokio::fs::try_exists(artifact)
+                .await
+                .expect("artifact existence check"),
+            "expected retained artifact released after success: {}",
+            artifact.display()
+        );
+    }
+    assert_eq!(fixture.chunk_row_count(&job.id).await, 2);
+    let completed = fixture
+        .storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(completed.status, "succeeded");
+    assert_eq!(completed.chunks_received, 2);
+    let voice_note = fixture
+        .storage
+        .get_voice_note(
+            "owner-a",
+            completed.voice_note_id.as_deref().expect("voice note id"),
+        )
+        .await
+        .expect("voice note lookup")
+        .expect("voice note exists");
+    assert_eq!(voice_note.audio_duration_seconds, 1.48);
+    assert_eq!(voice_note.audio_format, "wav");
+    assert_eq!(voice_note.audio_size_bytes, 23);
+
+    let body = operator_metrics_text(&fixture, metrics).await;
+    assert_metric_sample_has_value(
+        &body,
+        "oracy_retention_cleanup_artifacts_total",
+        &[r#"outcome="succeeded""#, r#"artifact="chunk""#],
+        "2",
+    );
+    assert_metric_sample_has_value(
+        &body,
+        "oracy_retention_cleanup_artifacts_total",
+        &[r#"outcome="succeeded""#, r#"artifact="composed_audio""#],
+        "1",
+    );
+}
+
+#[tokio::test]
+async fn worker_releases_chunks_and_composed_audio_after_failure() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_chunked_queued_job("attempt-failed-cleanup", &[b"bad audio"])
+        .await;
+    let artifacts = fixture.retained_artifact_paths(&job.id).await;
+    let engine = FakeEngine::success("unused");
+    let probe = FakeDurationProbe::invalid_audio();
+
+    let outcome = process_one_available_job(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &engine,
+        &probe,
+        WorkerConfig::test(),
+        &Metrics::new(),
+    )
+    .await
+    .expect("process one job");
+
+    assert_eq!(
+        outcome,
+        ProcessOutcome::Failed {
+            job_id: job.id.clone()
+        }
+    );
+    for artifact in &artifacts {
+        assert!(
+            !tokio::fs::try_exists(artifact)
+                .await
+                .expect("artifact existence check"),
+            "expected retained artifact released after failure: {}",
+            artifact.display()
+        );
+    }
+    let failed = fixture
+        .storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(failed.status, "failed");
+    assert_eq!(failed.failure_code.as_deref(), Some("audio_invalid"));
+    assert_eq!(failed.retryable_by_client, Some(false));
+    assert_eq!(failed.chunks_received, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retained_terminal_audio_is_released_by_restart_sweep() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_chunked_queued_job("attempt-restart-cleanup", &[b"first", b"second"])
+        .await;
+    fixture.mark_job_failed(&job.id).await;
+    let artifacts = fixture.retained_artifact_paths(&job.id).await;
+    let events = CapturedEvents::default();
+    let _guard = tracing::subscriber::set_default(Registry::default().with(events.clone()));
+
+    cleanup_retained_audio_once(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &Metrics::new(),
+    )
+    .await
+    .expect("cleanup sweep");
+
+    for artifact in &artifacts {
+        assert!(
+            !tokio::fs::try_exists(artifact)
+                .await
+                .expect("artifact existence check"),
+            "expected retained artifact released by sweep: {}",
+            artifact.display()
+        );
+    }
+    let failed = fixture
+        .storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(failed.status, "failed");
+    assert!(events.contains_fields(&[
+        ("message", "retention cleanup released artifact"),
+        ("job_id", &job.id),
+        ("artifact_kind", "chunk"),
+    ]));
+    assert!(events.contains_fields(&[
+        ("message", "retention cleanup released artifact"),
+        ("job_id", &job.id),
+        ("artifact_kind", "composed_audio"),
+    ]));
+}
+
+#[tokio::test]
+async fn cleanup_releases_audio_when_accepted_audio_dir_contains_parent_components() {
+    let fixture = WorkerFixture::new_with_parent_component_accepted_audio_dir().await;
+    let job = fixture
+        .create_queued_job("attempt-parent-component-cleanup", b"hello audio")
+        .await;
+    fixture.mark_job_failed(&job.id).await;
+    let artifacts = fixture.retained_artifact_paths(&job.id).await;
+
+    cleanup_retained_audio_once(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &Metrics::new(),
+    )
+    .await
+    .expect("cleanup sweep");
+
+    for artifact in &artifacts {
+        assert!(
+            !tokio::fs::try_exists(artifact)
+                .await
+                .expect("artifact existence check"),
+            "expected retained artifact released from parent-component root: {}",
+            artifact.display()
+        );
+    }
+    assert_eq!(fixture.retained_artifact_count(&job.id).await, 0);
+}
+
+#[tokio::test]
+async fn cleanup_rejects_lexical_escape_from_accepted_audio_dir() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_queued_job("attempt-lexical-escape-cleanup", b"hello audio")
+        .await;
+    fixture.mark_job_failed(&job.id).await;
+    let escape_path = fixture
+        .accepted_audio_dir
+        .join("..")
+        .join("outside")
+        .join("missing.wav");
+    fixture
+        .set_composed_retained_path(&job.id, &escape_path)
+        .await;
+
+    cleanup_retained_audio_once(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &Metrics::new(),
+    )
+    .await
+    .expect("unsafe cleanup is recorded internally");
+
+    assert_eq!(fixture.retained_artifact_count(&job.id).await, 1);
+    assert_eq!(fixture.composed_cleanup_attempts(&job.id).await, 1);
+}
+
+#[tokio::test]
+async fn cleanup_rejects_symlink_escape_from_accepted_audio_dir() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_queued_job("attempt-symlink-escape-cleanup", b"hello audio")
+        .await;
+    fixture.mark_job_failed(&job.id).await;
+
+    let outside_dir = fixture
+        .accepted_audio_dir
+        .parent()
+        .expect("accepted audio dir has parent")
+        .join("outside");
+    tokio::fs::create_dir(&outside_dir)
+        .await
+        .expect("create outside dir");
+    let outside_artifact = outside_dir.join("escaped.wav");
+    tokio::fs::write(&outside_artifact, b"outside audio")
+        .await
+        .expect("write outside artifact");
+    let symlink_path = fixture.accepted_audio_dir.join("outside-link");
+    symlink(&outside_dir, &symlink_path).expect("create outside symlink");
+    let retained_path = symlink_path.join("escaped.wav");
+    fixture
+        .set_composed_retained_path(&job.id, &retained_path)
+        .await;
+
+    cleanup_retained_audio_once(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &Metrics::new(),
+    )
+    .await
+    .expect("unsafe cleanup is recorded internally");
+
+    assert!(
+        tokio::fs::try_exists(&outside_artifact)
+            .await
+            .expect("outside artifact existence check"),
+        "symlink escape target should not be removed"
+    );
+    assert_eq!(fixture.retained_artifact_count(&job.id).await, 1);
+    assert_eq!(fixture.composed_cleanup_attempts(&job.id).await, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn overlapping_cleaners_record_success_once_for_one_retained_artifact() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_queued_job("attempt-overlapping-cleanup", b"hello audio")
+        .await;
+    fixture.mark_job_failed(&job.id).await;
+    let metrics = Metrics::new();
+    let events = global_captured_events();
+    let releaser = BarrierReleaser {
+        barrier: Arc::new(Barrier::new(2)),
+    };
+    let other_releaser = releaser.clone();
+
+    let (first, second) = tokio::join!(
+        cleanup_retained_audio_once_with_releaser(&fixture.storage, &metrics, &releaser),
+        cleanup_retained_audio_once_with_releaser(&fixture.storage, &metrics, &other_releaser),
+    );
+    first.expect("first cleanup");
+    second.expect("second cleanup");
+
+    let body = operator_metrics_text(&fixture, metrics).await;
+    assert_metric_sample_has_value(
+        &body,
+        "oracy_retention_cleanup_artifacts_total",
+        &[r#"outcome="succeeded""#, r#"artifact="composed_audio""#],
+        "1",
+    );
+    assert_eq!(
+        events.count_fields(&[
+            ("message", "retention cleanup released artifact"),
+            ("job_id", &job.id),
+            ("artifact_kind", "composed_audio"),
+        ]),
+        1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cleanup_failures_retry_without_changing_terminal_state_and_log_attempt_count() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_chunked_queued_job("attempt-cleanup-retry", &[b"first"])
+        .await;
+    fixture.mark_job_failed(&job.id).await;
+    let artifacts = fixture.retained_artifact_paths(&job.id).await;
+    let metrics = Metrics::new();
+    let events = CapturedEvents::default();
+    let _guard = tracing::subscriber::set_default(Registry::default().with(events.clone()));
+
+    cleanup_retained_audio_once_with_releaser(&fixture.storage, &metrics, &FailingReleaser)
+        .await
+        .expect("cleanup failure is recorded internally");
+
+    for artifact in &artifacts {
+        assert!(
+            tokio::fs::try_exists(artifact)
+                .await
+                .expect("artifact existence check"),
+            "failed cleanup should leave artifact for retry: {}",
+            artifact.display()
+        );
+    }
+    assert_eq!(fixture.composed_cleanup_attempts(&job.id).await, 1);
+    assert_eq!(fixture.chunk_cleanup_attempts(&job.id, 0).await, 1);
+    let failed = fixture
+        .storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(failed.status, "failed");
+
+    let body = operator_metrics_text(&fixture, metrics).await;
+    assert_metric_sample_has_value(
+        &body,
+        "oracy_retention_cleanup_artifacts_total",
+        &[r#"outcome="failed""#, r#"artifact="chunk""#],
+        "1",
+    );
+    assert_metric_sample_has_value(
+        &body,
+        "oracy_retention_cleanup_artifacts_total",
+        &[r#"outcome="failed""#, r#"artifact="composed_audio""#],
+        "1",
+    );
+    assert!(events.contains_fields(&[
+        ("message", "retention cleanup failed to release artifact"),
+        ("job_id", &job.id),
+        ("artifact_kind", "chunk"),
+        ("attempt_count", "1"),
+    ]));
+}
+
+#[tokio::test]
 async fn worker_success_increments_operator_success_counter() {
     let fixture = WorkerFixture::new().await;
     fixture
@@ -104,6 +498,7 @@ async fn worker_success_increments_operator_success_counter() {
 
     process_one_available_job(
         &fixture.storage,
+        &fixture.accepted_audio_dir,
         &engine,
         &probe,
         WorkerConfig::test(),
@@ -134,6 +529,7 @@ async fn worker_retry_increments_operator_retry_counter_with_failure_class() {
 
     process_one_available_job(
         &fixture.storage,
+        &fixture.accepted_audio_dir,
         &engine,
         &probe,
         WorkerConfig::test(),
@@ -167,6 +563,7 @@ async fn worker_terminal_failure_increments_operator_failure_counter_with_failur
 
     process_one_available_job(
         &fixture.storage,
+        &fixture.accepted_audio_dir,
         &engine,
         &probe,
         WorkerConfig::test(),
@@ -196,6 +593,7 @@ async fn worker_marks_duration_probe_failure_as_audio_invalid() {
 
     let outcome = process_one_available_job(
         &fixture.storage,
+        &fixture.accepted_audio_dir,
         &engine,
         &probe,
         WorkerConfig::test(),
@@ -233,6 +631,7 @@ async fn worker_routes_transient_engine_failure_to_retry_waiting() {
 
     let outcome = process_one_available_job(
         &fixture.storage,
+        &fixture.accepted_audio_dir,
         &engine,
         &probe,
         WorkerConfig::test(),
@@ -260,6 +659,54 @@ async fn worker_routes_transient_engine_failure_to_retry_waiting() {
 }
 
 #[tokio::test]
+async fn worker_releases_retained_audio_when_retry_exhaustion_fails_the_job() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_chunked_queued_job("attempt-retry-exhaustion-cleanup", &[b"hello audio"])
+        .await;
+    fixture.set_retry_count(&job.id, 2).await;
+    let artifacts = fixture.retained_artifact_paths(&job.id).await;
+    let engine = FakeEngine::transient("engine_error", "temporary engine failure", Some(30));
+    let probe = FakeDurationProbe::success(1_480);
+
+    let outcome = process_one_available_job(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &engine,
+        &probe,
+        WorkerConfig::test(),
+        &Metrics::new(),
+    )
+    .await
+    .expect("process one job");
+
+    assert_eq!(
+        outcome,
+        ProcessOutcome::Failed {
+            job_id: job.id.clone()
+        }
+    );
+    for artifact in &artifacts {
+        assert!(
+            !tokio::fs::try_exists(artifact)
+                .await
+                .expect("artifact existence check"),
+            "expected retained artifact released after retry exhaustion: {}",
+            artifact.display()
+        );
+    }
+    let failed = fixture
+        .storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(failed.status, "failed");
+    assert_eq!(failed.retry_count, 3);
+    assert_eq!(failed.failure_code.as_deref(), Some("engine_error"));
+}
+
+#[tokio::test]
 async fn stalled_openai_request_records_transient_timeout_and_worker_processes_next_job() {
     let fixture = WorkerFixture::new().await;
     let stalled_job = fixture
@@ -281,6 +728,7 @@ async fn stalled_openai_request_records_transient_timeout_and_worker_processes_n
         Duration::from_secs(1),
         process_one_available_job(
             &fixture.storage,
+            &fixture.accepted_audio_dir,
             &engine,
             &probe,
             WorkerConfig::test(),
@@ -309,6 +757,7 @@ async fn stalled_openai_request_records_transient_timeout_and_worker_processes_n
         Duration::from_secs(1),
         process_one_available_job(
             &fixture.storage,
+            &fixture.accepted_audio_dir,
             &engine,
             &probe,
             WorkerConfig::test(),
@@ -359,9 +808,11 @@ async fn worker_renews_processing_lease_while_transcription_outlives_initial_lea
         error_sleep: Duration::from_millis(10),
     };
 
+    let accepted_audio_dir = fixture.accepted_audio_dir.clone();
     let handle = tokio::spawn(async move {
         process_one_available_job(
             &storage_for_worker,
+            &accepted_audio_dir,
             &engine,
             &probe,
             config,
@@ -424,6 +875,28 @@ impl WorkerFixture {
         }
     }
 
+    async fn new_with_parent_component_accepted_audio_dir() -> Self {
+        let tempdir = TempDir::new().expect("tempdir");
+        let database_path = tempdir.path().join("oracy.sqlite");
+        let config_dir = tempdir.path().join("config");
+        tokio::fs::create_dir(&config_dir)
+            .await
+            .expect("create config dir");
+        let canonical_accepted_audio_dir = tempdir.path().join("accepted-audio");
+        tokio::fs::create_dir(&canonical_accepted_audio_dir)
+            .await
+            .expect("create accepted audio dir");
+        let accepted_audio_dir = config_dir.join("../accepted-audio");
+        let storage = Storage::connect(&database_path)
+            .await
+            .expect("connect storage");
+        Self {
+            _tempdir: tempdir,
+            accepted_audio_dir,
+            storage,
+        }
+    }
+
     async fn create_queued_job(
         &self,
         idempotency_key: &str,
@@ -454,6 +927,369 @@ impl WorkerFixture {
             AcceptJobOutcome::Created(job) => job,
             other => panic!("expected created job, got {other:?}"),
         }
+    }
+
+    async fn create_chunked_queued_job(
+        &self,
+        idempotency_key: &str,
+        chunks: &[&[u8]],
+    ) -> oracy_backend::storage::TranscriptionJobRecord {
+        let opened = match self
+            .storage
+            .open_job(NewOpenTranscriptionJob {
+                api_key_id: "owner-a".to_owned(),
+                idempotency_key: idempotency_key.to_owned(),
+                recorded_at: datetime!(2026-04-24 17:59:00 UTC),
+                session_id: None,
+                language: Some("en".to_owned()),
+                chunk_count: chunks.len() as i64,
+                audio_format: "wav".to_owned(),
+                max_retries: 3,
+                now: datetime!(2026-04-24 18:00:00 UTC),
+            })
+            .await
+            .expect("open job")
+        {
+            OpenJobOutcome::Created(job) => job,
+            other => panic!("expected opened job, got {other:?}"),
+        };
+
+        for (index, bytes) in chunks.iter().enumerate() {
+            let chunk_path = self
+                .accepted_audio_dir
+                .join(&opened.id)
+                .join("chunks")
+                .join(format!("{index}.chunk"));
+            tokio::fs::create_dir_all(chunk_path.parent().expect("chunk parent"))
+                .await
+                .expect("create chunk directory");
+            tokio::fs::write(&chunk_path, bytes)
+                .await
+                .expect("write chunk");
+            let outcome = self
+                .storage
+                .store_chunk(AcceptedChunk {
+                    api_key_id: "owner-a".to_owned(),
+                    job_id: opened.id.clone(),
+                    chunk_index: index as i64,
+                    chunk_sha256_hex: sha256_hex(bytes),
+                    chunk_path,
+                    chunk_size_bytes: bytes.len() as i64,
+                    accepted_at: datetime!(2026-04-24 18:00:01 UTC),
+                })
+                .await
+                .expect("store chunk");
+            assert_eq!(outcome, StoreChunkOutcome::Stored);
+        }
+
+        let composed_path = self
+            .accepted_audio_dir
+            .join(&opened.id)
+            .join("accepted.wav");
+        let mut composed = Vec::new();
+        for bytes in chunks {
+            composed.extend_from_slice(bytes);
+        }
+        tokio::fs::write(&composed_path, composed)
+            .await
+            .expect("write composed audio");
+
+        match self
+            .storage
+            .finalize_job(
+                "owner-a",
+                &opened.id,
+                "composed-hash",
+                &composed_path,
+                "gpt-4o-mini-transcribe",
+                datetime!(2026-04-24 18:00:02 UTC),
+            )
+            .await
+            .expect("finalize job")
+        {
+            FinalizeJobOutcome::Accepted(job) => job,
+            other => panic!("expected finalized job, got {other:?}"),
+        }
+    }
+
+    async fn retained_artifact_paths(&self, job_id: &str) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        let accepted_audio_path: String = sqlx::query_scalar(
+            r#"
+            SELECT accepted_audio_path
+            FROM transcription_jobs
+            WHERE api_key_id = 'owner-a' AND id = ?
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("accepted audio path");
+        paths.push(PathBuf::from(accepted_audio_path));
+
+        let rows = sqlx::query(
+            r#"
+            SELECT chunk_path
+            FROM transcription_job_chunks
+            WHERE api_key_id = 'owner-a' AND job_id = ?
+            ORDER BY chunk_index ASC
+            "#,
+        )
+        .bind(job_id)
+        .fetch_all(self.storage.pool())
+        .await
+        .expect("chunk paths");
+        paths.extend(
+            rows.into_iter()
+                .map(|row| PathBuf::from(row.get::<String, _>("chunk_path"))),
+        );
+        paths
+    }
+
+    async fn retained_artifact_count(&self, job_id: &str) -> i64 {
+        let composed_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM transcription_jobs
+            WHERE api_key_id = 'owner-a' AND id = ? AND accepted_audio_path <> ''
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("composed retained artifact count");
+        let chunk_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM transcription_job_chunks
+            WHERE api_key_id = 'owner-a' AND job_id = ? AND chunk_path <> ''
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("chunk retained artifact count");
+        composed_count + chunk_count
+    }
+
+    async fn set_composed_retained_path(&self, job_id: &str, path: &std::path::Path) {
+        let result = sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET accepted_audio_path = ?
+            WHERE api_key_id = 'owner-a' AND id = ?
+            "#,
+        )
+        .bind(path.to_string_lossy().into_owned())
+        .bind(job_id)
+        .execute(self.storage.pool())
+        .await
+        .expect("set composed retained path");
+        assert_eq!(result.rows_affected(), 1);
+    }
+
+    async fn chunk_row_count(&self, job_id: &str) -> i64 {
+        sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM transcription_job_chunks
+            WHERE api_key_id = 'owner-a' AND job_id = ?
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("chunk row count")
+    }
+
+    async fn mark_job_failed(&self, job_id: &str) {
+        let result = sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET status = 'failed',
+                failure_code = 'engine_error',
+                failure_message = 'terminal failure',
+                retryable_by_client = 1
+            WHERE api_key_id = 'owner-a' AND id = ?
+            "#,
+        )
+        .bind(job_id)
+        .execute(self.storage.pool())
+        .await
+        .expect("mark job failed");
+        assert_eq!(result.rows_affected(), 1);
+    }
+
+    async fn set_retry_count(&self, job_id: &str, retry_count: i64) {
+        let result = sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET retry_count = ?
+            WHERE api_key_id = 'owner-a' AND id = ?
+            "#,
+        )
+        .bind(retry_count)
+        .bind(job_id)
+        .execute(self.storage.pool())
+        .await
+        .expect("set retry count");
+        assert_eq!(result.rows_affected(), 1);
+    }
+
+    async fn composed_cleanup_attempts(&self, job_id: &str) -> i64 {
+        sqlx::query_scalar(
+            r#"
+            SELECT accepted_audio_cleanup_attempts
+            FROM transcription_jobs
+            WHERE api_key_id = 'owner-a' AND id = ?
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("composed cleanup attempts")
+    }
+
+    async fn chunk_cleanup_attempts(&self, job_id: &str, chunk_index: i64) -> i64 {
+        sqlx::query_scalar(
+            r#"
+            SELECT cleanup_attempts
+            FROM transcription_job_chunks
+            WHERE api_key_id = 'owner-a' AND job_id = ? AND chunk_index = ?
+            "#,
+        )
+        .bind(job_id)
+        .bind(chunk_index)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("chunk cleanup attempts")
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+struct FailingReleaser;
+
+impl RetainedAudioReleaser for FailingReleaser {
+    async fn release(
+        &self,
+        artifact: &oracy_backend::storage::RetainedAudioArtifact,
+    ) -> Result<(), RetentionCleanupError> {
+        Err(RetentionCleanupError::Remove {
+            path: artifact.path.clone(),
+            source: std::io::Error::other("simulated cleanup failure"),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct BarrierReleaser {
+    barrier: Arc<Barrier>,
+}
+
+impl RetainedAudioReleaser for BarrierReleaser {
+    async fn release(
+        &self,
+        _artifact: &oracy_backend::storage::RetainedAudioArtifact,
+    ) -> Result<(), RetentionCleanupError> {
+        self.barrier.wait().await;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+struct CapturedEvents {
+    events: Arc<Mutex<Vec<CapturedEvent>>>,
+}
+
+static GLOBAL_CAPTURED_EVENTS: OnceLock<CapturedEvents> = OnceLock::new();
+
+fn global_captured_events() -> CapturedEvents {
+    GLOBAL_CAPTURED_EVENTS
+        .get_or_init(|| {
+            let events = CapturedEvents::default();
+            tracing::subscriber::set_global_default(Registry::default().with(events.clone()))
+                .expect("global tracing subscriber");
+            events
+        })
+        .clone()
+}
+
+impl CapturedEvents {
+    fn contains_fields(&self, expected: &[(&str, &str)]) -> bool {
+        self.events.lock().expect("events").iter().any(|event| {
+            expected.iter().all(|(field, value)| {
+                event
+                    .fields
+                    .iter()
+                    .any(|(name, actual)| name == field && actual.contains(value))
+            })
+        })
+    }
+
+    fn count_fields(&self, expected: &[(&str, &str)]) -> usize {
+        self.events
+            .lock()
+            .expect("events")
+            .iter()
+            .filter(|event| {
+                expected.iter().all(|(field, value)| {
+                    event
+                        .fields
+                        .iter()
+                        .any(|(name, actual)| name == field && actual.contains(value))
+                })
+            })
+            .count()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CapturedEvent {
+    fields: Vec<(String, String)>,
+}
+
+impl<S> Layer<S> for CapturedEvents
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
+        let mut visitor = EventVisitor { fields: Vec::new() };
+        event.record(&mut visitor);
+        self.events.lock().expect("events").push(CapturedEvent {
+            fields: visitor.fields,
+        });
+    }
+}
+
+struct EventVisitor {
+    fields: Vec<(String, String)>,
+}
+
+impl Visit for EventVisitor {
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.fields
+            .push((field.name().to_owned(), value.to_string()));
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields
+            .push((field.name().to_owned(), value.to_string()));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields
+            .push((field.name().to_owned(), value.to_owned()));
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields
+            .push((field.name().to_owned(), format!("{value:?}")));
     }
 }
 

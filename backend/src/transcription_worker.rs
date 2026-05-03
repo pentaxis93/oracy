@@ -11,6 +11,7 @@ use tokio::process::Command;
 use ulid::Ulid;
 
 use crate::metrics::Metrics;
+use crate::retention_cleanup::cleanup_retained_audio_for_job;
 use crate::storage::{
     NewSegment, NewVoiceNote, NewVoiceNoteVersion, RetryOutcome, Storage, StorageError,
     TerminalJobFailure, TransientJobFailure, VoiceNoteMaterialization,
@@ -525,6 +526,7 @@ fn effective_lease_renewal_interval(config: &WorkerConfig) -> std::time::Duratio
 
 pub async fn process_one_available_job<E, D>(
     storage: &Storage,
+    accepted_audio_dir: &Path,
     engine: &E,
     duration_probe: &D,
     config: WorkerConfig,
@@ -569,7 +571,7 @@ where
     let (duration_ms, transcription) = match active_work {
         Ok(active_work) => active_work,
         Err(error) => {
-            storage
+            let failed = storage
                 .fail_leased_job(TerminalJobFailure {
                     api_key_id: job.api_key_id.clone(),
                     job_id: job.id.clone(),
@@ -581,6 +583,14 @@ where
                 })
                 .await?;
             metrics.record_worker_failed("audio_invalid");
+            cleanup_terminal_job_audio(
+                storage,
+                accepted_audio_dir,
+                &failed.api_key_id,
+                &failed.id,
+                metrics,
+            )
+            .await;
             return Ok(ProcessOutcome::Failed { job_id: job.id });
         }
     };
@@ -612,6 +622,14 @@ where
                 }
                 RetryOutcome::Failed(job) => {
                     metrics.record_worker_failed(&metric_failure_code);
+                    cleanup_terminal_job_audio(
+                        storage,
+                        accepted_audio_dir,
+                        &job.api_key_id,
+                        &job.id,
+                        metrics,
+                    )
+                    .await;
                     Ok(ProcessOutcome::Failed { job_id: job.id })
                 }
             };
@@ -621,7 +639,7 @@ where
             message,
         }) => {
             let metric_failure_code = failure_code.clone();
-            storage
+            let failed = storage
                 .fail_leased_job(TerminalJobFailure {
                     api_key_id: job.api_key_id.clone(),
                     job_id: job.id.clone(),
@@ -633,6 +651,14 @@ where
                 })
                 .await?;
             metrics.record_worker_failed(&metric_failure_code);
+            cleanup_terminal_job_audio(
+                storage,
+                accepted_audio_dir,
+                &failed.api_key_id,
+                &failed.id,
+                metrics,
+            )
+            .await;
             return Ok(ProcessOutcome::Failed { job_id: job.id });
         }
     };
@@ -679,11 +705,35 @@ where
         .await?;
 
     metrics.record_worker_succeeded();
+    cleanup_terminal_job_audio(
+        storage,
+        accepted_audio_dir,
+        &job.api_key_id,
+        &job.id,
+        metrics,
+    )
+    .await;
     Ok(ProcessOutcome::Succeeded { job_id: job.id })
+}
+
+async fn cleanup_terminal_job_audio(
+    storage: &Storage,
+    accepted_audio_dir: &Path,
+    api_key_id: &str,
+    job_id: &str,
+    metrics: &Metrics,
+) {
+    if let Err(error) =
+        cleanup_retained_audio_for_job(storage, accepted_audio_dir, api_key_id, job_id, metrics)
+            .await
+    {
+        tracing::error!(job_id = %job_id, "retention cleanup invocation failed: {error}");
+    }
 }
 
 pub async fn run_worker_loop<E, D>(
     storage: Storage,
+    accepted_audio_dir: PathBuf,
     engine: E,
     duration_probe: D,
     config: WorkerConfig,
@@ -695,6 +745,7 @@ pub async fn run_worker_loop<E, D>(
     loop {
         match process_one_available_job(
             &storage,
+            &accepted_audio_dir,
             &engine,
             &duration_probe,
             config.clone(),

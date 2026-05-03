@@ -255,6 +255,22 @@ pub struct ChunkRecord {
     pub chunk_size_bytes: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedAudioArtifactKind {
+    Chunk,
+    ComposedAudio,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedAudioArtifact {
+    pub api_key_id: String,
+    pub job_id: String,
+    pub kind: RetainedAudioArtifactKind,
+    pub chunk_index: Option<i64>,
+    pub path: PathBuf,
+    pub attempt_count: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct VoiceNoteMaterialization {
     pub voice_note: NewVoiceNote,
@@ -1257,6 +1273,235 @@ impl Storage {
             .expect("failed job remains visible");
         tx.commit().await?;
         Ok(failed)
+    }
+
+    pub async fn retained_audio_artifacts_for_job(
+        &self,
+        api_key_id: &str,
+        job_id: &str,
+    ) -> Result<Vec<RetainedAudioArtifact>, StorageError> {
+        let mut artifacts = Vec::new();
+        if let Some(row) = sqlx::query(
+            r#"
+            SELECT id, accepted_audio_path, accepted_audio_cleanup_attempts
+            FROM transcription_jobs
+            WHERE api_key_id = ?
+                AND id = ?
+                AND status IN ('succeeded', 'failed')
+                AND accepted_audio_path <> ''
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            artifacts.push(RetainedAudioArtifact {
+                api_key_id: api_key_id.to_owned(),
+                job_id: row.try_get("id")?,
+                kind: RetainedAudioArtifactKind::ComposedAudio,
+                chunk_index: None,
+                path: PathBuf::from(row.try_get::<String, _>("accepted_audio_path")?),
+                attempt_count: row.try_get("accepted_audio_cleanup_attempts")?,
+            });
+        }
+
+        let chunk_rows = sqlx::query(
+            r#"
+            SELECT
+                transcription_job_chunks.chunk_index,
+                transcription_job_chunks.chunk_path,
+                transcription_job_chunks.cleanup_attempts
+            FROM transcription_job_chunks
+            JOIN transcription_jobs
+                ON transcription_jobs.api_key_id = transcription_job_chunks.api_key_id
+                AND transcription_jobs.id = transcription_job_chunks.job_id
+            WHERE transcription_job_chunks.api_key_id = ?
+                AND transcription_job_chunks.job_id = ?
+                AND transcription_jobs.status IN ('succeeded', 'failed')
+                AND transcription_job_chunks.chunk_path <> ''
+            ORDER BY transcription_job_chunks.chunk_index ASC
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+        artifacts.extend(
+            chunk_rows
+                .into_iter()
+                .map(|row| {
+                    Ok(RetainedAudioArtifact {
+                        api_key_id: api_key_id.to_owned(),
+                        job_id: job_id.to_owned(),
+                        kind: RetainedAudioArtifactKind::Chunk,
+                        chunk_index: Some(row.try_get("chunk_index")?),
+                        path: PathBuf::from(row.try_get::<String, _>("chunk_path")?),
+                        attempt_count: row.try_get("cleanup_attempts")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, StorageError>>()?,
+        );
+        Ok(artifacts)
+    }
+
+    pub async fn retained_audio_artifacts_for_terminal_jobs(
+        &self,
+    ) -> Result<Vec<RetainedAudioArtifact>, StorageError> {
+        let mut artifacts = Vec::new();
+        let composed_rows = sqlx::query(
+            r#"
+            SELECT api_key_id, id, accepted_audio_path, accepted_audio_cleanup_attempts
+            FROM transcription_jobs
+            WHERE status IN ('succeeded', 'failed')
+                AND accepted_audio_path <> ''
+            ORDER BY updated_at ASC, id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        artifacts.extend(
+            composed_rows
+                .into_iter()
+                .map(|row| {
+                    Ok(RetainedAudioArtifact {
+                        api_key_id: row.try_get("api_key_id")?,
+                        job_id: row.try_get("id")?,
+                        kind: RetainedAudioArtifactKind::ComposedAudio,
+                        chunk_index: None,
+                        path: PathBuf::from(row.try_get::<String, _>("accepted_audio_path")?),
+                        attempt_count: row.try_get("accepted_audio_cleanup_attempts")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, StorageError>>()?,
+        );
+
+        let chunk_rows = sqlx::query(
+            r#"
+            SELECT
+                transcription_job_chunks.api_key_id,
+                transcription_job_chunks.job_id,
+                transcription_job_chunks.chunk_index,
+                transcription_job_chunks.chunk_path,
+                transcription_job_chunks.cleanup_attempts
+            FROM transcription_job_chunks
+            JOIN transcription_jobs
+                ON transcription_jobs.api_key_id = transcription_job_chunks.api_key_id
+                AND transcription_jobs.id = transcription_job_chunks.job_id
+            WHERE transcription_jobs.status IN ('succeeded', 'failed')
+                AND transcription_job_chunks.chunk_path <> ''
+            ORDER BY transcription_jobs.updated_at ASC, transcription_job_chunks.job_id ASC, transcription_job_chunks.chunk_index ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        artifacts.extend(
+            chunk_rows
+                .into_iter()
+                .map(|row| {
+                    Ok(RetainedAudioArtifact {
+                        api_key_id: row.try_get("api_key_id")?,
+                        job_id: row.try_get("job_id")?,
+                        kind: RetainedAudioArtifactKind::Chunk,
+                        chunk_index: Some(row.try_get("chunk_index")?),
+                        path: PathBuf::from(row.try_get::<String, _>("chunk_path")?),
+                        attempt_count: row.try_get("cleanup_attempts")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, StorageError>>()?,
+        );
+        Ok(artifacts)
+    }
+
+    pub async fn mark_retained_audio_artifact_released(
+        &self,
+        artifact: &RetainedAudioArtifact,
+    ) -> Result<bool, StorageError> {
+        let path = artifact.path.to_string_lossy().into_owned();
+        let result = match artifact.kind {
+            RetainedAudioArtifactKind::ComposedAudio => {
+                sqlx::query(
+                    r#"
+                    UPDATE transcription_jobs
+                    SET accepted_audio_path = ''
+                    WHERE api_key_id = ?
+                        AND id = ?
+                        AND accepted_audio_path = ?
+                    "#,
+                )
+                .bind(&artifact.api_key_id)
+                .bind(&artifact.job_id)
+                .bind(path)
+                .execute(&self.pool)
+                .await?
+            }
+            RetainedAudioArtifactKind::Chunk => {
+                sqlx::query(
+                    r#"
+                    UPDATE transcription_job_chunks
+                    SET chunk_path = ''
+                    WHERE api_key_id = ?
+                        AND job_id = ?
+                        AND chunk_index = ?
+                        AND chunk_path = ?
+                    "#,
+                )
+                .bind(&artifact.api_key_id)
+                .bind(&artifact.job_id)
+                .bind(artifact.chunk_index.expect("chunk artifact has index"))
+                .bind(path)
+                .execute(&self.pool)
+                .await?
+            }
+        };
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn record_retained_audio_artifact_cleanup_failure(
+        &self,
+        artifact: &RetainedAudioArtifact,
+    ) -> Result<i64, StorageError> {
+        let path = artifact.path.to_string_lossy().into_owned();
+        match artifact.kind {
+            RetainedAudioArtifactKind::ComposedAudio => {
+                let attempt_count = sqlx::query_scalar(
+                    r#"
+                    UPDATE transcription_jobs
+                    SET accepted_audio_cleanup_attempts = accepted_audio_cleanup_attempts + 1
+                    WHERE api_key_id = ?
+                        AND id = ?
+                        AND accepted_audio_path = ?
+                    RETURNING accepted_audio_cleanup_attempts
+                    "#,
+                )
+                .bind(&artifact.api_key_id)
+                .bind(&artifact.job_id)
+                .bind(path)
+                .fetch_optional(&self.pool)
+                .await?;
+                Ok(attempt_count.unwrap_or(artifact.attempt_count))
+            }
+            RetainedAudioArtifactKind::Chunk => {
+                let attempt_count = sqlx::query_scalar(
+                    r#"
+                    UPDATE transcription_job_chunks
+                    SET cleanup_attempts = cleanup_attempts + 1
+                    WHERE api_key_id = ?
+                        AND job_id = ?
+                        AND chunk_index = ?
+                        AND chunk_path = ?
+                    RETURNING cleanup_attempts
+                    "#,
+                )
+                .bind(&artifact.api_key_id)
+                .bind(&artifact.job_id)
+                .bind(artifact.chunk_index.expect("chunk artifact has index"))
+                .bind(path)
+                .fetch_optional(&self.pool)
+                .await?;
+                Ok(attempt_count.unwrap_or(artifact.attempt_count))
+            }
+        }
     }
 
     pub async fn get_voice_note(
