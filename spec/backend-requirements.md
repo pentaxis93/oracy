@@ -430,9 +430,10 @@ Semantics:
 - Segments are stored as first-class rows joined to the voice note,
   not as a blob embedded in voice-note text.
 - Segment ordering is ascending by `position`.
-- `start_ms` and `end_ms` are measured from the start of the composed
-  audio and represent engine-ground-truth timing. Segments are not
-  user-editable in `v0.1.0`.
+- `v0.1.0` stores one coarse segment for each generated voice note:
+  `position=0`, `start_ms=0`, and `end_ms=audio_duration_ms`. The
+  segment shape remains compatible with future engines that expose
+  per-utterance timing. Segments are not user-editable in `v0.1.0`.
 - Segments remain anchored to the voice note across voice-note text
   edits.
 - Speaker diarization is out of scope. No `speaker_label` field

@@ -968,6 +968,15 @@ Fields:
   start of the composed audio
 - `text`: segment text captured from the transcription result
 
+Semantics:
+
+- `v0.1.0` transcription engines do not produce per-utterance timing.
+  Voice notes created by the v0.1.0 processing pipeline carry one
+  coarse segment with `position=0`, `start_ms=0`, and
+  `end_ms=audio_duration_ms`.
+- The segment resource shape supports richer per-utterance timing for
+  future engine extensions without changing the contract.
+
 ### `Tag`
 
 ```json

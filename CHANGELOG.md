@@ -2,9 +2,20 @@
 
 ## Unreleased
 
+- Harden transcription worker reliability so stalled OpenAI requests enter the
+  backend retry path, processing leases renew during long transcriptions,
+  successful retries expose no stale failure metadata, failed sliced
+  transcriptions release generated slice files, and queued chunked jobs are
+  claimed by finalize order.
 - Add authenticated chunked transcription-job submission APIs for opening
   attempts, accepting durable chunks, finalizing composed audio to queued jobs,
   and reading upload progress.
+- Add the backend transcription-job processing worker, including leased job
+  claiming, OpenAI transcription requests, FFmpeg-backed audio slicing,
+  coarse segment materialization, backend-owned retries, and terminal failure
+  classification. Until #27 lands, this implementation can reach `succeeded`
+  after voice-note/version/segment materialization without a current embedding;
+  that remains a v0.1.0 release-blocker deviation.
 - Add authenticated tag and session management APIs, including owner-scoped
   CRUD, shared cursor pagination, case-insensitive tag identity with
   latest-spelling display updates, and metadata deletion cascades.

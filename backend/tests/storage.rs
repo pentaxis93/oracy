@@ -5,16 +5,19 @@ use oracy_backend::audio_hash::{AUDIO_CONTENT_HASH_ALGORITHM_ID, compose_audio_c
 use oracy_backend::storage::{
     AcceptJobOutcome, AcceptedChunk, CreateTagOutcome, FinalizeJobOutcome, NewEmbedding,
     NewOpenTranscriptionJob, NewSegment, NewSession, NewTag, NewTranscriptionJob, NewVoiceNote,
-    NewVoiceNoteVersion, OpenJobOutcome, RenameTagOutcome, ReplaceVoiceNoteTagsOutcome, Storage,
-    StorageError, StoreChunkOutcome, VoiceNoteMaterialization,
+    NewVoiceNoteVersion, OpenJobOutcome, RenameTagOutcome, ReplaceVoiceNoteTagsOutcome,
+    RetryOutcome, Storage, StorageError, StoreChunkOutcome, TransientJobFailure,
+    VoiceNoteMaterialization,
 };
 use sqlx::Row;
+use std::time::Duration as StdDuration;
 use tempfile::TempDir;
+use time::Duration;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use time::macros::datetime;
 use tokio::sync::Barrier;
-use tokio::time::{Duration, sleep};
+use tokio::time::sleep;
 
 #[tokio::test]
 async fn accepted_jobs_replay_by_owner_and_reject_tuple_mismatches() {
@@ -132,6 +135,405 @@ async fn storage_owns_the_accepted_audio_hash_algorithm_pin() {
         created.audio_content_hash_algorithm,
         AUDIO_CONTENT_HASH_ALGORITHM_ID
     );
+}
+
+#[tokio::test]
+async fn queued_jobs_are_claimed_by_a_processing_lease() {
+    let (_tempdir, storage) = storage().await;
+    let job = created_job(&storage, "owner-a", "attempt-1").await;
+
+    let claimed = storage
+        .claim_next_transcription_job(
+            "worker-lease-a",
+            datetime!(2026-04-24 18:00:05 UTC),
+            datetime!(2026-04-24 18:05:05 UTC),
+        )
+        .await
+        .expect("claim next job")
+        .expect("queued job should be claimed");
+
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.status, "processing");
+    assert_eq!(
+        claimed.processing_lease_token.as_deref(),
+        Some("worker-lease-a")
+    );
+    assert_eq!(
+        claimed.processing_lease_expires_at,
+        Some(datetime!(2026-04-24 18:05:05 UTC))
+    );
+
+    assert!(
+        storage
+            .claim_next_transcription_job(
+                "worker-lease-b",
+                datetime!(2026-04-24 18:00:06 UTC),
+                datetime!(2026-04-24 18:05:06 UTC),
+            )
+            .await
+            .expect("second claim")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn expired_processing_jobs_are_reclaimed_by_a_new_lease() {
+    let (_tempdir, storage) = storage().await;
+    let job = created_job(&storage, "owner-a", "attempt-1").await;
+    storage
+        .claim_next_transcription_job(
+            "expired-lease",
+            datetime!(2026-04-24 18:00:00 UTC),
+            datetime!(2026-04-24 18:05:00 UTC),
+        )
+        .await
+        .expect("initial claim");
+
+    assert!(
+        storage
+            .claim_next_transcription_job(
+                "too-early",
+                datetime!(2026-04-24 18:04:59 UTC),
+                datetime!(2026-04-24 18:09:59 UTC),
+            )
+            .await
+            .expect("early reclaim")
+            .is_none()
+    );
+
+    let reclaimed = storage
+        .claim_next_transcription_job(
+            "fresh-lease",
+            datetime!(2026-04-24 18:05:01 UTC),
+            datetime!(2026-04-24 18:10:01 UTC),
+        )
+        .await
+        .expect("expired reclaim")
+        .expect("expired processing job should be reclaimed");
+
+    assert_eq!(reclaimed.id, job.id);
+    assert_eq!(
+        reclaimed.processing_lease_token.as_deref(),
+        Some("fresh-lease")
+    );
+}
+
+#[tokio::test]
+async fn active_processing_lease_can_be_renewed_without_changing_visible_update_time() {
+    let (_tempdir, storage) = storage().await;
+    let job = created_job(&storage, "owner-a", "attempt-renew-lease").await;
+    let claimed = storage
+        .claim_next_transcription_job(
+            "active-lease",
+            datetime!(2026-04-24 18:00:00 UTC),
+            datetime!(2026-04-24 18:05:00 UTC),
+        )
+        .await
+        .expect("claim job")
+        .expect("job should be claimed");
+
+    let renewed = storage
+        .renew_processing_lease(
+            "owner-a",
+            &job.id,
+            "active-lease",
+            datetime!(2026-04-24 18:01:00 UTC),
+            datetime!(2026-04-24 18:06:00 UTC),
+        )
+        .await
+        .expect("renew lease");
+
+    assert!(renewed);
+    let after_renewal = storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(
+        after_renewal.processing_lease_expires_at,
+        Some(datetime!(2026-04-24 18:06:00 UTC))
+    );
+    assert_eq!(after_renewal.updated_at, claimed.updated_at);
+
+    let stale = storage
+        .renew_processing_lease(
+            "owner-a",
+            &job.id,
+            "stale-lease",
+            datetime!(2026-04-24 18:02:00 UTC),
+            datetime!(2026-04-24 18:07:00 UTC),
+        )
+        .await
+        .expect("stale renewal");
+    assert!(!stale);
+}
+
+#[tokio::test]
+async fn chunked_jobs_are_claimed_by_finalize_order_not_open_order() {
+    let (_tempdir, storage) = storage().await;
+    let opened_first = opened_job_at(
+        &storage,
+        "owner-a",
+        "attempt-opened-first",
+        datetime!(2026-04-24 18:00:00 UTC),
+    )
+    .await;
+    let opened_second = opened_job_at(
+        &storage,
+        "owner-a",
+        "attempt-opened-second",
+        datetime!(2026-04-24 18:01:00 UTC),
+    )
+    .await;
+    store_chunk(&storage, &opened_first.id, "hash-first").await;
+    store_chunk(&storage, &opened_second.id, "hash-second").await;
+
+    finalize_open_job_at(
+        &storage,
+        &opened_second.id,
+        "accepted-hash-second",
+        datetime!(2026-04-24 18:02:00 UTC),
+    )
+    .await;
+    finalize_open_job_at(
+        &storage,
+        &opened_first.id,
+        "accepted-hash-first",
+        datetime!(2026-04-24 18:03:00 UTC),
+    )
+    .await;
+
+    let first_claim = storage
+        .claim_next_transcription_job(
+            "lease-first",
+            datetime!(2026-04-24 18:04:00 UTC),
+            datetime!(2026-04-24 18:09:00 UTC),
+        )
+        .await
+        .expect("claim first ready job")
+        .expect("first ready job should be claimed");
+    let second_claim = storage
+        .claim_next_transcription_job(
+            "lease-second",
+            datetime!(2026-04-24 18:04:01 UTC),
+            datetime!(2026-04-24 18:09:01 UTC),
+        )
+        .await
+        .expect("claim second ready job")
+        .expect("second ready job should be claimed");
+
+    assert_eq!(first_claim.id, opened_second.id);
+    assert_eq!(second_claim.id, opened_first.id);
+}
+
+#[tokio::test]
+async fn retry_waiting_jobs_are_claimed_only_after_next_attempt_at() {
+    let (_tempdir, storage) = storage().await;
+    let job = created_job(&storage, "owner-a", "attempt-1").await;
+    mark_job_retry_waiting(&storage, &job.id).await;
+
+    assert!(
+        storage
+            .claim_next_transcription_job(
+                "early-lease",
+                datetime!(2026-04-24 18:04:59 UTC),
+                datetime!(2026-04-24 18:09:59 UTC),
+            )
+            .await
+            .expect("early claim")
+            .is_none()
+    );
+
+    let claimed = storage
+        .claim_next_transcription_job(
+            "due-lease",
+            datetime!(2026-04-24 18:05:00 UTC),
+            datetime!(2026-04-24 18:10:00 UTC),
+        )
+        .await
+        .expect("due claim")
+        .expect("due retry should be claimed");
+
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.status, "processing");
+    assert_eq!(claimed.next_attempt_at, None);
+}
+
+#[tokio::test]
+async fn leased_completion_requires_the_active_token_and_allows_missing_embedding() {
+    let (_tempdir, storage) = storage().await;
+    let job = created_job(&storage, "owner-a", "attempt-1").await;
+    storage
+        .claim_next_transcription_job(
+            "active-lease",
+            datetime!(2026-04-24 18:00:00 UTC),
+            datetime!(2026-04-24 18:05:00 UTC),
+        )
+        .await
+        .expect("claim job");
+    let mut materialization = materialization("voice-note-a");
+    materialization.embedding = None;
+
+    let error = storage
+        .complete_leased_job_with_voice_note(
+            "owner-a",
+            &job.id,
+            "stale-lease",
+            materialization.clone(),
+        )
+        .await
+        .expect_err("stale lease should not complete");
+    assert!(matches!(
+        error,
+        StorageError::JobNotCompletable { job_id } if job_id == job.id
+    ));
+
+    storage
+        .complete_leased_job_with_voice_note("owner-a", &job.id, "active-lease", materialization)
+        .await
+        .expect("active lease materializes voice note");
+
+    let completed = storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(completed.status, "succeeded");
+    assert_eq!(completed.voice_note_id.as_deref(), Some("voice-note-a"));
+    assert!(
+        storage
+            .get_current_embedding("owner-a", "voice-note-a")
+            .await
+            .expect("embedding lookup")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn transient_failures_retry_until_exhaustion_then_fail_terminally() {
+    let (_tempdir, storage) = storage().await;
+    let job = created_job(&storage, "owner-a", "attempt-1").await;
+    storage
+        .claim_next_transcription_job(
+            "lease-1",
+            datetime!(2026-04-24 18:00:00 UTC),
+            datetime!(2026-04-24 18:05:00 UTC),
+        )
+        .await
+        .expect("claim job");
+
+    let first = storage
+        .record_transient_job_failure(TransientJobFailure {
+            api_key_id: "owner-a".to_owned(),
+            job_id: job.id.clone(),
+            lease_token: "lease-1".to_owned(),
+            failure_code: "engine_error".to_owned(),
+            failure_message: "engine temporarily failed".to_owned(),
+            now: datetime!(2026-04-24 18:01:00 UTC),
+            next_attempt_at: datetime!(2026-04-24 18:02:00 UTC),
+        })
+        .await
+        .expect("record transient failure");
+    let RetryOutcome::RetryWaiting(first) = first else {
+        panic!("first transient failure should schedule retry");
+    };
+    assert_eq!(first.status, "retry_waiting");
+    assert_eq!(first.retry_count, 1);
+    assert_eq!(
+        first.next_attempt_at,
+        Some(datetime!(2026-04-24 18:02:00 UTC))
+    );
+
+    for (lease, now) in [
+        ("lease-2", datetime!(2026-04-24 18:02:00 UTC)),
+        ("lease-3", datetime!(2026-04-24 18:04:00 UTC)),
+    ] {
+        storage
+            .claim_next_transcription_job(lease, now, now + Duration::seconds(300))
+            .await
+            .expect("claim retry")
+            .expect("retry should be claimable");
+        let outcome = storage
+            .record_transient_job_failure(TransientJobFailure {
+                api_key_id: "owner-a".to_owned(),
+                job_id: job.id.clone(),
+                lease_token: lease.to_owned(),
+                failure_code: "engine_error".to_owned(),
+                failure_message: "engine temporarily failed".to_owned(),
+                now: now + Duration::seconds(30),
+                next_attempt_at: now + Duration::seconds(60),
+            })
+            .await
+            .expect("record retry failure");
+        if lease == "lease-2" {
+            assert!(matches!(outcome, RetryOutcome::RetryWaiting(_)));
+        } else {
+            let RetryOutcome::Failed(failed) = outcome else {
+                panic!("third transient failure should exhaust retries");
+            };
+            assert_eq!(failed.status, "failed");
+            assert_eq!(failed.failure_code.as_deref(), Some("engine_error"));
+            assert_eq!(failed.retryable_by_client, Some(true));
+        }
+    }
+}
+
+#[tokio::test]
+async fn successful_retry_clears_stale_failure_classification() {
+    let (_tempdir, storage) = storage().await;
+    let job = created_job(&storage, "owner-a", "attempt-1").await;
+    storage
+        .claim_next_transcription_job(
+            "lease-1",
+            datetime!(2026-04-24 18:00:00 UTC),
+            datetime!(2026-04-24 18:05:00 UTC),
+        )
+        .await
+        .expect("claim job");
+
+    let first = storage
+        .record_transient_job_failure(TransientJobFailure {
+            api_key_id: "owner-a".to_owned(),
+            job_id: job.id.clone(),
+            lease_token: "lease-1".to_owned(),
+            failure_code: "engine_error".to_owned(),
+            failure_message: "engine temporarily failed".to_owned(),
+            now: datetime!(2026-04-24 18:01:00 UTC),
+            next_attempt_at: datetime!(2026-04-24 18:02:00 UTC),
+        })
+        .await
+        .expect("record transient failure");
+    assert!(matches!(first, RetryOutcome::RetryWaiting(_)));
+
+    storage
+        .claim_next_transcription_job(
+            "lease-2",
+            datetime!(2026-04-24 18:02:00 UTC),
+            datetime!(2026-04-24 18:07:00 UTC),
+        )
+        .await
+        .expect("claim retry")
+        .expect("retry should be claimable");
+    storage
+        .complete_leased_job_with_voice_note(
+            "owner-a",
+            &job.id,
+            "lease-2",
+            materialization("voice-note-a"),
+        )
+        .await
+        .expect("complete retry");
+
+    let completed = storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(completed.status, "succeeded");
+    assert_eq!(completed.retry_count, 1);
+    assert_eq!(completed.failure_code, None);
+    assert_eq!(completed.failure_message, None);
+    assert_eq!(completed.retryable_by_client, None);
 }
 
 #[tokio::test]
@@ -1497,7 +1899,7 @@ async fn accept_while_uncommitted_row_exists(
 
     let racing_storage = storage.clone();
     let handle = tokio::spawn(async move { racing_storage.accept_job(attempted).await });
-    sleep(Duration::from_millis(100)).await;
+    sleep(StdDuration::from_millis(100)).await;
     tx.commit().await.expect("commit accepted row");
     handle.await.expect("accept task should not panic")
 }
@@ -1536,7 +1938,7 @@ async fn open_while_uncommitted_row_exists(
 
     let racing_storage = storage.clone();
     let handle = tokio::spawn(async move { racing_storage.open_job(attempted).await });
-    sleep(Duration::from_millis(100)).await;
+    sleep(StdDuration::from_millis(100)).await;
     tx.commit().await.expect("commit open row");
     handle.await.expect("open task should not panic")
 }
@@ -1551,7 +1953,7 @@ async fn store_chunk_while_uncommitted_chunk_exists(
 
     let racing_storage = storage.clone();
     let handle = tokio::spawn(async move { racing_storage.store_chunk(attempted).await });
-    sleep(Duration::from_millis(100)).await;
+    sleep(StdDuration::from_millis(100)).await;
     assert!(
         !handle.is_finished(),
         "racing chunk push should wait on the held write"
@@ -1601,7 +2003,7 @@ async fn finalize_while_uncommitted_finalize_exists(
             )
             .await
     });
-    sleep(Duration::from_millis(100)).await;
+    sleep(StdDuration::from_millis(100)).await;
     assert!(
         !handle.is_finished(),
         "racing finalize should wait on the held write"
@@ -1715,6 +2117,34 @@ async fn mark_open_job_queued(storage: &Storage, job_id: &str) {
     .await
     .expect("mark open job queued");
     assert_eq!(result.rows_affected(), 1);
+}
+
+async fn store_chunk(storage: &Storage, job_id: &str, hash: &str) {
+    let outcome = storage
+        .store_chunk(accepted_chunk(job_id, hash))
+        .await
+        .expect("store chunk");
+    assert_eq!(outcome, StoreChunkOutcome::Stored);
+}
+
+async fn finalize_open_job_at(
+    storage: &Storage,
+    job_id: &str,
+    audio_sha256_hex: &str,
+    now: OffsetDateTime,
+) {
+    let outcome = storage
+        .finalize_job(
+            "owner-a",
+            job_id,
+            audio_sha256_hex,
+            std::path::Path::new("/var/lib/oracy/accepted-audio/finalized.wav"),
+            "gpt-4o-mini-transcribe",
+            now,
+        )
+        .await
+        .expect("finalize open job");
+    assert!(matches!(outcome, FinalizeJobOutcome::Accepted(_)));
 }
 
 async fn job_count_by_key(storage: &Storage, owner: &str, idempotency_key: &str) -> i64 {
@@ -1864,11 +2294,11 @@ fn materialization(voice_note_id: &str) -> VoiceNoteMaterialization {
                 text: "second segment".to_owned(),
             },
         ],
-        embedding: NewEmbedding {
+        embedding: Some(NewEmbedding {
             model: "embedding-v1".to_owned(),
             vector: vec![1, 2, 3],
             created_at: datetime!(2026-04-24 18:00:31 UTC),
-        },
+        }),
     }
 }
 
