@@ -97,7 +97,8 @@ required, not optional.
   paths, user content, and free-form error text must not appear as
   labels.
 - The initial metric set includes transcription-worker job counters
-  for success, retry, and terminal failure outcomes; retention-cleanup
+  for success, retry, and terminal failure outcomes; an abandonment
+  counter for stale pre-finalize submissions; retention-cleanup
   artifact counters for success and failure outcomes; and a retained-
   audio byte gauge for current accepted-audio capacity tracking.
 - Every metric exposed by `/metrics` carries a `# HELP` line and a
@@ -689,7 +690,8 @@ following are true:
   or `failed`.
 - Operator metrics are exposed only on the operator listener, use the
   documented naming and cardinality policy, and include the initial
-  worker, retention-cleanup, and retained-audio capacity metrics.
+  worker, abandonment, retention-cleanup, and retained-audio capacity
+  metrics.
 - Supported audio formats, per-chunk size ceiling, language-hint
   semantics, pagination shape, and error-envelope semantics are
   named concretely.

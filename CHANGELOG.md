@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add a transcription-job abandonment sweeper that fails stale
+  `accepting_chunks` jobs with `submission_abandoned` and reports swept jobs
+  through operator logs and metrics.
 - Release retained transcription audio when jobs reach `succeeded` or `failed`,
   retry cleanup after transient release failures, and surface per-artifact
   cleanup outcomes through structured logs and retention metrics.

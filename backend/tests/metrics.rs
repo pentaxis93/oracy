@@ -49,6 +49,9 @@ async fn operator_metrics_endpoint_exposes_initial_prometheus_series() {
     assert!(body.contains(r#"failure_class="none""#));
     assert!(body.contains("oracy_retention_cleanup_artifacts_total"));
     assert!(body.contains(r#"artifact="chunk""#));
+    assert!(body.contains("# HELP oracy_transcription_abandonments_total"));
+    assert!(body.contains("# TYPE oracy_transcription_abandonments_total counter"));
+    assert!(body.contains("oracy_transcription_abandonments_total 0"));
     assert!(body.contains("# HELP oracy_retained_audio_bytes"));
     assert!(body.contains("# TYPE oracy_retained_audio_bytes gauge"));
     assert!(body.contains("oracy_retained_audio_bytes 5"));

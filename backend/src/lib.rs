@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+pub mod abandonment_sweeper;
 mod audio_durability;
 pub mod audio_hash;
 pub mod audio_store;

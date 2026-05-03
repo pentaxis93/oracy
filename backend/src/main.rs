@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use oracy_backend::abandonment_sweeper::{AbandonmentSweeperConfig, run_abandonment_sweeper_loop};
 use oracy_backend::bootstrap::load_runtime_from_env;
 use oracy_backend::retention_cleanup::{RetentionCleanupConfig, run_retention_cleanup_loop};
 use oracy_backend::router::{build_operator_router, build_router};
@@ -33,6 +34,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         state.accepted_audio_dir.clone(),
         state.metrics.clone(),
         RetentionCleanupConfig::default(),
+    ));
+    tokio::spawn(run_abandonment_sweeper_loop(
+        state.storage.clone(),
+        state.metrics.clone(),
+        AbandonmentSweeperConfig::default(),
     ));
     tokio::spawn(run_worker_loop(
         worker_storage,

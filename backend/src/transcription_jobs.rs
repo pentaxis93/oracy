@@ -270,13 +270,15 @@ async fn finalize_transcription_job(
     )
     .await
     .map_err(|_| ApiError::internal("Failed to compose accepted audio."))?;
-    let settings = state
-        .storage
-        .get_settings(&api_key_id)
-        .await
-        .map_err(|_| ApiError::internal("Failed to load settings."))?;
+    let settings = match state.storage.get_settings(&api_key_id).await {
+        Ok(settings) => settings,
+        Err(_) => {
+            discard_composed_audio_candidate(&job_id, &accepted_audio_path).await;
+            return Err(ApiError::internal("Failed to load settings."));
+        }
+    };
 
-    match state
+    let outcome = match state
         .storage
         .finalize_job(
             &api_key_id,
@@ -287,19 +289,35 @@ async fn finalize_transcription_job(
             OffsetDateTime::now_utc(),
         )
         .await
-        .map_err(|_| ApiError::internal("Failed to finalize transcription job."))?
     {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            discard_composed_audio_candidate(&job_id, &accepted_audio_path).await;
+            return Err(ApiError::internal("Failed to finalize transcription job."));
+        }
+    };
+
+    match outcome {
         FinalizeJobOutcome::Accepted(job) => Ok((StatusCode::ACCEPTED, Json(job_resource(job)?))),
         FinalizeJobOutcome::Replayed(job) => Ok((StatusCode::OK, Json(job_resource(job)?))),
-        FinalizeJobOutcome::MissingChunks => Err(ApiError::conflict(
-            "Every declared chunk must be accepted before finalize.",
-            None,
-        )),
-        FinalizeJobOutcome::NotFound => Err(ApiError::not_found("Transcription job not found.")),
-        FinalizeJobOutcome::NotAcceptingChunks => Err(ApiError::conflict(
-            "Transcription job is not accepting chunks.",
-            None,
-        )),
+        FinalizeJobOutcome::MissingChunks => {
+            discard_composed_audio_candidate(&job_id, &accepted_audio_path).await;
+            Err(ApiError::conflict(
+                "Every declared chunk must be accepted before finalize.",
+                None,
+            ))
+        }
+        FinalizeJobOutcome::NotFound => {
+            discard_composed_audio_candidate(&job_id, &accepted_audio_path).await;
+            Err(ApiError::not_found("Transcription job not found."))
+        }
+        FinalizeJobOutcome::NotAcceptingChunks => {
+            discard_composed_audio_candidate(&job_id, &accepted_audio_path).await;
+            Err(ApiError::conflict(
+                "Transcription job is not accepting chunks.",
+                None,
+            ))
+        }
     }
 }
 
@@ -351,6 +369,21 @@ fn validate_open_body(body: &OpenTranscriptionJobRequest) -> Result<(), ApiError
 
 async fn discard_chunk_candidate(path: &std::path::Path) {
     let _ = tokio::fs::remove_file(path).await;
+}
+
+async fn discard_composed_audio_candidate(job_id: &str, path: &std::path::Path) {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::error!(
+                job_id = %job_id,
+                accepted_audio_path = %path.display(),
+                failure_reason = %error,
+                "failed to discard unrecorded composed audio"
+            );
+        }
+    }
 }
 
 fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
