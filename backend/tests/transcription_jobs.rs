@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -13,6 +15,7 @@ use oracy_backend::storage::Storage;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tokio::time::{Duration, sleep};
 use tower::util::ServiceExt;
 
 #[tokio::test]
@@ -493,6 +496,81 @@ async fn finalize_requires_all_chunks_and_replays_after_acceptance() {
 }
 
 #[tokio::test]
+async fn finalize_discards_composed_audio_when_abandonment_sweeper_wins_during_compose() {
+    let fixture = TranscriptionJobFixture::new().await;
+    let (job_id, fifo_path, accepted_audio_path) = fixture
+        .create_fifo_backed_open_job("attempt-sweeper-finalize-race", b"blocked audio")
+        .await;
+
+    let finalize = {
+        let app = fixture.app.clone();
+        let job_id = job_id.clone();
+        tokio::spawn(async move { finalize_request(app, job_id).await })
+    };
+    let fifo_writer = fixture.open_fifo_writer_after_reader(&fifo_path).await;
+
+    fixture.sweep_abandoned_jobs().await;
+    fixture.write_fifo(fifo_writer, b"blocked audio");
+
+    let response = finalize.await.expect("finalize task should not panic");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(
+        !accepted_audio_path.exists(),
+        "composed audio should be discarded after non-accepting finalize outcome"
+    );
+}
+
+#[tokio::test]
+async fn finalize_discards_composed_audio_when_chunk_rows_disappear_after_compose_starts() {
+    let fixture = TranscriptionJobFixture::new().await;
+    let (job_id, fifo_path, accepted_audio_path) = fixture
+        .create_fifo_backed_open_job("attempt-missing-chunks-finalize-race", b"blocked audio")
+        .await;
+
+    let finalize = {
+        let app = fixture.app.clone();
+        let job_id = job_id.clone();
+        tokio::spawn(async move { finalize_request(app, job_id).await })
+    };
+    let fifo_writer = fixture.open_fifo_writer_after_reader(&fifo_path).await;
+
+    fixture.delete_chunk_row(&job_id, 0).await;
+    fixture.write_fifo(fifo_writer, b"blocked audio");
+
+    let response = finalize.await.expect("finalize task should not panic");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(
+        !accepted_audio_path.exists(),
+        "composed audio should be discarded after missing chunks finalize outcome"
+    );
+}
+
+#[tokio::test]
+async fn finalize_discards_composed_audio_when_job_disappears_after_compose_starts() {
+    let fixture = TranscriptionJobFixture::new().await;
+    let (job_id, fifo_path, accepted_audio_path) = fixture
+        .create_fifo_backed_open_job("attempt-not-found-finalize-race", b"blocked audio")
+        .await;
+
+    let finalize = {
+        let app = fixture.app.clone();
+        let job_id = job_id.clone();
+        tokio::spawn(async move { finalize_request(app, job_id).await })
+    };
+    let fifo_writer = fixture.open_fifo_writer_after_reader(&fifo_path).await;
+
+    fixture.delete_job_row(&job_id).await;
+    fixture.write_fifo(fifo_writer, b"blocked audio");
+
+    let response = finalize.await.expect("finalize task should not panic");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        !accepted_audio_path.exists(),
+        "composed audio should be discarded after not found finalize outcome"
+    );
+}
+
+#[tokio::test]
 async fn finalize_captures_current_settings_and_nulls_sessions_deleted_after_open() {
     let fixture = TranscriptionJobFixture::new().await;
     let created_session = fixture
@@ -630,6 +708,7 @@ struct JsonResponse {
 
 struct TranscriptionJobFixture {
     _tempdir: TempDir,
+    accepted_audio_dir: PathBuf,
     metrics: Metrics,
     storage: Storage,
     app: axum::Router,
@@ -660,6 +739,7 @@ impl TranscriptionJobFixture {
 
         Self {
             _tempdir: tempdir,
+            accepted_audio_dir,
             metrics,
             storage,
             app,
@@ -746,6 +826,117 @@ impl TranscriptionJobFixture {
         .await
         .expect("accepted audio path");
         std::path::PathBuf::from(path)
+    }
+
+    async fn create_fifo_backed_open_job(
+        &self,
+        idempotency_key: &str,
+        bytes: &[u8],
+    ) -> (String, PathBuf, PathBuf) {
+        let opened = self
+            .json_request(
+                "POST",
+                "/api/v1/transcription-jobs",
+                Some(idempotency_key),
+                Some(json!({
+                    "recorded_at": "2026-04-24T17:59:00Z",
+                    "chunk_count": 1,
+                    "audio_format": "wav"
+                })),
+            )
+            .await;
+        assert_eq!(opened.status, StatusCode::CREATED);
+        let job_id = opened.body["id"].as_str().expect("job id").to_owned();
+        let chunk_dir = self.accepted_audio_dir.join(&job_id).join("chunks");
+        tokio::fs::create_dir_all(&chunk_dir)
+            .await
+            .expect("create chunk dir");
+        let fifo_path = chunk_dir.join("blocking.chunk");
+        let status = Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .expect("run mkfifo");
+        assert!(
+            status.success(),
+            "mkfifo should create blocking chunk source"
+        );
+
+        sqlx::query(
+            r#"
+            INSERT INTO transcription_job_chunks (
+                api_key_id, job_id, chunk_index, chunk_sha256_hex,
+                chunk_path, chunk_size_bytes, accepted_at
+            )
+            VALUES ('alpha', ?, 0, ?, ?, ?, '2026-04-24T18:00:01Z')
+            "#,
+        )
+        .bind(&job_id)
+        .bind(sha256_hex(bytes))
+        .bind(fifo_path.to_string_lossy().into_owned())
+        .bind(bytes.len() as i64)
+        .execute(self.storage.pool())
+        .await
+        .expect("insert blocking chunk row");
+
+        let accepted_audio_path = self.accepted_audio_dir.join(&job_id).join("accepted.wav");
+        (job_id, fifo_path, accepted_audio_path)
+    }
+
+    async fn open_fifo_writer_after_reader(&self, fifo_path: &std::path::Path) -> std::fs::File {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        const O_NONBLOCK: i32 = 0o4000;
+        const ENXIO: i32 = 6;
+
+        for _ in 0..100 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(O_NONBLOCK)
+                .open(fifo_path)
+            {
+                Ok(writer) => return writer,
+                Err(error) if error.raw_os_error() == Some(ENXIO) => {
+                    sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("open fifo writer: {error}"),
+            }
+        }
+        panic!("finalize did not open the fifo chunk for reading");
+    }
+
+    fn write_fifo(&self, mut fifo: std::fs::File, bytes: &[u8]) {
+        use std::io::Write;
+
+        fifo.write_all(bytes).expect("write fifo bytes");
+    }
+
+    async fn delete_chunk_row(&self, job_id: &str, chunk_index: i64) {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM transcription_job_chunks
+            WHERE api_key_id = 'alpha' AND job_id = ? AND chunk_index = ?
+            "#,
+        )
+        .bind(job_id)
+        .bind(chunk_index)
+        .execute(self.storage.pool())
+        .await
+        .expect("delete chunk row");
+        assert_eq!(result.rows_affected(), 1);
+    }
+
+    async fn delete_job_row(&self, job_id: &str) {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM transcription_jobs
+            WHERE api_key_id = 'alpha' AND id = ?
+            "#,
+        )
+        .bind(job_id)
+        .execute(self.storage.pool())
+        .await
+        .expect("delete job row");
+        assert_eq!(result.rows_affected(), 1);
     }
 
     async fn stored_audio_hash(&self, job_id: &str) -> String {
@@ -861,6 +1052,19 @@ async fn json_body(response: axum::response::Response) -> Value {
         return Value::Null;
     }
     serde_json::from_slice(&bytes).expect("valid json")
+}
+
+async fn finalize_request(app: axum::Router, job_id: String) -> axum::response::Response {
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/transcription-jobs/{job_id}/finalize"))
+            .header("Authorization", "Bearer alpha-secret")
+            .body(Body::empty())
+            .expect("finalize request"),
+    )
+    .await
+    .expect("finalize response")
 }
 
 fn multipart_body(boundary: &str, chunk_index: usize, chunk_sha256: &str, bytes: &[u8]) -> Vec<u8> {
