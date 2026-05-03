@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
@@ -158,16 +159,18 @@ where
     for artifact in artifacts {
         match releaser.release(&artifact).await {
             Ok(()) => {
-                storage
+                let released = storage
                     .mark_retained_audio_artifact_released(&artifact)
                     .await?;
-                metrics.record_retention_cleanup_succeeded(metric_artifact(&artifact));
-                tracing::info!(
-                    job_id = %artifact.job_id,
-                    artifact_kind = artifact_label(&artifact),
-                    artifact_path = %artifact.path.display(),
-                    "retention cleanup released artifact"
-                );
+                if released {
+                    metrics.record_retention_cleanup_succeeded(metric_artifact(&artifact));
+                    tracing::info!(
+                        job_id = %artifact.job_id,
+                        artifact_kind = artifact_label(&artifact),
+                        artifact_path = %artifact.path.display(),
+                        "retention cleanup released artifact"
+                    );
+                }
             }
             Err(error) => {
                 let failure_reason = error.to_string();
@@ -204,9 +207,7 @@ async fn safe_retained_audio_path(
     } else {
         accepted_audio_dir.join(path)
     };
-    if has_parent_component(&target) {
-        return Err(RetentionCleanupError::UnsafePath(target));
-    }
+    let target = lexically_normalize_path(&target);
 
     match tokio::fs::canonicalize(&target).await {
         Ok(canonical_target) => {
@@ -216,14 +217,18 @@ async fn safe_retained_audio_path(
                 Err(RetentionCleanupError::UnsafePath(target))
             }
         }
-        Err(error)
-            if error.kind() == io::ErrorKind::NotFound
-                && (target.starts_with(accepted_audio_dir) || target.starts_with(&root)) =>
-        {
-            Ok(target)
-        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            Err(RetentionCleanupError::UnsafePath(target))
+            let resolved_target = resolve_missing_path(&target).await.map_err(|source| {
+                RetentionCleanupError::Inspect {
+                    path: target.clone(),
+                    source,
+                }
+            })?;
+            if resolved_target.starts_with(&root) {
+                Ok(target)
+            } else {
+                Err(RetentionCleanupError::UnsafePath(target))
+            }
         }
         Err(source) => Err(RetentionCleanupError::Inspect {
             path: target,
@@ -232,9 +237,62 @@ async fn safe_retained_audio_path(
     }
 }
 
-fn has_parent_component(path: &Path) -> bool {
-    path.components()
-        .any(|component| matches!(component, Component::ParentDir))
+fn lexically_normalize_path(path: &Path) -> PathBuf {
+    let mut parts = Vec::new();
+    let mut has_root = false;
+
+    for component in path.components() {
+        match component {
+            Component::RootDir => {
+                has_root = true;
+                parts.clear();
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts.pop().is_none() && !has_root {
+                    parts.push(OsString::from(".."));
+                }
+            }
+            Component::Normal(part) => parts.push(part.to_os_string()),
+            Component::Prefix(_) => {}
+        }
+    }
+
+    let mut normalized = if has_root {
+        PathBuf::from("/")
+    } else {
+        PathBuf::new()
+    };
+    for part in parts {
+        normalized.push(part);
+    }
+    normalized
+}
+
+async fn resolve_missing_path(path: &Path) -> io::Result<PathBuf> {
+    let mut ancestor = path.to_path_buf();
+    let mut missing = Vec::new();
+
+    loop {
+        match tokio::fs::canonicalize(&ancestor).await {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let Some(file_name) = ancestor.file_name() else {
+                    return Err(error);
+                };
+                missing.push(file_name.to_os_string());
+                if !ancestor.pop() {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 async fn cleanup_empty_parent_dirs(root: &Path, parent: Option<&Path>) {

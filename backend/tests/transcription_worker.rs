@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -32,6 +32,7 @@ use tempfile::TempDir;
 use time::Duration as TimeDuration;
 use time::OffsetDateTime;
 use time::macros::datetime;
+use tokio::sync::Barrier;
 use tower::util::ServiceExt;
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
@@ -285,6 +286,148 @@ async fn retained_terminal_audio_is_released_by_restart_sweep() {
         ("job_id", &job.id),
         ("artifact_kind", "composed_audio"),
     ]));
+}
+
+#[tokio::test]
+async fn cleanup_releases_audio_when_accepted_audio_dir_contains_parent_components() {
+    let fixture = WorkerFixture::new_with_parent_component_accepted_audio_dir().await;
+    let job = fixture
+        .create_queued_job("attempt-parent-component-cleanup", b"hello audio")
+        .await;
+    fixture.mark_job_failed(&job.id).await;
+    let artifacts = fixture.retained_artifact_paths(&job.id).await;
+
+    cleanup_retained_audio_once(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &Metrics::new(),
+    )
+    .await
+    .expect("cleanup sweep");
+
+    for artifact in &artifacts {
+        assert!(
+            !tokio::fs::try_exists(artifact)
+                .await
+                .expect("artifact existence check"),
+            "expected retained artifact released from parent-component root: {}",
+            artifact.display()
+        );
+    }
+    assert_eq!(fixture.retained_artifact_count(&job.id).await, 0);
+}
+
+#[tokio::test]
+async fn cleanup_rejects_lexical_escape_from_accepted_audio_dir() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_queued_job("attempt-lexical-escape-cleanup", b"hello audio")
+        .await;
+    fixture.mark_job_failed(&job.id).await;
+    let escape_path = fixture
+        .accepted_audio_dir
+        .join("..")
+        .join("outside")
+        .join("missing.wav");
+    fixture
+        .set_composed_retained_path(&job.id, &escape_path)
+        .await;
+
+    cleanup_retained_audio_once(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &Metrics::new(),
+    )
+    .await
+    .expect("unsafe cleanup is recorded internally");
+
+    assert_eq!(fixture.retained_artifact_count(&job.id).await, 1);
+    assert_eq!(fixture.composed_cleanup_attempts(&job.id).await, 1);
+}
+
+#[tokio::test]
+async fn cleanup_rejects_symlink_escape_from_accepted_audio_dir() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_queued_job("attempt-symlink-escape-cleanup", b"hello audio")
+        .await;
+    fixture.mark_job_failed(&job.id).await;
+
+    let outside_dir = fixture
+        .accepted_audio_dir
+        .parent()
+        .expect("accepted audio dir has parent")
+        .join("outside");
+    tokio::fs::create_dir(&outside_dir)
+        .await
+        .expect("create outside dir");
+    let outside_artifact = outside_dir.join("escaped.wav");
+    tokio::fs::write(&outside_artifact, b"outside audio")
+        .await
+        .expect("write outside artifact");
+    let symlink_path = fixture.accepted_audio_dir.join("outside-link");
+    symlink(&outside_dir, &symlink_path).expect("create outside symlink");
+    let retained_path = symlink_path.join("escaped.wav");
+    fixture
+        .set_composed_retained_path(&job.id, &retained_path)
+        .await;
+
+    cleanup_retained_audio_once(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &Metrics::new(),
+    )
+    .await
+    .expect("unsafe cleanup is recorded internally");
+
+    assert!(
+        tokio::fs::try_exists(&outside_artifact)
+            .await
+            .expect("outside artifact existence check"),
+        "symlink escape target should not be removed"
+    );
+    assert_eq!(fixture.retained_artifact_count(&job.id).await, 1);
+    assert_eq!(fixture.composed_cleanup_attempts(&job.id).await, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn overlapping_cleaners_record_success_once_for_one_retained_artifact() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_queued_job("attempt-overlapping-cleanup", b"hello audio")
+        .await;
+    fixture.mark_job_failed(&job.id).await;
+    let metrics = Metrics::new();
+    let events = global_captured_events();
+    let releaser = BarrierReleaser {
+        barrier: Arc::new(Barrier::new(2)),
+    };
+    let other_releaser = releaser.clone();
+
+    let (first, second) = tokio::join!(
+        cleanup_retained_audio_once_with_releaser(&fixture.storage, &metrics, &releaser),
+        cleanup_retained_audio_once_with_releaser(&fixture.storage, &metrics, &other_releaser),
+    );
+    first.expect("first cleanup");
+    second.expect("second cleanup");
+
+    let body = operator_metrics_text(&fixture, metrics).await;
+    assert_metric_sample_has_value(
+        &body,
+        "oracy_retention_cleanup_artifacts_total",
+        &[r#"outcome="succeeded""#, r#"artifact="composed_audio""#],
+        "1",
+    );
+    assert_eq!(
+        events.count_fields(&[
+            ("message", "retention cleanup released artifact"),
+            ("job_id", &job.id),
+            ("artifact_kind", "composed_audio"),
+        ]),
+        1
+    );
 }
 
 #[tokio::test]
@@ -732,6 +875,28 @@ impl WorkerFixture {
         }
     }
 
+    async fn new_with_parent_component_accepted_audio_dir() -> Self {
+        let tempdir = TempDir::new().expect("tempdir");
+        let database_path = tempdir.path().join("oracy.sqlite");
+        let config_dir = tempdir.path().join("config");
+        tokio::fs::create_dir(&config_dir)
+            .await
+            .expect("create config dir");
+        let canonical_accepted_audio_dir = tempdir.path().join("accepted-audio");
+        tokio::fs::create_dir(&canonical_accepted_audio_dir)
+            .await
+            .expect("create accepted audio dir");
+        let accepted_audio_dir = config_dir.join("../accepted-audio");
+        let storage = Storage::connect(&database_path)
+            .await
+            .expect("connect storage");
+        Self {
+            _tempdir: tempdir,
+            accepted_audio_dir,
+            storage,
+        }
+    }
+
     async fn create_queued_job(
         &self,
         idempotency_key: &str,
@@ -881,6 +1046,48 @@ impl WorkerFixture {
         paths
     }
 
+    async fn retained_artifact_count(&self, job_id: &str) -> i64 {
+        let composed_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM transcription_jobs
+            WHERE api_key_id = 'owner-a' AND id = ? AND accepted_audio_path <> ''
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("composed retained artifact count");
+        let chunk_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM transcription_job_chunks
+            WHERE api_key_id = 'owner-a' AND job_id = ? AND chunk_path <> ''
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(self.storage.pool())
+        .await
+        .expect("chunk retained artifact count");
+        composed_count + chunk_count
+    }
+
+    async fn set_composed_retained_path(&self, job_id: &str, path: &std::path::Path) {
+        let result = sqlx::query(
+            r#"
+            UPDATE transcription_jobs
+            SET accepted_audio_path = ?
+            WHERE api_key_id = 'owner-a' AND id = ?
+            "#,
+        )
+        .bind(path.to_string_lossy().into_owned())
+        .bind(job_id)
+        .execute(self.storage.pool())
+        .await
+        .expect("set composed retained path");
+        assert_eq!(result.rows_affected(), 1);
+    }
+
     async fn chunk_row_count(&self, job_id: &str) -> i64 {
         sqlx::query_scalar(
             r#"
@@ -980,9 +1187,37 @@ impl RetainedAudioReleaser for FailingReleaser {
     }
 }
 
+#[derive(Clone)]
+struct BarrierReleaser {
+    barrier: Arc<Barrier>,
+}
+
+impl RetainedAudioReleaser for BarrierReleaser {
+    async fn release(
+        &self,
+        _artifact: &oracy_backend::storage::RetainedAudioArtifact,
+    ) -> Result<(), RetentionCleanupError> {
+        self.barrier.wait().await;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Default)]
 struct CapturedEvents {
     events: Arc<Mutex<Vec<CapturedEvent>>>,
+}
+
+static GLOBAL_CAPTURED_EVENTS: OnceLock<CapturedEvents> = OnceLock::new();
+
+fn global_captured_events() -> CapturedEvents {
+    GLOBAL_CAPTURED_EVENTS
+        .get_or_init(|| {
+            let events = CapturedEvents::default();
+            tracing::subscriber::set_global_default(Registry::default().with(events.clone()))
+                .expect("global tracing subscriber");
+            events
+        })
+        .clone()
 }
 
 impl CapturedEvents {
@@ -995,6 +1230,22 @@ impl CapturedEvents {
                     .any(|(name, actual)| name == field && actual.contains(value))
             })
         })
+    }
+
+    fn count_fields(&self, expected: &[(&str, &str)]) -> usize {
+        self.events
+            .lock()
+            .expect("events")
+            .iter()
+            .filter(|event| {
+                expected.iter().all(|(field, value)| {
+                    event
+                        .fields
+                        .iter()
+                        .any(|(name, actual)| name == field && actual.contains(value))
+                })
+            })
+            .count()
     }
 }
 

@@ -1416,9 +1416,9 @@ impl Storage {
     pub async fn mark_retained_audio_artifact_released(
         &self,
         artifact: &RetainedAudioArtifact,
-    ) -> Result<(), StorageError> {
+    ) -> Result<bool, StorageError> {
         let path = artifact.path.to_string_lossy().into_owned();
-        match artifact.kind {
+        let result = match artifact.kind {
             RetainedAudioArtifactKind::ComposedAudio => {
                 sqlx::query(
                     r#"
@@ -1433,7 +1433,7 @@ impl Storage {
                 .bind(&artifact.job_id)
                 .bind(path)
                 .execute(&self.pool)
-                .await?;
+                .await?
             }
             RetainedAudioArtifactKind::Chunk => {
                 sqlx::query(
@@ -1451,10 +1451,10 @@ impl Storage {
                 .bind(artifact.chunk_index.expect("chunk artifact has index"))
                 .bind(path)
                 .execute(&self.pool)
-                .await?;
+                .await?
             }
-        }
-        Ok(())
+        };
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn record_retained_audio_artifact_cleanup_failure(
