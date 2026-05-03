@@ -1,8 +1,9 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncWriteExt, BufReader};
 use ulid::Ulid;
 
+use crate::audio_durability::sync_directory_chain;
 use crate::storage::ChunkRecord;
 
 pub const MAX_CHUNK_BYTES: usize = 26_214_400;
@@ -60,55 +61,4 @@ pub async fn compose_chunks(
     tokio::fs::rename(&temp_path, &final_path).await?;
     sync_directory_chain(accepted_audio_dir, &job_dir)?;
     Ok(final_path)
-}
-
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    std::fs::File::open(path)?.sync_all()
-}
-
-fn sync_directory_chain(root: &Path, leaf: &Path) -> std::io::Result<()> {
-    let relative_leaf = leaf.strip_prefix(root).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "directory sync leaf must be under the durable root",
-        )
-    })?;
-
-    sync_directory(root)?;
-    let mut path = root.to_path_buf();
-    for component in relative_leaf.components() {
-        match component {
-            Component::Normal(name) => {
-                path.push(name);
-                sync_directory(&path)?;
-            }
-            Component::CurDir => {}
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "directory sync leaf must not traverse outside the durable root",
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::sync_directory_chain;
-
-    #[test]
-    fn sync_directory_chain_rejects_leaf_outside_root() {
-        let tempdir = tempfile::TempDir::new().expect("tempdir");
-        let root = tempdir.path().join("accepted-audio");
-        let other = tempdir.path().join("other").join("chunks");
-        std::fs::create_dir(&root).expect("create accepted audio dir");
-        std::fs::create_dir_all(&other).expect("create outside leaf");
-
-        let error = sync_directory_chain(&root, &other).expect_err("outside leaf should fail");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    }
 }
