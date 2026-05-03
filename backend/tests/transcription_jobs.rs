@@ -735,6 +735,9 @@ impl TranscriptionJobFixture {
             operator_listen_addr: "127.0.0.1:9090".parse().expect("operator listen addr"),
             openai_api_key: "test-openai-key".to_owned(),
             storage: storage.clone(),
+            embedding_regeneration_trigger: Arc::new(
+                oracy_backend::embedding_regeneration::NoopEmbeddingRegenerationTrigger,
+            ),
         });
 
         Self {

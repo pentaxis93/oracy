@@ -1,9 +1,12 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use oracy_backend::auth::AuthStore;
 use oracy_backend::config::ApiKeyConfig;
+use oracy_backend::embedding_regeneration::{
+    EmbeddingRegenerationRequest, EmbeddingRegenerationTrigger, EmbeddingRegenerationTriggerError,
+};
 use oracy_backend::router::build_router;
 use oracy_backend::state::AppState;
 use oracy_backend::storage::Storage;
@@ -272,6 +275,161 @@ async fn version_history_returns_versions_newest_first_in_shared_envelope() {
 }
 
 #[tokio::test]
+async fn patch_voice_note_text_appends_version_updates_reads_and_initiates_embedding_regeneration()
+{
+    let trigger = Arc::new(RecordingEmbeddingTrigger::failing());
+    let fixture = VoiceNoteFixture::new_with_trigger(trigger.clone()).await;
+    fixture
+        .insert_voice_note(VoiceNoteSeed {
+            owner: "alpha",
+            id: NOTE_OLD,
+            version_id: VERSION_OLD,
+            text: "initial text",
+            created_at: "2026-04-24T18:00:00.000000000Z",
+            recorded_at: "2026-04-24T17:59:00.000000000Z",
+            session_id: None,
+            tags: vec![TagSeed {
+                id: TAG_MEETING,
+                name: "Meeting",
+                created_at: "2026-04-24T18:01:30.000000000Z",
+            }],
+        })
+        .await;
+    fixture
+        .insert_segment("alpha", NOTE_OLD, SEGMENT_FIRST, 0, "original segment")
+        .await;
+
+    let response = fixture
+        .json_request(
+            "PATCH",
+            &format!("/api/v1/voice-notes/{NOTE_OLD}"),
+            "alpha-secret",
+            Some(json!({"text": "edited text"})),
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["id"], NOTE_OLD);
+    assert_eq!(response.body["text"], "edited text");
+    assert_ne!(response.body["current_version_id"], VERSION_OLD);
+    assert_eq!(
+        trigger.requests(),
+        vec![EmbeddingRegenerationRequest {
+            api_key_id: "alpha".to_owned(),
+            voice_note_id: NOTE_OLD.to_owned(),
+        }]
+    );
+
+    let versions = fixture
+        .get_json(
+            &format!("/api/v1/voice-notes/{NOTE_OLD}/versions"),
+            "alpha-secret",
+        )
+        .await;
+    assert_eq!(versions["items"].as_array().expect("versions").len(), 2);
+    assert_eq!(versions["items"][0]["text"], "edited text");
+    assert_eq!(versions["items"][1]["id"], VERSION_OLD);
+
+    let detail = fixture
+        .get_json(&format!("/api/v1/voice-notes/{NOTE_OLD}"), "alpha-secret")
+        .await;
+    assert_eq!(detail["text"], "edited text");
+    assert_eq!(
+        detail["current_version_id"],
+        response.body["current_version_id"]
+    );
+    assert_eq!(detail["tags"][0]["id"], TAG_MEETING);
+
+    let segments = fixture
+        .get_json(
+            &format!("/api/v1/voice-notes/{NOTE_OLD}/segments"),
+            "alpha-secret",
+        )
+        .await;
+    assert_eq!(segments["items"][0]["text"], "original segment");
+}
+
+#[tokio::test]
+async fn patch_voice_note_text_reports_contract_errors_for_invalid_requests() {
+    let fixture = VoiceNoteFixture::new().await;
+    fixture
+        .insert_voice_note(VoiceNoteSeed {
+            owner: "beta",
+            id: NOTE_OTHER_OWNER,
+            version_id: NOTE_OTHER_OWNER,
+            text: "hidden note",
+            created_at: "2026-04-24T18:00:00.000000000Z",
+            recorded_at: "2026-04-24T17:59:00.000000000Z",
+            session_id: None,
+            tags: vec![],
+        })
+        .await;
+
+    let malformed_path = fixture
+        .json_request(
+            "PATCH",
+            "/api/v1/voice-notes/not-a-ulid",
+            "alpha-secret",
+            Some(json!({"text": "edited"})),
+        )
+        .await;
+    assert_eq!(malformed_path.status, StatusCode::BAD_REQUEST);
+    assert_eq!(malformed_path.body["details"][0]["field"], "voice_note_id");
+
+    for voice_note_id in [NOTE_MISSING, NOTE_OTHER_OWNER] {
+        let response = fixture
+            .json_request(
+                "PATCH",
+                &format!("/api/v1/voice-notes/{voice_note_id}"),
+                "alpha-secret",
+                Some(json!({"text": "edited"})),
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+        assert_eq!(response.body["error_code"], "not_found");
+    }
+
+    let malformed_json = fixture
+        .request(
+            "PATCH",
+            &format!("/api/v1/voice-notes/{NOTE_MISSING}"),
+            "alpha-secret",
+            Some("{".to_owned()),
+        )
+        .await;
+    assert_eq!(malformed_json.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(malformed_json).await["error_code"],
+        "malformed_json"
+    );
+
+    let invalid_shape = fixture
+        .json_request(
+            "PATCH",
+            &format!("/api/v1/voice-notes/{NOTE_MISSING}"),
+            "alpha-secret",
+            Some(json!({"text": 1})),
+        )
+        .await;
+    assert_eq!(invalid_shape.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(invalid_shape.body["error_code"], "invalid_request_shape");
+
+    let unauthorized = fixture
+        .app()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/v1/voice-notes/{NOTE_MISSING}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({"text": "edited"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn segments_return_in_position_order_with_pagination() {
     let fixture = VoiceNoteFixture::new().await;
     fixture
@@ -310,6 +468,221 @@ async fn segments_return_in_position_order_with_pagination() {
         .await;
     assert_eq!(second["items"][0]["id"], SEGMENT_SECOND);
     assert_eq!(second["next_cursor"], Value::Null);
+}
+
+#[tokio::test]
+async fn put_voice_note_tags_replaces_the_full_tag_set_without_creating_a_version() {
+    let fixture = VoiceNoteFixture::new().await;
+    fixture
+        .insert_voice_note(VoiceNoteSeed {
+            owner: "alpha",
+            id: NOTE_OLD,
+            version_id: VERSION_OLD,
+            text: "tagged note",
+            created_at: "2026-04-24T18:00:00.000000000Z",
+            recorded_at: "2026-04-24T17:59:00.000000000Z",
+            session_id: None,
+            tags: vec![TagSeed {
+                id: TAG_MEETING,
+                name: "Meeting",
+                created_at: "2026-04-24T18:01:30.000000000Z",
+            }],
+        })
+        .await;
+    fixture
+        .insert_tag(
+            "alpha",
+            TAG_ACTION,
+            "Action",
+            "2026-04-24T18:01:40.000000000Z",
+        )
+        .await;
+    fixture
+        .insert_tag(
+            "beta",
+            TAG_MISSING,
+            "Hidden",
+            "2026-04-24T18:01:50.000000000Z",
+        )
+        .await;
+
+    let response = fixture
+        .json_request(
+            "PUT",
+            &format!("/api/v1/voice-notes/{NOTE_OLD}/tags"),
+            "alpha-secret",
+            Some(json!({"tag_ids": [TAG_ACTION]})),
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["tags"][0]["id"], TAG_ACTION);
+    assert_eq!(response.body["current_version_id"], VERSION_OLD);
+
+    let versions = fixture
+        .get_json(
+            &format!("/api/v1/voice-notes/{NOTE_OLD}/versions"),
+            "alpha-secret",
+        )
+        .await;
+    assert_eq!(versions["items"].as_array().expect("versions").len(), 1);
+
+    let duplicate = fixture
+        .json_request(
+            "PUT",
+            &format!("/api/v1/voice-notes/{NOTE_OLD}/tags"),
+            "alpha-secret",
+            Some(json!({"tag_ids": [TAG_ACTION, TAG_ACTION]})),
+        )
+        .await;
+    assert_eq!(duplicate.status, StatusCode::BAD_REQUEST);
+    assert_eq!(duplicate.body["error_code"], "validation_error");
+    assert_eq!(duplicate.body["details"][0]["field"], "tag_ids");
+
+    for tag_id in [TAG_MISSING, TAG_ACTION] {
+        let bearer = if tag_id == TAG_MISSING {
+            "alpha-secret"
+        } else {
+            "beta-secret"
+        };
+        let response = fixture
+            .json_request(
+                "PUT",
+                &format!("/api/v1/voice-notes/{NOTE_OLD}/tags"),
+                bearer,
+                Some(json!({"tag_ids": [tag_id]})),
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+    }
+
+    let malformed_tag_id = fixture
+        .json_request(
+            "PUT",
+            &format!("/api/v1/voice-notes/{NOTE_OLD}/tags"),
+            "alpha-secret",
+            Some(json!({"tag_ids": ["not-a-ulid"]})),
+        )
+        .await;
+    assert_eq!(malformed_tag_id.status, StatusCode::BAD_REQUEST);
+    assert_eq!(malformed_tag_id.body["details"][0]["field"], "tag_ids");
+}
+
+#[tokio::test]
+async fn delete_voice_note_hard_deletes_children_and_preserves_the_succeeded_job_replay_record() {
+    let fixture = VoiceNoteFixture::new().await;
+    fixture
+        .insert_voice_note(VoiceNoteSeed {
+            owner: "alpha",
+            id: NOTE_OLD,
+            version_id: VERSION_OLD,
+            text: "doomed note",
+            created_at: "2026-04-24T18:00:00.000000000Z",
+            recorded_at: "2026-04-24T17:59:00.000000000Z",
+            session_id: None,
+            tags: vec![TagSeed {
+                id: TAG_MEETING,
+                name: "Meeting",
+                created_at: "2026-04-24T18:01:30.000000000Z",
+            }],
+        })
+        .await;
+    fixture
+        .insert_version(
+            "alpha",
+            NOTE_OLD,
+            VERSION_NEW,
+            2,
+            "edited text",
+            "2026-04-24T18:01:00.000000000Z",
+        )
+        .await;
+    fixture
+        .insert_segment("alpha", NOTE_OLD, SEGMENT_FIRST, 0, "segment text")
+        .await;
+    fixture.insert_embedding("alpha", NOTE_OLD).await;
+    fixture
+        .insert_succeeded_job("alpha", JOB_ALPHA, NOTE_OLD)
+        .await;
+
+    let response = fixture
+        .request(
+            "DELETE",
+            &format!("/api/v1/voice-notes/{NOTE_OLD}"),
+            "alpha-secret",
+            None,
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        fixture
+            .storage
+            .get_voice_note("alpha", NOTE_OLD)
+            .await
+            .expect("voice note lookup")
+            .is_none()
+    );
+    assert!(
+        fixture
+            .storage
+            .list_voice_note_versions("alpha", NOTE_OLD, None, 10)
+            .await
+            .expect("versions")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .storage
+            .list_segments("alpha", NOTE_OLD)
+            .await
+            .expect("segments")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .storage
+            .get_current_embedding("alpha", NOTE_OLD)
+            .await
+            .expect("embedding lookup")
+            .is_none()
+    );
+    assert!(
+        fixture
+            .storage
+            .list_voice_note_tags("alpha", NOTE_OLD)
+            .await
+            .expect("tags")
+            .is_empty()
+    );
+    let job = fixture
+        .storage
+        .get_job("alpha", JOB_ALPHA)
+        .await
+        .expect("job lookup")
+        .expect("job survives");
+    assert_eq!(job.status, "succeeded");
+    assert_eq!(job.voice_note_id, None);
+
+    let missing = fixture
+        .request(
+            "DELETE",
+            &format!("/api/v1/voice-notes/{NOTE_OLD}"),
+            "alpha-secret",
+            None,
+        )
+        .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let malformed = fixture
+        .request(
+            "DELETE",
+            "/api/v1/voice-notes/not-a-ulid",
+            "alpha-secret",
+            None,
+        )
+        .await;
+    assert_validation_error(malformed, "voice_note_id").await;
 }
 
 #[tokio::test]
@@ -879,6 +1252,45 @@ struct VoiceNoteFixture {
     storage: Storage,
 }
 
+struct JsonResponse {
+    status: StatusCode,
+    body: Value,
+}
+
+#[derive(Clone)]
+struct RecordingEmbeddingTrigger {
+    requests: Arc<Mutex<Vec<EmbeddingRegenerationRequest>>>,
+    fail: bool,
+}
+
+impl RecordingEmbeddingTrigger {
+    fn failing() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            fail: true,
+        }
+    }
+
+    fn requests(&self) -> Vec<EmbeddingRegenerationRequest> {
+        self.requests.lock().expect("requests lock").clone()
+    }
+}
+
+impl EmbeddingRegenerationTrigger for RecordingEmbeddingTrigger {
+    fn initiate(
+        &self,
+        request: EmbeddingRegenerationRequest,
+    ) -> Result<(), EmbeddingRegenerationTriggerError> {
+        self.requests.lock().expect("requests lock").push(request);
+        if self.fail {
+            return Err(EmbeddingRegenerationTriggerError::Failed(
+                "simulated enqueue failure".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct VoiceNoteSeed<'a> {
     owner: &'a str,
     id: &'a str,
@@ -898,6 +1310,15 @@ struct TagSeed<'a> {
 
 impl VoiceNoteFixture {
     async fn new() -> Self {
+        Self::new_with_trigger(Arc::new(
+            oracy_backend::embedding_regeneration::NoopEmbeddingRegenerationTrigger,
+        ))
+        .await
+    }
+
+    async fn new_with_trigger(
+        embedding_regeneration_trigger: Arc<dyn EmbeddingRegenerationTrigger>,
+    ) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         let accepted_audio_dir = tempdir.path().join("accepted-audio");
         std::fs::create_dir(&accepted_audio_dir).expect("create accepted audio dir");
@@ -922,6 +1343,7 @@ impl VoiceNoteFixture {
             operator_listen_addr: "127.0.0.1:9090".parse().expect("operator listen addr"),
             openai_api_key: "test-openai-key".to_owned(),
             storage: storage.clone(),
+            embedding_regeneration_trigger,
         });
 
         Self {
@@ -954,6 +1376,45 @@ impl VoiceNoteFixture {
         json_body(response).await
     }
 
+    async fn json_request(
+        &self,
+        method: &str,
+        path: &str,
+        bearer: &str,
+        body: Option<Value>,
+    ) -> JsonResponse {
+        let response = self
+            .request(method, path, bearer, body.map(|value| value.to_string()))
+            .await;
+        let status = response.status();
+        let body = json_body(response).await;
+        JsonResponse { status, body }
+    }
+
+    async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        bearer: &str,
+        body: Option<String>,
+    ) -> axum::response::Response {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("Authorization", format!("Bearer {bearer}"));
+        let body = match body {
+            Some(body) => {
+                builder = builder.header("Content-Type", "application/json");
+                Body::from(body)
+            }
+            None => Body::empty(),
+        };
+        self.app()
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .expect("response")
+    }
+
     async fn insert_session(&self, owner: &str, session_id: &str) {
         sqlx::query(
             r#"
@@ -966,6 +1427,23 @@ impl VoiceNoteFixture {
         .execute(self.storage.pool())
         .await
         .expect("insert session");
+    }
+
+    async fn insert_tag(&self, owner: &str, id: &str, name: &str, created_at: &str) {
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO tags (id, api_key_id, name, name_folded, created_at)
+            VALUES (?, ?, ?, lower(?), ?)
+            "#,
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(name)
+        .bind(name)
+        .bind(created_at)
+        .execute(self.storage.pool())
+        .await
+        .expect("insert tag");
     }
 
     async fn insert_voice_note(&self, seed: VoiceNoteSeed<'_>) {
@@ -1094,6 +1572,45 @@ impl VoiceNoteFixture {
         .execute(self.storage.pool())
         .await
         .expect("insert segment");
+    }
+
+    async fn insert_embedding(&self, owner: &str, voice_note_id: &str) {
+        sqlx::query(
+            r#"
+            INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
+            VALUES (?, ?, 'embedding-v1', x'010203', '2026-04-24T18:02:00.000000000Z')
+            "#,
+        )
+        .bind(voice_note_id)
+        .bind(owner)
+        .execute(self.storage.pool())
+        .await
+        .expect("insert embedding");
+    }
+
+    async fn insert_succeeded_job(&self, owner: &str, job_id: &str, voice_note_id: &str) {
+        sqlx::query(
+            r#"
+            INSERT INTO transcription_jobs (
+                id, api_key_id, idempotency_key, audio_sha256_hex,
+                audio_content_hash_algorithm, recorded_at, accepted_audio_path,
+                status, created_at, updated_at, retry_count, max_retries, voice_note_id
+            )
+            VALUES (
+                ?, ?, ?, 'hash', 'sha256:chunk-sha256-v1',
+                '2026-04-24T17:59:00.000000000Z', '/tmp/audio',
+                'succeeded', '2026-04-24T18:00:00.000000000Z',
+                '2026-04-24T18:00:00.000000000Z', 0, 3, ?
+            )
+            "#,
+        )
+        .bind(job_id)
+        .bind(owner)
+        .bind(format!("{job_id}-attempt"))
+        .bind(voice_note_id)
+        .execute(self.storage.pool())
+        .await
+        .expect("insert succeeded job");
     }
 
     async fn insert_job(&self, owner: &str, job_id: &str) {

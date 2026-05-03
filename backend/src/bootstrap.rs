@@ -9,6 +9,7 @@ use tracing::info;
 
 use crate::auth::AuthStore;
 use crate::config::Settings;
+use crate::embedding_regeneration::NoopEmbeddingRegenerationTrigger;
 use crate::metrics::Metrics;
 use crate::state::AppState;
 use crate::storage::{Storage, StorageError};
@@ -113,6 +114,7 @@ async fn load_runtime_from_path_with_openai_key(
         operator_listen_addr: settings.operator_listen_addr,
         openai_api_key,
         storage,
+        embedding_regeneration_trigger: Arc::new(NoopEmbeddingRegenerationTrigger),
     };
 
     Ok((settings.listen_addr, state))

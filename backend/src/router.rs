@@ -11,8 +11,8 @@ use crate::settings::{get_settings, patch_settings};
 use crate::state::AppState;
 use crate::transcription_jobs;
 use crate::voice_notes::{
-    get_voice_note, list_session_voice_notes, list_voice_note_segments, list_voice_note_versions,
-    list_voice_notes,
+    delete_voice_note, get_voice_note, list_session_voice_notes, list_voice_note_segments,
+    list_voice_note_versions, list_voice_notes, patch_voice_note, put_voice_note_tags,
 };
 
 pub fn build_router(state: AppState) -> Router {
@@ -30,7 +30,12 @@ pub fn build_router(state: AppState) -> Router {
             get(get_session).patch(patch_session).delete(delete_session),
         )
         .route("/api/v1/voice-notes", get(list_voice_notes))
-        .route("/api/v1/voice-notes/{voice_note_id}", get(get_voice_note))
+        .route(
+            "/api/v1/voice-notes/{voice_note_id}",
+            get(get_voice_note)
+                .patch(patch_voice_note)
+                .delete(delete_voice_note),
+        )
         .route(
             "/api/v1/voice-notes/{voice_note_id}/versions",
             get(list_voice_note_versions),
@@ -38,6 +43,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/voice-notes/{voice_note_id}/segments",
             get(list_voice_note_segments),
+        )
+        .route(
+            "/api/v1/voice-notes/{voice_note_id}/tags",
+            axum::routing::put(put_voice_note_tags),
         )
         .route(
             "/api/v1/sessions/{session_id}/voice-notes",

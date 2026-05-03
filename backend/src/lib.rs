@@ -8,6 +8,7 @@ pub mod auth;
 pub mod bootstrap;
 pub mod collections;
 pub mod config;
+pub mod embedding_regeneration;
 pub mod errors;
 pub mod json;
 pub mod metadata;
