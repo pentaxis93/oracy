@@ -9,6 +9,7 @@ pub mod config;
 pub mod errors;
 pub mod json;
 pub mod metadata;
+pub mod metrics;
 pub mod router;
 pub mod settings;
 pub mod state;

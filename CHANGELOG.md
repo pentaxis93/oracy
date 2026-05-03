@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add an operator-only Prometheus metrics listener with initial worker,
+  retention-cleanup, and retained-audio capacity metrics.
 - Harden transcription worker reliability so stalled OpenAI requests enter the
   backend retry path, processing leases renew during long transcriptions,
   successful retries expose no stale failure metadata, failed sliced

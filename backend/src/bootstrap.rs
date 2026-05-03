@@ -8,6 +8,7 @@ use tracing::info;
 
 use crate::auth::AuthStore;
 use crate::config::Settings;
+use crate::metrics::Metrics;
 use crate::state::AppState;
 use crate::storage::{Storage, StorageError};
 
@@ -107,6 +108,8 @@ async fn load_runtime_from_path_with_openai_key(
     let state = AppState {
         accepted_audio_dir: settings.accepted_audio_dir.clone(),
         auth_store: Arc::new(auth_store),
+        metrics: Metrics::new(),
+        operator_listen_addr: settings.operator_listen_addr,
         openai_api_key,
         storage,
     };
@@ -168,7 +171,11 @@ fn validate_settings(settings: &Settings) -> Result<(), BootstrapError> {
             "at least one api_keys entry is required".to_owned(),
         ));
     }
-
+    if settings.listen_addr == settings.operator_listen_addr {
+        return Err(BootstrapError::InvalidConfiguration(
+            "operator_listen_addr must differ from listen_addr".to_owned(),
+        ));
+    }
     Ok(())
 }
 

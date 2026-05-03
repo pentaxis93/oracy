@@ -123,6 +123,91 @@ key = "key-one"
 }
 
 #[tokio::test]
+async fn startup_defaults_operator_listener_to_loopback_metrics_port() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    let (_, state) = load_runtime_from_path(&config_path)
+        .await
+        .expect("valid runtime");
+
+    assert_eq!(
+        state.operator_listen_addr,
+        "127.0.0.1:9090".parse().expect("valid socket address")
+    );
+}
+
+#[tokio::test]
+async fn startup_accepts_custom_operator_listener() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+operator_listen_addr = "127.0.0.1:9099"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    let (_, state) = load_runtime_from_path(&config_path)
+        .await
+        .expect("valid runtime");
+
+    assert_eq!(
+        state.operator_listen_addr,
+        "127.0.0.1:9099".parse().expect("valid socket address")
+    );
+}
+
+#[tokio::test]
+async fn startup_rejects_operator_listener_that_collides_with_public_listener() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+listen_addr = "127.0.0.1:8088"
+operator_listen_addr = "127.0.0.1:8088"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            tempdir.path().display()
+        ),
+    );
+
+    let error = load_runtime_from_path(&config_path)
+        .await
+        .expect_err("colliding public and operator listeners should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("operator_listen_addr must differ from listen_addr")
+    );
+}
+
+#[tokio::test]
 #[ignore = "helper subprocess only"]
 async fn startup_accepts_non_empty_openai_api_key_env_helper() {
     load_runtime_from_env()
