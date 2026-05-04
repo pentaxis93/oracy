@@ -785,6 +785,54 @@ async fn racing_open_resolves_unique_conflicts_as_replay_or_submission_conflict(
 }
 
 #[tokio::test]
+async fn racing_submit_replays_finalized_rows_and_preserves_terminal_conflicts() {
+    let (_tempdir, storage) = storage().await;
+    insert_session_row(&storage, "owner-a", "session-a").await;
+
+    let queued_replay = open_while_uncommitted_non_accepting_row_exists(
+        &storage,
+        "racing-open-queued-replay-job",
+        new_open_job("owner-a", "attempt-open-queued-replay"),
+        new_open_job("owner-a", "attempt-open-queued-replay"),
+        "queued",
+    )
+    .await
+    .expect("racing queued replay should not return storage error");
+    assert!(matches!(
+        queued_replay,
+        OpenJobOutcome::ReplayedFinalized(job)
+            if job.id == "racing-open-queued-replay-job" && job.status == "queued"
+    ));
+
+    let mut mismatched = new_open_job("owner-a", "attempt-open-failed-conflict");
+    mismatched.language = Some("fr".to_owned());
+    let failed_conflict = open_while_uncommitted_non_accepting_row_exists(
+        &storage,
+        "racing-open-failed-conflict-job",
+        new_open_job("owner-a", "attempt-open-failed-conflict"),
+        mismatched,
+        "failed",
+    )
+    .await
+    .expect("racing terminal conflict should not return storage error");
+    assert_eq!(
+        failed_conflict,
+        OpenJobOutcome::Conflict(oracy_backend::storage::SubmissionConflict {
+            job_id: "racing-open-failed-conflict-job".to_owned()
+        })
+    );
+
+    assert_eq!(
+        job_count_by_key(&storage, "owner-a", "attempt-open-queued-replay").await,
+        1
+    );
+    assert_eq!(
+        job_count_by_key(&storage, "owner-a", "attempt-open-failed-conflict").await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn abandonment_candidates_are_accepting_chunks_jobs_created_before_the_cutoff() {
     let (_tempdir, storage) = storage().await;
     let old_alpha = opened_job_at(
@@ -985,6 +1033,32 @@ async fn racing_different_hash_chunk_push_resolves_as_conflict() {
 
     assert_eq!(outcome, StoreChunkOutcome::Conflict);
     assert_eq!(chunk_count_by_job(&storage, "owner-a", &job.id).await, 1);
+}
+
+#[tokio::test]
+async fn racing_chunk_push_resolves_state_transitions_as_not_accepting_chunks() {
+    let (_tempdir, storage) = storage().await;
+    let queued_job = opened_job(&storage, "owner-a", "attempt-racing-chunk-queued").await;
+    let queued_outcome =
+        store_chunk_while_uncommitted_job_status_exists(&storage, &queued_job.id, "queued")
+            .await
+            .expect("racing queued chunk should not return storage error");
+    assert_eq!(queued_outcome, StoreChunkOutcome::NotAcceptingChunks);
+    assert_eq!(
+        chunk_count_by_job(&storage, "owner-a", &queued_job.id).await,
+        0
+    );
+
+    let failed_job = opened_job(&storage, "owner-a", "attempt-racing-chunk-failed").await;
+    let failed_outcome =
+        store_chunk_while_uncommitted_job_status_exists(&storage, &failed_job.id, "failed")
+            .await
+            .expect("racing failed chunk should not return storage error");
+    assert_eq!(failed_outcome, StoreChunkOutcome::NotAcceptingChunks);
+    assert_eq!(
+        chunk_count_by_job(&storage, "owner-a", &failed_job.id).await,
+        0
+    );
 }
 
 #[tokio::test]
@@ -2176,6 +2250,67 @@ async fn open_while_uncommitted_row_exists(
     handle.await.expect("open task should not panic")
 }
 
+async fn open_while_uncommitted_non_accepting_row_exists(
+    storage: &Storage,
+    existing_job_id: &str,
+    stored: NewOpenTranscriptionJob,
+    attempted: NewOpenTranscriptionJob,
+    status: &str,
+) -> Result<OpenJobOutcome, oracy_backend::storage::StorageError> {
+    let mut tx = storage.pool().begin().await.expect("begin transaction");
+    let audio_sha256_hex = if status == "queued" {
+        "accepted-audio-hash"
+    } else {
+        ""
+    };
+    let accepted_audio_path = if status == "queued" {
+        "/var/lib/oracy/accepted-audio/racing-open-finalized.wav"
+    } else {
+        ""
+    };
+    let failure_code = (status == "failed").then_some("submission_abandoned");
+    let failure_message = (status == "failed")
+        .then_some("Submission exceeded the abandonment window before finalize.");
+    let retryable_by_client = (status == "failed").then_some(1);
+    sqlx::query(
+        r#"
+        INSERT INTO transcription_jobs (
+            id, api_key_id, idempotency_key, audio_sha256_hex, recorded_at,
+            session_id, language, accepted_audio_path, status, created_at,
+            updated_at, retry_count, max_retries, failure_code,
+            failure_message, retryable_by_client, chunk_count, audio_format
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(existing_job_id)
+    .bind(&stored.api_key_id)
+    .bind(&stored.idempotency_key)
+    .bind(audio_sha256_hex)
+    .bind("2026-04-24T17:59:00Z")
+    .bind(&stored.session_id)
+    .bind(&stored.language)
+    .bind(accepted_audio_path)
+    .bind(status)
+    .bind("2026-04-24T18:00:00Z")
+    .bind("2026-04-24T18:00:00Z")
+    .bind(stored.max_retries)
+    .bind(failure_code)
+    .bind(failure_message)
+    .bind(retryable_by_client)
+    .bind(stored.chunk_count)
+    .bind(&stored.audio_format)
+    .execute(&mut *tx)
+    .await
+    .expect("insert uncommitted non-accepting row");
+
+    let racing_storage = storage.clone();
+    let handle = tokio::spawn(async move { racing_storage.open_job(attempted).await });
+    sleep(StdDuration::from_millis(100)).await;
+    tx.commit().await.expect("commit non-accepting row");
+    handle.await.expect("open task should not panic")
+}
+
 async fn store_chunk_while_uncommitted_chunk_exists(
     storage: &Storage,
     stored: AcceptedChunk,
@@ -2192,6 +2327,61 @@ async fn store_chunk_while_uncommitted_chunk_exists(
         "racing chunk push should wait on the held write"
     );
     tx.commit().await.expect("commit accepted chunk row");
+    handle.await.expect("store chunk task should not panic")
+}
+
+async fn store_chunk_while_uncommitted_job_status_exists(
+    storage: &Storage,
+    job_id: &str,
+    status: &str,
+) -> Result<StoreChunkOutcome, oracy_backend::storage::StorageError> {
+    let mut tx = storage.pool().begin().await.expect("begin transaction");
+    let audio_sha256_hex = if status == "queued" {
+        "accepted-audio-hash"
+    } else {
+        ""
+    };
+    let accepted_audio_path = if status == "queued" {
+        "/var/lib/oracy/accepted-audio/racing-chunk-finalized.wav"
+    } else {
+        ""
+    };
+    let failure_code = (status == "failed").then_some("submission_abandoned");
+    let failure_message = (status == "failed")
+        .then_some("Submission exceeded the abandonment window before finalize.");
+    let retryable_by_client = (status == "failed").then_some(1);
+    sqlx::query(
+        r#"
+        UPDATE transcription_jobs
+        SET audio_sha256_hex = ?,
+            accepted_audio_path = ?,
+            status = ?,
+            failure_code = ?,
+            failure_message = ?,
+            retryable_by_client = ?
+        WHERE api_key_id = 'owner-a' AND id = ?
+        "#,
+    )
+    .bind(audio_sha256_hex)
+    .bind(accepted_audio_path)
+    .bind(status)
+    .bind(failure_code)
+    .bind(failure_message)
+    .bind(retryable_by_client)
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await
+    .expect("update uncommitted job status");
+
+    let racing_storage = storage.clone();
+    let attempted = accepted_chunk(job_id, "chunk-hash-a");
+    let handle = tokio::spawn(async move { racing_storage.store_chunk(attempted).await });
+    sleep(StdDuration::from_millis(100)).await;
+    assert!(
+        !handle.is_finished(),
+        "racing chunk push should wait on the held status transition"
+    );
+    tx.commit().await.expect("commit job status transition");
     handle.await.expect("store chunk task should not panic")
 }
 
