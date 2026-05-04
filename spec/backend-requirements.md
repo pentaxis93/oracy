@@ -682,9 +682,10 @@ following are true:
 - Search behavior is explicit: history and search share one voice-
   note collection contract, omitted `search_mode` with `q` defaults
   to `hybrid`, repeated `tag_id` filters intersect, results are
-  voice-note-only, deferred search returns an empty collection rather
-  than history rows, and semantic search is eventually consistent
-  after edits.
+  voice-note-only, keyword search treats query text literally,
+  semantic search uses current embeddings, hybrid search combines
+  keyword and semantic ranking, and semantic search is eventually
+  consistent after edits.
 - Deletion semantics are explicit and match resource ownership
   expectations.
 - Audio retention semantics are explicit: chunks and composed audio
