@@ -349,6 +349,29 @@ pub struct VoiceNoteVersionRecord {
     pub created_at: OffsetDateTime,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeywordSearchMatch {
+    pub record: VoiceNoteRecord,
+    pub keyword_score: f64,
+}
+
+impl KeywordSearchMatch {
+    pub fn cursor(&self) -> KeywordSearchCursor {
+        KeywordSearchCursor {
+            keyword_score: self.keyword_score,
+            created_at: self.record.created_at,
+            id: self.record.id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeywordSearchCursor {
+    pub keyword_score: f64,
+    pub created_at: OffsetDateTime,
+    pub id: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VoiceNoteFilters {
     pub tag_ids: Vec<String>,
@@ -1789,10 +1812,13 @@ impl Storage {
         api_key_id: &str,
         filters: &VoiceNoteFilters,
         fts_query: &str,
+        cursor: Option<&KeywordSearchCursor>,
         limit: i64,
-    ) -> Result<Vec<VoiceNoteRecord>, StorageError> {
-        self.search_voice_notes_keyword_in_session(api_key_id, None, filters, fts_query, limit)
-            .await
+    ) -> Result<Vec<KeywordSearchMatch>, StorageError> {
+        self.search_voice_notes_keyword_in_session(
+            api_key_id, None, filters, fts_query, cursor, limit,
+        )
+        .await
     }
 
     pub async fn search_session_voice_notes_keyword(
@@ -1801,13 +1827,15 @@ impl Storage {
         session_id: &str,
         filters: &VoiceNoteFilters,
         fts_query: &str,
+        cursor: Option<&KeywordSearchCursor>,
         limit: i64,
-    ) -> Result<Vec<VoiceNoteRecord>, StorageError> {
+    ) -> Result<Vec<KeywordSearchMatch>, StorageError> {
         self.search_voice_notes_keyword_in_session(
             api_key_id,
             Some(session_id),
             filters,
             fts_query,
+            cursor,
             limit,
         )
         .await
@@ -1914,8 +1942,12 @@ impl Storage {
         session_id: Option<&str>,
         filters: &VoiceNoteFilters,
         fts_query: &str,
+        cursor: Option<&KeywordSearchCursor>,
         limit: i64,
-    ) -> Result<Vec<VoiceNoteRecord>, StorageError> {
+    ) -> Result<Vec<KeywordSearchMatch>, StorageError> {
+        let cursor_created_at = cursor
+            .map(|cursor| format_timestamp(cursor.created_at))
+            .transpose()?;
         let recorded_after = filters.recorded_after.map(format_timestamp).transpose()?;
         let recorded_before = filters.recorded_before.map(format_timestamp).transpose()?;
         let created_after = filters.created_after.map(format_timestamp).transpose()?;
@@ -1943,6 +1975,7 @@ impl Storage {
                 GROUP BY voice_note_id
             )
             SELECT
+                keyword_matches.keyword_score AS keyword_score,
                 voice_notes.*,
                 voice_note_versions.id AS current_version_id,
                 voice_note_versions.text AS current_text
@@ -2004,6 +2037,45 @@ impl Storage {
                 )
             "#,
         );
+        if let Some(cursor) = cursor {
+            let cursor_created_at = cursor_created_at
+                .as_deref()
+                .expect("cursor timestamp is formatted when cursor is present");
+            query.push(
+                r#"
+                AND (
+                    keyword_matches.keyword_score >
+                "#,
+            );
+            query.push_bind(cursor.keyword_score);
+            query.push(
+                r#"
+                    OR (
+                        keyword_matches.keyword_score =
+                "#,
+            );
+            query.push_bind(cursor.keyword_score);
+            query.push(" AND voice_notes.created_at < ");
+            query.push_bind(cursor_created_at);
+            query.push(
+                r#"
+                    )
+                    OR (
+                        keyword_matches.keyword_score =
+                "#,
+            );
+            query.push_bind(cursor.keyword_score);
+            query.push(" AND voice_notes.created_at = ");
+            query.push_bind(cursor_created_at);
+            query.push(" AND voice_notes.id < ");
+            query.push_bind(&cursor.id);
+            query.push(
+                r#"
+                    )
+                )
+                "#,
+            );
+        }
         query.push(
             r#"
             ORDER BY keyword_matches.keyword_score ASC,
@@ -2015,7 +2087,9 @@ impl Storage {
         query.push_bind(limit);
         let rows = query.build().fetch_all(&self.pool).await?;
 
-        rows.into_iter().map(voice_note_from_row).collect()
+        rows.into_iter()
+            .map(keyword_search_match_from_row)
+            .collect()
     }
 
     pub async fn list_voice_note_versions(
@@ -3299,6 +3373,16 @@ fn voice_note_from_row(row: sqlx::sqlite::SqliteRow) -> Result<VoiceNoteRecord, 
         created_at: parse_timestamp(row.try_get("created_at")?)?,
         recorded_at: parse_timestamp(row.try_get("recorded_at")?)?,
         session_id: row.try_get("session_id")?,
+    })
+}
+
+fn keyword_search_match_from_row(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<KeywordSearchMatch, StorageError> {
+    let keyword_score = row.try_get("keyword_score")?;
+    Ok(KeywordSearchMatch {
+        record: voice_note_from_row(row)?,
+        keyword_score,
     })
 }
 

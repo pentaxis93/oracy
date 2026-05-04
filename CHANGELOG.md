@@ -9,6 +9,8 @@
 - Return empty semantic search results without calling the embedding provider
   when local filters leave no current embeddings to rank, preserving hybrid
   keyword results in the same case.
+- Bound keyword-only search pagination so broad keyword matches return only
+  the requested page from storage instead of materializing the full match set.
 - Add OpenAI-backed voice-note embedding generation, long-text chunk pooling,
   durable edit-triggered embedding regeneration, and the
   `succeeded`-requires-current-embedding workflow gate. Blank voice-note text

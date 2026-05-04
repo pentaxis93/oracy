@@ -1536,6 +1536,47 @@ async fn search_uses_distinct_cursors_and_blank_queries_return_empty_search_resu
 }
 
 #[tokio::test]
+async fn keyword_only_search_paginates_many_matches_in_relevance_order() {
+    let fixture = VoiceNoteFixture::new().await;
+    let mut inserted_ids = Vec::new();
+    for index in 0..8 {
+        let id = format!("01JS8D6E2S3T1J7H9J2Q2N4P{index:02}");
+        let version_id = format!("01JS9P1D6CK9M0N1P2Q3R4S{index:02}");
+        let created_at = format!("2026-04-24T18:00:0{index}.000000000Z");
+        fixture
+            .insert_voice_note(VoiceNoteSeed {
+                owner: "alpha",
+                id: &id,
+                version_id: &version_id,
+                text: "apollo exact",
+                created_at: &created_at,
+                recorded_at: "2026-04-24T17:59:00.000000000Z",
+                session_id: None,
+                tags: vec![],
+            })
+            .await;
+        inserted_ids.push(id);
+    }
+
+    let first = fixture
+        .get_json(
+            "/api/v1/voice-notes?q=apollo&search_mode=keyword&limit=1",
+            "alpha-secret",
+        )
+        .await;
+    assert_collection_ids(first.clone(), &[inserted_ids[7].as_str()]);
+    let cursor = first["next_cursor"].as_str().expect("next cursor");
+
+    let second = fixture
+        .get_json(
+            &format!("/api/v1/voice-notes?q=apollo&search_mode=keyword&limit=1&cursor={cursor}"),
+            "alpha-secret",
+        )
+        .await;
+    assert_collection_ids(second, &[inserted_ids[6].as_str()]);
+}
+
+#[tokio::test]
 async fn repeated_singular_query_parameters_return_repeated_parameter_errors() {
     let fixture = VoiceNoteFixture::new().await;
 

@@ -8,18 +8,18 @@ use time::OffsetDateTime;
 
 use crate::auth::AuthenticatedKey;
 use crate::collections::{
-    ensure_singular_query_param, parse_limit, parse_position_cursor, parse_query_params,
-    parse_rfc3339_field, parse_score_cursor, parse_time_cursor, position_cursor, query_any,
-    query_first, query_values, score_cursor, time_cursor, timestamp, validate_rfc3339_field,
-    validate_ulid_field, validation_error,
+    ensure_singular_query_param, keyword_search_cursor, parse_keyword_search_cursor, parse_limit,
+    parse_position_cursor, parse_query_params, parse_rfc3339_field, parse_score_cursor,
+    parse_time_cursor, position_cursor, query_any, query_first, query_values, score_cursor,
+    time_cursor, timestamp, validate_rfc3339_field, validate_ulid_field, validation_error,
 };
 use crate::embedding::{EmbeddingEngine, EmbeddingInput, OpenAiEmbeddingEngine};
 use crate::errors::{ApiError, CollectionEnvelope};
 use crate::json::JsonBody;
 use crate::state::AppState;
 use crate::storage::{
-    ReplaceVoiceNoteTagsOutcome, SegmentRecord, TagRecord, UpdateVoiceNoteTextOutcome,
-    VoiceNoteFilters, VoiceNoteRecord, VoiceNoteVersionRecord,
+    KeywordSearchCursor, ReplaceVoiceNoteTagsOutcome, SegmentRecord, TagRecord,
+    UpdateVoiceNoteTextOutcome, VoiceNoteFilters, VoiceNoteRecord, VoiceNoteVersionRecord,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,9 +40,15 @@ struct PageQuery<T> {
 struct VoiceNoteCollectionQuery {
     limit: i64,
     history_cursor: Option<(OffsetDateTime, String)>,
-    search_cursor: Option<(f64, OffsetDateTime, String)>,
+    search_cursor: Option<SearchCursor>,
     filters: VoiceNoteFilters,
     search: Option<SearchQuery>,
+}
+
+#[derive(Debug, Clone)]
+enum SearchCursor {
+    Keyword(KeywordSearchCursor),
+    Relevance(f64, OffsetDateTime, String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +69,7 @@ struct SearchQuery {
 struct RankedVoiceNote {
     record: VoiceNoteRecord,
     score: f64,
+    keyword_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,6 +152,7 @@ pub async fn list_voice_notes(
             rows,
             query.limit,
             CursorKind::VoiceNoteHistory,
+            search.mode,
         )
         .await;
     }
@@ -414,6 +422,7 @@ pub async fn list_session_voice_notes(
             rows,
             query.limit,
             CursorKind::SessionVoiceNoteHistory,
+            search.mode,
         )
         .await;
     }
@@ -478,9 +487,20 @@ async fn execute_voice_note_search(
     session_id: Option<&str>,
     filters: &VoiceNoteFilters,
     search: &SearchQuery,
-    cursor: Option<(f64, OffsetDateTime, String)>,
+    cursor: Option<SearchCursor>,
     limit: i64,
 ) -> Result<Vec<RankedVoiceNote>, ApiError> {
+    if search.mode == SearchMode::Keyword {
+        return execute_keyword_voice_note_search(
+            api_key_id, state, session_id, filters, search, cursor, limit,
+        )
+        .await;
+    }
+
+    let relevance_cursor = match cursor {
+        Some(SearchCursor::Relevance(score, created_at, id)) => Some((score, created_at, id)),
+        Some(SearchCursor::Keyword(_)) | None => None,
+    };
     let mut ranks: HashMap<String, (VoiceNoteRecord, Option<usize>, Option<usize>)> =
         HashMap::new();
     if matches!(search.mode, SearchMode::Keyword | SearchMode::Hybrid)
@@ -495,6 +515,7 @@ async fn execute_voice_note_search(
                         session_id,
                         filters,
                         fts_query,
+                        None,
                         i64::MAX,
                     )
                     .await
@@ -502,12 +523,13 @@ async fn execute_voice_note_search(
             None => {
                 state
                     .storage
-                    .search_voice_notes_keyword(api_key_id, filters, fts_query, i64::MAX)
+                    .search_voice_notes_keyword(api_key_id, filters, fts_query, None, i64::MAX)
                     .await
             }
         }
         .map_err(|_| ApiError::internal("Failed to search voice notes."))?;
-        for (index, record) in rows.into_iter().enumerate() {
+        for (index, row) in rows.into_iter().enumerate() {
+            let record = row.record;
             ranks.insert(record.id.clone(), (record, Some(index + 1), None));
         }
     }
@@ -530,9 +552,10 @@ async fn execute_voice_note_search(
         .map(|(record, keyword_rank, semantic_rank)| RankedVoiceNote {
             record,
             score: reciprocal_rank_score(keyword_rank, semantic_rank),
+            keyword_score: None,
         })
         .filter(|row| {
-            cursor
+            relevance_cursor
                 .as_ref()
                 .is_none_or(|(cursor_score, cursor_created_at, cursor_id)| {
                     row.score < *cursor_score
@@ -547,6 +570,61 @@ async fn execute_voice_note_search(
     rows.truncate((limit + 1) as usize);
 
     Ok(rows)
+}
+
+async fn execute_keyword_voice_note_search(
+    api_key_id: &str,
+    state: &AppState,
+    session_id: Option<&str>,
+    filters: &VoiceNoteFilters,
+    search: &SearchQuery,
+    cursor: Option<SearchCursor>,
+    limit: i64,
+) -> Result<Vec<RankedVoiceNote>, ApiError> {
+    let Some(fts_query) = search.fts_query.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let cursor = match cursor {
+        Some(SearchCursor::Keyword(cursor)) => Some(cursor),
+        Some(SearchCursor::Relevance(..)) | None => None,
+    };
+    let rows = match session_id {
+        Some(session_id) => {
+            state
+                .storage
+                .search_session_voice_notes_keyword(
+                    api_key_id,
+                    session_id,
+                    filters,
+                    fts_query,
+                    cursor.as_ref(),
+                    limit + 1,
+                )
+                .await
+        }
+        None => {
+            state
+                .storage
+                .search_voice_notes_keyword(
+                    api_key_id,
+                    filters,
+                    fts_query,
+                    cursor.as_ref(),
+                    limit + 1,
+                )
+                .await
+        }
+    }
+    .map_err(|_| ApiError::internal("Failed to search voice notes."))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| RankedVoiceNote {
+            record: row.record,
+            score: -row.keyword_score,
+            keyword_score: Some(row.keyword_score),
+        })
+        .collect())
 }
 
 async fn semantic_search_rows(
@@ -690,6 +768,7 @@ async fn render_voice_note_search_page(
     mut rows: Vec<RankedVoiceNote>,
     limit: i64,
     cursor_kind: CursorKind,
+    search_mode: SearchMode,
 ) -> Result<Json<CollectionEnvelope<VoiceNoteResource>>, ApiError> {
     let has_next = rows.len() as i64 > limit;
     if has_next {
@@ -698,12 +777,23 @@ async fn render_voice_note_search_page(
     let next_cursor = if has_next {
         rows.last()
             .map(|voice_note| {
-                score_cursor(
-                    cursor_kind.search_cursor_kind(),
-                    voice_note.score,
-                    voice_note.record.created_at,
-                    &voice_note.record.id,
-                )
+                if search_mode == SearchMode::Keyword {
+                    keyword_search_cursor(
+                        cursor_kind.keyword_search_cursor_kind(),
+                        voice_note
+                            .keyword_score
+                            .expect("keyword search rows carry keyword score"),
+                        voice_note.record.created_at,
+                        &voice_note.record.id,
+                    )
+                } else {
+                    score_cursor(
+                        cursor_kind.search_cursor_kind(),
+                        voice_note.score,
+                        voice_note.record.created_at,
+                        &voice_note.record.id,
+                    )
+                }
             })
             .transpose()?
     } else {
@@ -746,10 +836,31 @@ fn parse_voice_note_collection_query(
     } else {
         None
     };
-    let search_cursor = if search.is_some() {
-        cursor
-            .map(|cursor| parse_score_cursor(cursor, cursor_kind.search_cursor_kind()))
-            .transpose()?
+    let search_cursor = if let Some(search) = &search {
+        match search {
+            SearchQuery {
+                mode: SearchMode::Keyword,
+                ..
+            } => cursor
+                .map(|cursor| {
+                    parse_keyword_search_cursor(cursor, cursor_kind.keyword_search_cursor_kind())
+                        .map(|(keyword_score, created_at, id)| {
+                            SearchCursor::Keyword(KeywordSearchCursor {
+                                keyword_score,
+                                created_at,
+                                id,
+                            })
+                        })
+                })
+                .transpose()?,
+            _ => cursor
+                .map(|cursor| {
+                    parse_score_cursor(cursor, cursor_kind.search_cursor_kind()).map(
+                        |(score, created_at, id)| SearchCursor::Relevance(score, created_at, id),
+                    )
+                })
+                .transpose()?,
+        }
     } else {
         None
     };
@@ -1002,6 +1113,14 @@ impl CursorKind {
         match self {
             Self::VoiceNoteHistory => "voice_note_search",
             Self::SessionVoiceNoteHistory => "session_voice_note_search",
+            _ => self.as_str(),
+        }
+    }
+
+    fn keyword_search_cursor_kind(self) -> &'static str {
+        match self {
+            Self::VoiceNoteHistory => "voice_note_keyword_search",
+            Self::SessionVoiceNoteHistory => "session_voice_note_keyword_search",
             _ => self.as_str(),
         }
     }
