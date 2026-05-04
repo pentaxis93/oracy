@@ -27,6 +27,15 @@ struct PositionCursor {
     position: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ScoreCursor {
+    v: u8,
+    kind: String,
+    score: f64,
+    created_at: String,
+    id: String,
+}
+
 pub fn parse_query_params(raw_query: Option<&str>) -> Vec<(String, String)> {
     raw_query
         .map(|query| {
@@ -118,10 +127,52 @@ pub fn parse_position_cursor(cursor: &str, expected_kind: &str) -> Result<i64, A
     Ok(decoded.position)
 }
 
+pub fn parse_score_cursor(
+    cursor: &str,
+    expected_kind: &str,
+) -> Result<(f64, OffsetDateTime, String), ApiError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| malformed_cursor())?;
+    let decoded: ScoreCursor = serde_json::from_slice(&bytes).map_err(|_| malformed_cursor())?;
+    if decoded.v != CURSOR_VERSION || decoded.kind != expected_kind || !decoded.score.is_finite() {
+        return Err(malformed_cursor());
+    }
+    let created_at =
+        OffsetDateTime::parse(&decoded.created_at, &Rfc3339).map_err(|_| malformed_cursor())?;
+    let Ok(parsed_id) = Ulid::from_string(&decoded.id) else {
+        return Err(malformed_cursor());
+    };
+    if parsed_id.to_string() != decoded.id {
+        return Err(malformed_cursor());
+    }
+
+    Ok((decoded.score, created_at, decoded.id))
+}
+
 pub fn time_cursor(kind: &str, created_at: OffsetDateTime, id: &str) -> Result<String, ApiError> {
     let cursor = TimeCursor {
         v: CURSOR_VERSION,
         kind: kind.to_owned(),
+        created_at: timestamp(created_at)?,
+        id: id.to_owned(),
+    };
+    encode_cursor(&cursor)
+}
+
+pub fn score_cursor(
+    kind: &str,
+    score: f64,
+    created_at: OffsetDateTime,
+    id: &str,
+) -> Result<String, ApiError> {
+    if !score.is_finite() {
+        return Err(ApiError::internal("Failed to encode cursor."));
+    }
+    let cursor = ScoreCursor {
+        v: CURSOR_VERSION,
+        kind: kind.to_owned(),
+        score,
         created_at: timestamp(created_at)?,
         id: id.to_owned(),
     };

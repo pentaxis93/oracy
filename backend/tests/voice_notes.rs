@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::routing::post;
+use axum::{Json, Router};
 use oracy_backend::auth::AuthStore;
 use oracy_backend::config::ApiKeyConfig;
 use oracy_backend::router::build_router;
 use oracy_backend::state::AppState;
-use oracy_backend::storage::Storage;
+use oracy_backend::storage::{Storage, encode_embedding_vector};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use time::macros::datetime;
@@ -1103,48 +1105,301 @@ async fn invalid_collection_query_values_return_validation_errors() {
 }
 
 #[tokio::test]
-async fn each_valid_search_mode_is_accepted_while_search_is_deferred() {
+async fn keyword_search_returns_parent_voice_notes_for_current_and_historical_version_matches() {
     let fixture = VoiceNoteFixture::new().await;
     fixture
         .insert_voice_note(VoiceNoteSeed {
             owner: "alpha",
             id: NOTE_OLD,
             version_id: VERSION_OLD,
-            text: "history result",
+            text: "apollo retrospective",
             created_at: "2026-04-24T18:00:00.000000000Z",
             recorded_at: "2026-04-24T17:59:00.000000000Z",
             session_id: None,
-            tags: vec![TagSeed {
+            tags: vec![],
+        })
+        .await;
+    fixture
+        .insert_version(
+            "alpha",
+            NOTE_OLD,
+            NOTE_PAGE_A,
+            2,
+            "renamed historical note",
+            "2026-04-24T18:02:00.000000000Z",
+        )
+        .await;
+    fixture
+        .insert_voice_note(VoiceNoteSeed {
+            owner: "alpha",
+            id: NOTE_NEW,
+            version_id: VERSION_NEW,
+            text: "apollo launch checklist",
+            created_at: "2026-04-24T18:01:00.000000000Z",
+            recorded_at: "2026-04-24T18:00:30.000000000Z",
+            session_id: None,
+            tags: vec![],
+        })
+        .await;
+
+    let body = fixture
+        .get_json(
+            "/api/v1/voice-notes?q=apollo&search_mode=keyword",
+            "alpha-secret",
+        )
+        .await;
+
+    assert_collection_ids(body.clone(), &[NOTE_OLD, NOTE_NEW]);
+    assert_eq!(body["items"][0]["current_version_id"], NOTE_PAGE_A);
+    assert_eq!(body["items"][0]["text"], "renamed historical note");
+}
+
+#[tokio::test]
+async fn semantic_search_orders_current_embeddings_by_cosine_similarity() {
+    let openai_base_url = spawn_fake_embedding_server().await;
+    let fixture = VoiceNoteFixture::new_with_openai_base_url(openai_base_url).await;
+    for (id, version_id, text, created_at, vector) in [
+        (
+            NOTE_OLD,
+            VERSION_OLD,
+            "least similar",
+            "2026-04-24T18:00:00.000000000Z",
+            [0.0, 1.0, 0.0],
+        ),
+        (
+            NOTE_PAGE_C,
+            NOTE_PAGE_C,
+            "middle similar",
+            "2026-04-24T18:01:00.000000000Z",
+            [0.5, 0.5, 0.0],
+        ),
+        (
+            NOTE_NEW,
+            VERSION_NEW,
+            "most similar",
+            "2026-04-24T18:02:00.000000000Z",
+            [1.0, 0.0, 0.0],
+        ),
+    ] {
+        fixture
+            .insert_voice_note(VoiceNoteSeed {
+                owner: "alpha",
+                id,
+                version_id,
+                text,
+                created_at,
+                recorded_at: "2026-04-24T17:59:00.000000000Z",
+                session_id: None,
+                tags: vec![],
+            })
+            .await;
+        fixture.insert_embedding_vector("alpha", id, vector).await;
+    }
+
+    assert_collection_ids(
+        fixture
+            .get_json(
+                "/api/v1/voice-notes?q=query&search_mode=semantic",
+                "alpha-secret",
+            )
+            .await,
+        &[NOTE_NEW, NOTE_PAGE_C, NOTE_OLD],
+    );
+}
+
+#[tokio::test]
+async fn hybrid_search_uses_reciprocal_rank_fusion_for_keyword_and_semantic_results() {
+    let openai_base_url = spawn_fake_embedding_server().await;
+    let fixture = VoiceNoteFixture::new_with_openai_base_url(openai_base_url).await;
+    for (id, version_id, text, created_at, vector) in [
+        (
+            NOTE_OLD,
+            VERSION_OLD,
+            "apollo shared result",
+            "2026-04-24T18:00:00.000000000Z",
+            [1.0, 0.0, 0.0],
+        ),
+        (
+            NOTE_NEW,
+            VERSION_NEW,
+            "apollo keyword only",
+            "2026-04-24T18:01:00.000000000Z",
+            [0.0, 1.0, 0.0],
+        ),
+        (
+            NOTE_PAGE_C,
+            NOTE_PAGE_C,
+            "semantic only",
+            "2026-04-24T18:02:00.000000000Z",
+            [0.9, 0.1, 0.0],
+        ),
+    ] {
+        fixture
+            .insert_voice_note(VoiceNoteSeed {
+                owner: "alpha",
+                id,
+                version_id,
+                text,
+                created_at,
+                recorded_at: "2026-04-24T17:59:00.000000000Z",
+                session_id: None,
+                tags: vec![],
+            })
+            .await;
+        fixture.insert_embedding_vector("alpha", id, vector).await;
+    }
+
+    let body = fixture
+        .get_json("/api/v1/voice-notes?q=apollo", "alpha-secret")
+        .await;
+
+    assert_eq!(body["items"][0]["id"], NOTE_OLD);
+    assert_collection_ids(body, &[NOTE_OLD, NOTE_NEW, NOTE_PAGE_C]);
+}
+
+#[tokio::test]
+async fn search_filters_and_cursors_apply_to_relevance_ordered_results() {
+    let fixture = VoiceNoteFixture::new().await;
+    fixture.insert_session("alpha", SESSION_A).await;
+    for (id, version_id, text, created_at, session_id, tags) in [
+        (
+            NOTE_OLD,
+            VERSION_OLD,
+            "apollo exact",
+            "2026-04-24T18:00:00.000000000Z",
+            Some(SESSION_A),
+            vec![TagSeed {
                 id: TAG_MEETING,
                 name: "Meeting",
                 created_at: "2026-04-24T18:01:30.000000000Z",
             }],
-        })
-        .await;
-
-    assert_empty_collection(
+        ),
+        (
+            NOTE_NEW,
+            VERSION_NEW,
+            "apollo exact",
+            "2026-04-24T18:01:00.000000000Z",
+            Some(SESSION_A),
+            vec![TagSeed {
+                id: TAG_MEETING,
+                name: "Meeting",
+                created_at: "2026-04-24T18:01:30.000000000Z",
+            }],
+        ),
+        (
+            NOTE_OUTSIDE_SESSION,
+            NOTE_OUTSIDE_SESSION,
+            "apollo exact",
+            "2026-04-24T18:02:00.000000000Z",
+            None,
+            vec![TagSeed {
+                id: TAG_ACTION,
+                name: "Action",
+                created_at: "2026-04-24T18:01:40.000000000Z",
+            }],
+        ),
+    ] {
         fixture
-            .get_json("/api/v1/voice-notes?q=hello", "alpha-secret")
-            .await,
-    );
-    assert_empty_collection(
-        fixture
-            .get_json(
-                &format!("/api/v1/voice-notes?q=hello&tag_id={TAG_MEETING}"),
-                "alpha-secret",
-            )
-            .await,
-    );
-
-    for mode in ["keyword", "semantic", "hybrid"] {
-        let accepted = fixture
-            .get_json(
-                &format!("/api/v1/voice-notes?q=hello&search_mode={mode}"),
-                "alpha-secret",
-            )
+            .insert_voice_note(VoiceNoteSeed {
+                owner: "alpha",
+                id,
+                version_id,
+                text,
+                created_at,
+                recorded_at: "2026-04-24T17:59:00.000000000Z",
+                session_id,
+                tags,
+            })
             .await;
-        assert_empty_collection(accepted);
     }
+
+    let first = fixture
+        .get_json(
+            &format!(
+                "/api/v1/sessions/{SESSION_A}/voice-notes?q=apollo&search_mode=keyword&tag_id={TAG_MEETING}&limit=1"
+            ),
+            "alpha-secret",
+        )
+        .await;
+    assert_collection_ids(first.clone(), &[NOTE_NEW]);
+    let cursor = first["next_cursor"].as_str().expect("next cursor");
+    let second = fixture
+        .get_json(
+            &format!(
+                "/api/v1/sessions/{SESSION_A}/voice-notes?q=apollo&search_mode=keyword&tag_id={TAG_MEETING}&limit=1&cursor={cursor}"
+            ),
+            "alpha-secret",
+        )
+        .await;
+    assert_collection_ids(second.clone(), &[NOTE_OLD]);
+    assert_eq!(second["next_cursor"], Value::Null);
+}
+
+#[tokio::test]
+async fn search_uses_distinct_cursors_and_blank_queries_return_empty_search_results() {
+    let fixture = VoiceNoteFixture::new().await;
+    for (id, version_id, created_at) in [
+        (NOTE_OLD, VERSION_OLD, "2026-04-24T18:00:00.000000000Z"),
+        (NOTE_NEW, VERSION_NEW, "2026-04-24T18:01:00.000000000Z"),
+        (NOTE_PAGE_C, NOTE_PAGE_C, "2026-04-24T18:02:00.000000000Z"),
+    ] {
+        fixture
+            .insert_voice_note(VoiceNoteSeed {
+                owner: "alpha",
+                id,
+                version_id,
+                text: "apollo exact",
+                created_at,
+                recorded_at: "2026-04-24T17:59:00.000000000Z",
+                session_id: None,
+                tags: vec![],
+            })
+            .await;
+    }
+
+    assert_empty_collection(
+        fixture
+            .get_json(
+                "/api/v1/voice-notes?q=...&search_mode=keyword",
+                "alpha-secret",
+            )
+            .await,
+    );
+
+    let history = fixture
+        .get_json("/api/v1/voice-notes?limit=1", "alpha-secret")
+        .await;
+    let history_cursor = history["next_cursor"].as_str().expect("history cursor");
+    assert_validation_error(
+        fixture
+            .get(
+                &format!(
+                    "/api/v1/voice-notes?q=apollo&search_mode=keyword&cursor={history_cursor}"
+                ),
+                "alpha-secret",
+            )
+            .await,
+        "cursor",
+    )
+    .await;
+
+    let search = fixture
+        .get_json(
+            "/api/v1/voice-notes?q=apollo&search_mode=keyword&limit=1",
+            "alpha-secret",
+        )
+        .await;
+    let search_cursor = search["next_cursor"].as_str().expect("search cursor");
+    assert_validation_error(
+        fixture
+            .get(
+                &format!("/api/v1/voice-notes?limit=1&cursor={search_cursor}"),
+                "alpha-secret",
+            )
+            .await,
+        "cursor",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1295,6 +1550,10 @@ struct TagSeed<'a> {
 
 impl VoiceNoteFixture {
     async fn new() -> Self {
+        Self::new_with_openai_base_url("http://127.0.0.1".to_owned()).await
+    }
+
+    async fn new_with_openai_base_url(openai_base_url: String) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         let accepted_audio_dir = tempdir.path().join("accepted-audio");
         std::fs::create_dir(&accepted_audio_dir).expect("create accepted audio dir");
@@ -1318,6 +1577,7 @@ impl VoiceNoteFixture {
             metrics: oracy_backend::metrics::Metrics::new(),
             operator_listen_addr: "127.0.0.1:9090".parse().expect("operator listen addr"),
             openai_api_key: "test-openai-key".to_owned(),
+            openai_base_url,
             storage: storage.clone(),
         });
 
@@ -1563,6 +1823,25 @@ impl VoiceNoteFixture {
         .expect("insert embedding");
     }
 
+    async fn insert_embedding_vector(&self, owner: &str, voice_note_id: &str, prefix: [f32; 3]) {
+        let mut vector = vec![0.0; 1536];
+        vector[0] = prefix[0];
+        vector[1] = prefix[1];
+        vector[2] = prefix[2];
+        sqlx::query(
+            r#"
+            INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
+            VALUES (?, ?, 'embedding-v1', ?, '2026-04-24T18:02:00.000000000Z')
+            "#,
+        )
+        .bind(voice_note_id)
+        .bind(owner)
+        .bind(encode_embedding_vector(&vector))
+        .execute(self.storage.pool())
+        .await
+        .expect("insert embedding");
+    }
+
     async fn insert_succeeded_job(&self, owner: &str, job_id: &str, voice_note_id: &str) {
         sqlx::query(
             r#"
@@ -1618,6 +1897,40 @@ async fn json_body(response: axum::response::Response) -> Value {
         .await
         .expect("read body");
     serde_json::from_slice(&bytes).expect("valid json")
+}
+
+async fn spawn_fake_embedding_server() -> String {
+    let app = Router::new().route("/v1/embeddings", post(fake_embedding));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake embedding server");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve fake embedding server");
+    });
+    format!("http://{addr}")
+}
+
+async fn fake_embedding(Json(body): Json<Value>) -> Json<Value> {
+    let input = body["input"].as_array().expect("input array");
+    let data = input
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let mut embedding = vec![0.0; 1536];
+            embedding[0] = 1.0;
+            json!({
+                "index": index,
+                "embedding": embedding,
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(json!({
+        "model": "text-embedding-3-small",
+        "data": data,
+    }))
 }
 
 async fn assert_validation_error(response: axum::response::Response, field: &str) {

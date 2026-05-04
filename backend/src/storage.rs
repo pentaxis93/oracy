@@ -1774,6 +1774,45 @@ impl Storage {
             .await
     }
 
+    pub async fn list_voice_notes_for_search(
+        &self,
+        api_key_id: &str,
+        session_id: Option<&str>,
+        filters: &VoiceNoteFilters,
+    ) -> Result<Vec<VoiceNoteRecord>, StorageError> {
+        self.list_voice_notes_in_session(api_key_id, session_id, filters, None, i64::MAX)
+            .await
+    }
+
+    pub async fn search_voice_notes_keyword(
+        &self,
+        api_key_id: &str,
+        filters: &VoiceNoteFilters,
+        fts_query: &str,
+        limit: i64,
+    ) -> Result<Vec<VoiceNoteRecord>, StorageError> {
+        self.search_voice_notes_keyword_in_session(api_key_id, None, filters, fts_query, limit)
+            .await
+    }
+
+    pub async fn search_session_voice_notes_keyword(
+        &self,
+        api_key_id: &str,
+        session_id: &str,
+        filters: &VoiceNoteFilters,
+        fts_query: &str,
+        limit: i64,
+    ) -> Result<Vec<VoiceNoteRecord>, StorageError> {
+        self.search_voice_notes_keyword_in_session(
+            api_key_id,
+            Some(session_id),
+            filters,
+            fts_query,
+            limit,
+        )
+        .await
+    }
+
     async fn list_voice_notes_in_session(
         &self,
         api_key_id: &str,
@@ -1863,6 +1902,116 @@ impl Storage {
             query.push("))");
         }
         query.push(" ORDER BY voice_notes.created_at DESC, voice_notes.id DESC LIMIT ");
+        query.push_bind(limit);
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        rows.into_iter().map(voice_note_from_row).collect()
+    }
+
+    async fn search_voice_notes_keyword_in_session(
+        &self,
+        api_key_id: &str,
+        session_id: Option<&str>,
+        filters: &VoiceNoteFilters,
+        fts_query: &str,
+        limit: i64,
+    ) -> Result<Vec<VoiceNoteRecord>, StorageError> {
+        let recorded_after = filters.recorded_after.map(format_timestamp).transpose()?;
+        let recorded_before = filters.recorded_before.map(format_timestamp).transpose()?;
+        let created_after = filters.created_after.map(format_timestamp).transpose()?;
+        let created_before = filters.created_before.map(format_timestamp).transpose()?;
+        let effective_session_id = session_id.or(filters.session_id.as_deref());
+        let mut query = QueryBuilder::new(
+            r#"
+            WITH raw_keyword_matches AS (
+                SELECT
+                    voice_note_versions_fts.voice_note_id,
+                    rank AS keyword_score
+                FROM voice_note_versions_fts
+                WHERE voice_note_versions_fts.api_key_id =
+            "#,
+        );
+        query.push_bind(api_key_id);
+        query.push(" AND voice_note_versions_fts MATCH ");
+        query.push_bind(fts_query);
+        query.push(
+            r#"
+            ),
+            keyword_matches AS (
+                SELECT voice_note_id, MIN(keyword_score) AS keyword_score
+                FROM raw_keyword_matches
+                GROUP BY voice_note_id
+            )
+            SELECT
+                voice_notes.*,
+                voice_note_versions.id AS current_version_id,
+                voice_note_versions.text AS current_text
+            FROM keyword_matches
+            JOIN voice_notes
+                ON voice_notes.api_key_id =
+            "#,
+        );
+        query.push_bind(api_key_id);
+        query.push(
+            r#"
+                AND voice_notes.id = keyword_matches.voice_note_id
+            JOIN voice_note_versions
+                ON voice_note_versions.voice_note_id = voice_notes.id
+            WHERE voice_notes.api_key_id =
+            "#,
+        );
+        query.push_bind(api_key_id);
+        if let Some(session_id) = effective_session_id {
+            query.push(" AND voice_notes.session_id = ");
+            query.push_bind(session_id);
+        }
+        if let Some(recorded_after) = recorded_after.as_deref() {
+            query.push(" AND voice_notes.recorded_at > ");
+            query.push_bind(recorded_after);
+        }
+        if let Some(recorded_before) = recorded_before.as_deref() {
+            query.push(" AND voice_notes.recorded_at <= ");
+            query.push_bind(recorded_before);
+        }
+        if let Some(created_after) = created_after.as_deref() {
+            query.push(" AND voice_notes.created_at > ");
+            query.push_bind(created_after);
+        }
+        if let Some(created_before) = created_before.as_deref() {
+            query.push(" AND voice_notes.created_at <= ");
+            query.push_bind(created_before);
+        }
+        for tag_id in &filters.tag_ids {
+            query.push(
+                r#"
+                AND EXISTS (
+                    SELECT 1
+                    FROM voice_note_tags
+                    WHERE voice_note_tags.api_key_id = voice_notes.api_key_id
+                        AND voice_note_tags.voice_note_id = voice_notes.id
+                        AND voice_note_tags.tag_id =
+                "#,
+            );
+            query.push_bind(tag_id);
+            query.push(")");
+        }
+        query.push(
+            r#"
+                AND voice_note_versions.version_number = (
+                    SELECT MAX(version_number)
+                    FROM voice_note_versions
+                    WHERE voice_note_id = voice_notes.id
+                )
+            "#,
+        );
+        query.push(
+            r#"
+            ORDER BY keyword_matches.keyword_score ASC,
+                voice_notes.created_at DESC,
+                voice_notes.id DESC
+            LIMIT
+            "#,
+        );
         query.push_bind(limit);
         let rows = query.build().fetch_all(&self.pool).await?;
 
@@ -2103,6 +2252,37 @@ impl Storage {
         .await?;
 
         row.map(embedding_from_row).transpose()
+    }
+
+    pub async fn get_current_embeddings_for_voice_notes(
+        &self,
+        api_key_id: &str,
+        voice_note_ids: &[String],
+    ) -> Result<HashMap<String, Vec<u8>>, StorageError> {
+        if voice_note_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut query = QueryBuilder::new(
+            r#"
+            SELECT voice_note_id, vector
+            FROM embeddings
+            WHERE api_key_id =
+            "#,
+        );
+        query.push_bind(api_key_id);
+        query.push(" AND voice_note_id IN (");
+        let mut separated = query.separated(", ");
+        for voice_note_id in voice_note_ids {
+            separated.push_bind(voice_note_id);
+        }
+        separated.push_unseparated(")");
+        let rows = query.build().fetch_all(&self.pool).await?;
+        let mut embeddings = HashMap::new();
+        for row in rows {
+            embeddings.insert(row.try_get("voice_note_id")?, row.try_get("vector")?);
+        }
+
+        Ok(embeddings)
     }
 
     pub async fn claim_next_embedding_regeneration_job(

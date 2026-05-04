@@ -288,11 +288,6 @@ Notes:
 - Without `q`, the endpoint returns voice-note history ordered
   newest-first by voice-note `created_at`, with descending `id` as
   the deterministic tiebreaker for cursor pagination.
-- Until search semantics land, a valid `q` returns an empty
-  `{items: [], next_cursor: null}` envelope after validating all
-  supplied search and filter parameters. Search results will use the
-  same `VoiceNote` resource shape, filters, and collection envelope
-  when the tracked search work lands.
 - If `q` is present and `search_mode` is omitted, the backend uses
   `hybrid`.
 - Search results are always voice-note resources.
@@ -725,9 +720,6 @@ Notes:
 - This endpoint applies the same collection semantics as
   `GET /api/v1/voice-notes` but with the session scope fixed by the
   path, including the same ordering and time-bound semantics.
-- Until search semantics land, a valid `q` returns an empty
-  `{items: [], next_cursor: null}` envelope after validating all
-  supplied search and filter parameters.
 - If `q` is present and `search_mode` is omitted, the backend uses
   `hybrid`.
 - Repeated `tag_id` filters combine by intersection.

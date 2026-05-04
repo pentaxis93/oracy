@@ -112,6 +112,7 @@ async fn load_runtime_from_path_with_openai_key(
         metrics: Metrics::new(),
         operator_listen_addr: settings.operator_listen_addr,
         openai_api_key,
+        openai_base_url: "https://api.openai.com".to_owned(),
         storage,
     };
 

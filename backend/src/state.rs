@@ -16,6 +16,7 @@ pub struct AppState {
     pub metrics: Metrics,
     pub operator_listen_addr: SocketAddr,
     pub openai_api_key: String,
+    pub openai_base_url: String,
     pub storage: Storage,
 }
 
@@ -28,6 +29,7 @@ impl Debug for AppState {
             .field("metrics", &"<metrics>")
             .field("operator_listen_addr", &self.operator_listen_addr)
             .field("openai_api_key", &"<redacted>")
+            .field("openai_base_url", &self.openai_base_url)
             .field("storage", &self.storage)
             .finish()
     }
