@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - "backend/**"
+      - "scripts/backend-ci"
       - ".github/workflows/backend.yml"
   pull_request:
     branches: [main]
     paths:
       - "backend/**"
+      - "scripts/backend-ci"
       - ".github/workflows/backend.yml"
 
 jobs:
@@ -34,14 +36,5 @@ jobs:
           ffmpeg -version
           ffprobe -version
 
-      - name: Check formatting
-        working-directory: backend
-        run: cargo fmt --check
-
-      - name: Lint
-        working-directory: backend
-        run: cargo clippy -- -D warnings
-
-      - name: Test
-        working-directory: backend
-        run: cargo test
+      - name: Run backend CI parity gate
+        run: ./scripts/backend-ci
