@@ -306,6 +306,44 @@ async fn concurrent_open_replays_return_the_same_job() {
 }
 
 #[tokio::test]
+async fn concurrent_mismatched_submit_bodies_return_success_and_conflict() {
+    let fixture = TranscriptionJobFixture::new().await;
+
+    let (first, second) = tokio::join!(
+        fixture.json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-concurrent-open-conflict"),
+            Some(json!({
+                "recorded_at": "2026-04-24T17:59:00Z",
+                "chunk_count": 1,
+                "audio_format": "wav"
+            })),
+        ),
+        fixture.json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-concurrent-open-conflict"),
+            Some(json!({
+                "recorded_at": "2026-04-24T17:59:00Z",
+                "chunk_count": 2,
+                "audio_format": "wav"
+            })),
+        ),
+    );
+    let mut statuses = [first.status, second.status];
+    statuses.sort_by_key(|status| status.as_u16());
+
+    assert_eq!(statuses, [StatusCode::CREATED, StatusCode::CONFLICT]);
+    assert_eq!(
+        fixture
+            .job_count_by_idempotency_key("attempt-concurrent-open-conflict")
+            .await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn malformed_job_ids_are_rejected_before_existence_checks() {
     let fixture = TranscriptionJobFixture::new().await;
 
@@ -493,6 +531,43 @@ async fn finalize_requires_all_chunks_and_replays_after_acceptance() {
         .await;
     assert_eq!(replay.status(), StatusCode::OK);
     assert_eq!(json_body(replay).await["status"], "queued");
+}
+
+#[tokio::test]
+async fn concurrent_finalize_requests_return_acceptance_and_replay() {
+    let fixture = TranscriptionJobFixture::new().await;
+    let opened = fixture
+        .json_request(
+            "POST",
+            "/api/v1/transcription-jobs",
+            Some("attempt-concurrent-finalize"),
+            Some(json!({
+                "recorded_at": "2026-04-24T17:59:00Z",
+                "chunk_count": 1,
+                "audio_format": "wav"
+            })),
+        )
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED);
+    let job_id = opened.body["id"].as_str().expect("job id");
+    fixture.push_chunk(job_id, 0, b"audio").await;
+
+    let (first, second) = tokio::join!(
+        finalize_request(fixture.app.clone(), job_id.to_owned()),
+        finalize_request(fixture.app.clone(), job_id.to_owned()),
+    );
+    let first_status = first.status();
+    let second_status = second.status();
+    let first_body = json_body(first).await;
+    let second_body = json_body(second).await;
+    let mut statuses = [first_status, second_status];
+    statuses.sort_by_key(|status| status.as_u16());
+
+    assert_eq!(statuses, [StatusCode::OK, StatusCode::ACCEPTED]);
+    assert_eq!(first_body["id"], job_id);
+    assert_eq!(second_body["id"], job_id);
+    assert_eq!(first_body["status"], "queued");
+    assert_eq!(second_body["status"], "queued");
 }
 
 #[tokio::test]
