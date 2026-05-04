@@ -9,7 +9,10 @@ use oracy_backend::embedding_regeneration::{
 };
 use oracy_backend::storage::{Storage, decode_embedding_vector};
 use tempfile::TempDir;
+use time::Duration;
 use time::macros::datetime;
+use tokio::sync::Barrier;
+use tokio::time::{Duration as TokioDuration, sleep};
 
 const NOTE_ID: &str = "01JS8D6E2S3T1J7H9J2Q2N4P5R";
 const VERSION_ID: &str = "01JS9P1D6CK9M0N1P2Q3R4S5T6";
@@ -142,6 +145,82 @@ async fn stale_regeneration_completion_does_not_replace_a_newer_current_embeddin
         .expect("claim latest")
         .expect("latest job exists");
     assert_eq!(latest.text, "second edit");
+}
+
+#[tokio::test]
+async fn expired_regeneration_worker_does_not_replace_reclaimed_embedding() {
+    let (_tempdir, storage) = storage().await;
+    insert_voice_note(&storage).await;
+    storage
+        .update_voice_note_text(
+            "owner-a",
+            NOTE_ID,
+            "edited text",
+            datetime!(2026-04-24 18:03:00 UTC),
+        )
+        .await
+        .expect("update text");
+    let stale_started = Arc::new(Barrier::new(2));
+    let stale_release = Arc::new(Barrier::new(2));
+    let stale_engine = BlockingEmbeddingEngine {
+        output: EmbeddingOutput {
+            model: "text-embedding-3-small".to_owned(),
+            vector: vec![0.9, 0.9, 0.9],
+        },
+        started: stale_started.clone(),
+        release: stale_release.clone(),
+    };
+    let stale_storage = storage.clone();
+    let stale_handle = tokio::spawn(async move {
+        process_one_embedding_regeneration_job(
+            &stale_storage,
+            &stale_engine,
+            EmbeddingRegenerationConfig {
+                lease_duration: Duration::milliseconds(1),
+                ..EmbeddingRegenerationConfig::test()
+            },
+        )
+        .await
+    });
+
+    stale_started.wait().await;
+    sleep(TokioDuration::from_millis(20)).await;
+    let fresh_engine = FakeEmbeddingEngine::success(vec![0.2, 0.4, 0.6]);
+
+    let fresh_outcome = process_one_embedding_regeneration_job(
+        &storage,
+        &fresh_engine,
+        EmbeddingRegenerationConfig::test(),
+    )
+    .await
+    .expect("fresh worker completes reclaimed job");
+
+    assert_eq!(
+        fresh_outcome,
+        EmbeddingRegenerationOutcome::Replaced {
+            voice_note_id: NOTE_ID.to_owned()
+        }
+    );
+    stale_release.wait().await;
+    let stale_outcome = stale_handle
+        .await
+        .expect("stale worker joins")
+        .expect("stale worker completes");
+    assert_eq!(
+        stale_outcome,
+        EmbeddingRegenerationOutcome::Stale {
+            voice_note_id: NOTE_ID.to_owned()
+        }
+    );
+    let embedding = storage
+        .get_current_embedding("owner-a", NOTE_ID)
+        .await
+        .expect("embedding lookup")
+        .expect("embedding exists");
+    assert_eq!(
+        decode_embedding_vector(&embedding.vector).expect("encoded vector"),
+        vec![0.2, 0.4, 0.6]
+    );
 }
 
 #[tokio::test]
@@ -298,5 +377,19 @@ impl EmbeddingEngine for FakeEmbeddingEngine {
     async fn embed(&self, input: EmbeddingInput) -> Result<EmbeddingOutput, EmbeddingFailure> {
         self.inputs.lock().expect("inputs").push(input);
         self.output.clone()
+    }
+}
+
+struct BlockingEmbeddingEngine {
+    output: EmbeddingOutput,
+    started: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
+impl EmbeddingEngine for BlockingEmbeddingEngine {
+    async fn embed(&self, _input: EmbeddingInput) -> Result<EmbeddingOutput, EmbeddingFailure> {
+        self.started.wait().await;
+        self.release.wait().await;
+        Ok(self.output.clone())
     }
 }

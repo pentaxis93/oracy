@@ -2189,6 +2189,28 @@ impl Storage {
         embedding: NewEmbedding,
     ) -> Result<bool, StorageError> {
         let mut tx = self.begin_immediate_tx().await?;
+        let active_version_id: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT voice_note_version_id
+            FROM embedding_regeneration_jobs
+            WHERE api_key_id = ?
+                AND voice_note_id = ?
+                AND voice_note_version_id = ?
+                AND status = 'processing'
+                AND processing_lease_token = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(voice_note_id)
+        .bind(voice_note_version_id)
+        .bind(lease_token)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if active_version_id.is_none() {
+            tx.commit().await?;
+            return Ok(false);
+        }
+
         let Some(current_version_id): Option<String> = sqlx::query_scalar(
             r#"
             SELECT voice_note_versions.id
@@ -2209,30 +2231,65 @@ impl Storage {
         .fetch_optional(&mut *tx)
         .await?
         else {
+            sqlx::query(
+                r#"
+                DELETE FROM embedding_regeneration_jobs
+                WHERE api_key_id = ?
+                    AND voice_note_id = ?
+                    AND voice_note_version_id = ?
+                    AND status = 'processing'
+                    AND processing_lease_token = ?
+                "#,
+            )
+            .bind(api_key_id)
+            .bind(voice_note_id)
+            .bind(voice_note_version_id)
+            .bind(lease_token)
+            .execute(&mut *tx)
+            .await?;
             tx.commit().await?;
             return Ok(false);
         };
 
-        if current_version_id == voice_note_version_id {
+        if current_version_id != voice_note_version_id {
             sqlx::query(
                 r#"
-                INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(voice_note_id) DO UPDATE SET
-                    model = excluded.model,
-                    vector = excluded.vector,
-                    created_at = excluded.created_at
-                WHERE embeddings.api_key_id = excluded.api_key_id
+                DELETE FROM embedding_regeneration_jobs
+                WHERE api_key_id = ?
+                    AND voice_note_id = ?
+                    AND voice_note_version_id = ?
+                    AND status = 'processing'
+                    AND processing_lease_token = ?
                 "#,
             )
-            .bind(voice_note_id)
             .bind(api_key_id)
-            .bind(&embedding.model)
-            .bind(&embedding.vector)
-            .bind(format_timestamp(embedding.created_at)?)
+            .bind(voice_note_id)
+            .bind(voice_note_version_id)
+            .bind(lease_token)
             .execute(&mut *tx)
             .await?;
+            tx.commit().await?;
+            return Ok(false);
         }
+
+        sqlx::query(
+            r#"
+            INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(voice_note_id) DO UPDATE SET
+                model = excluded.model,
+                vector = excluded.vector,
+                created_at = excluded.created_at
+            WHERE embeddings.api_key_id = excluded.api_key_id
+            "#,
+        )
+        .bind(voice_note_id)
+        .bind(api_key_id)
+        .bind(&embedding.model)
+        .bind(&embedding.vector)
+        .bind(format_timestamp(embedding.created_at)?)
+        .execute(&mut *tx)
+        .await?;
 
         sqlx::query(
             r#"
@@ -2252,7 +2309,7 @@ impl Storage {
         .await?;
         tx.commit().await?;
 
-        Ok(current_version_id == voice_note_version_id)
+        Ok(true)
     }
 
     pub async fn record_transient_embedding_regeneration_failure(

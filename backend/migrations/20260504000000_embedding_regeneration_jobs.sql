@@ -31,3 +31,39 @@ CREATE INDEX embedding_regeneration_jobs_ready_idx
 
 CREATE INDEX embedding_regeneration_jobs_processing_lease_idx
     ON embedding_regeneration_jobs (status, processing_lease_expires_at, next_attempt_at, created_at, voice_note_id);
+
+INSERT INTO embedding_regeneration_jobs (
+    voice_note_id, api_key_id, voice_note_version_id, status, created_at,
+    updated_at, retry_count, max_retries, next_attempt_at, failure_code,
+    failure_message, processing_lease_token, processing_lease_expires_at
+)
+SELECT
+    voice_notes.id,
+    voice_notes.api_key_id,
+    current_versions.id,
+    'queued',
+    current_versions.created_at,
+    current_versions.created_at,
+    0,
+    3,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL
+FROM voice_notes
+JOIN voice_note_versions AS current_versions
+    ON current_versions.api_key_id = voice_notes.api_key_id
+    AND current_versions.voice_note_id = voice_notes.id
+WHERE current_versions.version_number = (
+        SELECT MAX(version_number)
+        FROM voice_note_versions
+        WHERE voice_note_id = voice_notes.id
+    )
+    AND TRIM(current_versions.text) <> ''
+    AND NOT EXISTS (
+        SELECT 1
+        FROM embeddings
+        WHERE embeddings.api_key_id = voice_notes.api_key_id
+            AND embeddings.voice_note_id = voice_notes.id
+    );
