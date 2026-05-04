@@ -1,17 +1,15 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use oracy_backend::auth::AuthStore;
 use oracy_backend::config::ApiKeyConfig;
-use oracy_backend::embedding_regeneration::{
-    EmbeddingRegenerationRequest, EmbeddingRegenerationTrigger, EmbeddingRegenerationTriggerError,
-};
 use oracy_backend::router::build_router;
 use oracy_backend::state::AppState;
 use oracy_backend::storage::Storage;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use time::macros::datetime;
 use tower::util::ServiceExt;
 
 const NOTE_OLD: &str = "01JS8D6E2S3T1J7H9J2Q2N4P5R";
@@ -277,8 +275,7 @@ async fn version_history_returns_versions_newest_first_in_shared_envelope() {
 #[tokio::test]
 async fn patch_voice_note_text_appends_version_updates_reads_and_initiates_embedding_regeneration()
 {
-    let trigger = Arc::new(RecordingEmbeddingTrigger::failing());
-    let fixture = VoiceNoteFixture::new_with_trigger(trigger.clone()).await;
+    let fixture = VoiceNoteFixture::new().await;
     fixture
         .insert_voice_note(VoiceNoteSeed {
             owner: "alpha",
@@ -312,13 +309,6 @@ async fn patch_voice_note_text_appends_version_updates_reads_and_initiates_embed
     assert_eq!(response.body["id"], NOTE_OLD);
     assert_eq!(response.body["text"], "edited text");
     assert_ne!(response.body["current_version_id"], VERSION_OLD);
-    assert_eq!(
-        trigger.requests(),
-        vec![EmbeddingRegenerationRequest {
-            api_key_id: "alpha".to_owned(),
-            voice_note_id: NOTE_OLD.to_owned(),
-        }]
-    );
 
     let versions = fixture
         .get_json(
@@ -347,6 +337,24 @@ async fn patch_voice_note_text_appends_version_updates_reads_and_initiates_embed
         )
         .await;
     assert_eq!(segments["items"][0]["text"], "original segment");
+
+    let regeneration_job = fixture
+        .storage
+        .claim_next_embedding_regeneration_job(
+            "regen-lease",
+            datetime!(2026-04-24 18:10:00 UTC),
+            datetime!(2026-04-24 18:15:00 UTC),
+        )
+        .await
+        .expect("claim regeneration job")
+        .expect("regeneration job exists");
+    assert_eq!(regeneration_job.api_key_id, "alpha");
+    assert_eq!(regeneration_job.voice_note_id, NOTE_OLD);
+    assert_eq!(
+        regeneration_job.voice_note_version_id,
+        response.body["current_version_id"]
+    );
+    assert_eq!(regeneration_job.text, "edited text");
 }
 
 #[tokio::test]
@@ -413,6 +421,17 @@ async fn patch_voice_note_text_reports_contract_errors_for_invalid_requests() {
         .await;
     assert_eq!(invalid_shape.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(invalid_shape.body["error_code"], "invalid_request_shape");
+
+    let blank_text = fixture
+        .json_request(
+            "PATCH",
+            &format!("/api/v1/voice-notes/{NOTE_MISSING}"),
+            "alpha-secret",
+            Some(json!({"text": "   \n\t"})),
+        )
+        .await;
+    assert_eq!(blank_text.status, StatusCode::BAD_REQUEST);
+    assert_eq!(blank_text.body["details"][0]["field"], "text");
 
     let unauthorized = fixture
         .app()
@@ -1257,40 +1276,6 @@ struct JsonResponse {
     body: Value,
 }
 
-#[derive(Clone)]
-struct RecordingEmbeddingTrigger {
-    requests: Arc<Mutex<Vec<EmbeddingRegenerationRequest>>>,
-    fail: bool,
-}
-
-impl RecordingEmbeddingTrigger {
-    fn failing() -> Self {
-        Self {
-            requests: Arc::new(Mutex::new(Vec::new())),
-            fail: true,
-        }
-    }
-
-    fn requests(&self) -> Vec<EmbeddingRegenerationRequest> {
-        self.requests.lock().expect("requests lock").clone()
-    }
-}
-
-impl EmbeddingRegenerationTrigger for RecordingEmbeddingTrigger {
-    fn initiate(
-        &self,
-        request: EmbeddingRegenerationRequest,
-    ) -> Result<(), EmbeddingRegenerationTriggerError> {
-        self.requests.lock().expect("requests lock").push(request);
-        if self.fail {
-            return Err(EmbeddingRegenerationTriggerError::Failed(
-                "simulated enqueue failure".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-}
-
 struct VoiceNoteSeed<'a> {
     owner: &'a str,
     id: &'a str,
@@ -1310,15 +1295,6 @@ struct TagSeed<'a> {
 
 impl VoiceNoteFixture {
     async fn new() -> Self {
-        Self::new_with_trigger(Arc::new(
-            oracy_backend::embedding_regeneration::NoopEmbeddingRegenerationTrigger,
-        ))
-        .await
-    }
-
-    async fn new_with_trigger(
-        embedding_regeneration_trigger: Arc<dyn EmbeddingRegenerationTrigger>,
-    ) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         let accepted_audio_dir = tempdir.path().join("accepted-audio");
         std::fs::create_dir(&accepted_audio_dir).expect("create accepted audio dir");
@@ -1343,7 +1319,6 @@ impl VoiceNoteFixture {
             operator_listen_addr: "127.0.0.1:9090".parse().expect("operator listen addr"),
             openai_api_key: "test-openai-key".to_owned(),
             storage: storage.clone(),
-            embedding_regeneration_trigger,
         });
 
         Self {

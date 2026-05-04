@@ -2,6 +2,10 @@ use std::net::SocketAddr;
 
 use oracy_backend::abandonment_sweeper::{AbandonmentSweeperConfig, run_abandonment_sweeper_loop};
 use oracy_backend::bootstrap::load_runtime_from_env;
+use oracy_backend::embedding::OpenAiEmbeddingEngine;
+use oracy_backend::embedding_regeneration::{
+    EmbeddingRegenerationConfig, run_embedding_regeneration_loop,
+};
 use oracy_backend::retention_cleanup::{RetentionCleanupConfig, run_retention_cleanup_loop};
 use oracy_backend::router::{build_operator_router, build_router};
 use oracy_backend::transcription_worker::{
@@ -29,6 +33,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         state.openai_api_key.clone(),
         FfmpegAudioSlicer::openai_limit(),
     );
+    let embedding_engine = OpenAiEmbeddingEngine::new(
+        "https://api.openai.com".to_owned(),
+        state.openai_api_key.clone(),
+    );
+    let regeneration_embedding_engine = OpenAiEmbeddingEngine::new(
+        "https://api.openai.com".to_owned(),
+        state.openai_api_key.clone(),
+    );
     tokio::spawn(run_retention_cleanup_loop(
         state.storage.clone(),
         state.accepted_audio_dir.clone(),
@@ -40,10 +52,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         state.metrics.clone(),
         AbandonmentSweeperConfig::default(),
     ));
+    tokio::spawn(run_embedding_regeneration_loop(
+        state.storage.clone(),
+        regeneration_embedding_engine,
+        EmbeddingRegenerationConfig::default(),
+    ));
     tokio::spawn(run_worker_loop(
         worker_storage,
         state.accepted_audio_dir.clone(),
         worker_engine,
+        embedding_engine,
         FfprobeDurationProbe,
         WorkerConfig::default(),
         state.metrics.clone(),

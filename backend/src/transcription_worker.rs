@@ -10,11 +10,13 @@ use time::{Duration, OffsetDateTime};
 use tokio::process::Command;
 use ulid::Ulid;
 
+use crate::embedding::{EmbeddingEngine, EmbeddingFailure, EmbeddingInput};
 use crate::metrics::Metrics;
 use crate::retention_cleanup::cleanup_retained_audio_for_job;
 use crate::storage::{
-    NewSegment, NewVoiceNote, NewVoiceNoteVersion, RetryOutcome, Storage, StorageError,
-    TerminalJobFailure, TransientJobFailure, VoiceNoteMaterialization,
+    NewEmbedding, NewSegment, NewVoiceNote, NewVoiceNoteVersion, RetryOutcome, Storage,
+    StorageError, TerminalJobFailure, TransientJobFailure, VoiceNoteMaterialization,
+    encode_embedding_vector,
 };
 
 const DEFAULT_OPENAI_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -524,16 +526,44 @@ fn effective_lease_renewal_interval(config: &WorkerConfig) -> std::time::Duratio
     configured.min(std::time::Duration::from_millis(half_lease_ms))
 }
 
-pub async fn process_one_available_job<E, D>(
+enum ProcessingFailure {
+    Duration(DurationProbeError),
+    Engine(EngineFailure),
+}
+
+fn embedding_failure_to_engine_failure(error: EmbeddingFailure) -> EngineFailure {
+    match error {
+        EmbeddingFailure::Transient {
+            failure_code,
+            message,
+            retry_after_seconds,
+        } => EngineFailure::Transient {
+            failure_code,
+            message,
+            retry_after_seconds,
+        },
+        EmbeddingFailure::Terminal {
+            failure_code,
+            message,
+        } => EngineFailure::Terminal {
+            failure_code,
+            message,
+        },
+    }
+}
+
+pub async fn process_one_available_job<E, B, D>(
     storage: &Storage,
     accepted_audio_dir: &Path,
     engine: &E,
+    embedding_engine: &B,
     duration_probe: &D,
     config: WorkerConfig,
     metrics: &Metrics,
 ) -> Result<ProcessOutcome, WorkerError>
 where
     E: TranscriptionEngine,
+    B: EmbeddingEngine,
     D: DurationProbe,
 {
     let now = OffsetDateTime::now_utc();
@@ -554,7 +584,8 @@ where
         async {
             let duration_ms = duration_probe
                 .duration_ms(&job.accepted_audio_path, &job.audio_format)
-                .await?;
+                .await
+                .map_err(ProcessingFailure::Duration)?;
             let transcription = engine
                 .transcribe(TranscriptionInput {
                     audio_path: job.accepted_audio_path.clone(),
@@ -562,15 +593,29 @@ where
                     language: job.language.clone(),
                     model: job.transcription_model.clone(),
                 })
-                .await;
-            Ok::<_, DurationProbeError>((duration_ms, transcription))
+                .await
+                .map_err(ProcessingFailure::Engine)?;
+            if transcription.text.trim().is_empty() {
+                return Err(ProcessingFailure::Engine(EngineFailure::Terminal {
+                    failure_code: "audio_invalid".to_owned(),
+                    message: "transcription produced empty canonical text".to_owned(),
+                }));
+            }
+            let embedding = embedding_engine
+                .embed(EmbeddingInput {
+                    text: transcription.text.clone(),
+                })
+                .await
+                .map_err(embedding_failure_to_engine_failure)
+                .map_err(ProcessingFailure::Engine)?;
+            Ok((duration_ms, transcription, embedding))
         },
     )
     .await?;
 
-    let (duration_ms, transcription) = match active_work {
+    let (duration_ms, transcription, embedding) = match active_work {
         Ok(active_work) => active_work,
-        Err(error) => {
+        Err(ProcessingFailure::Duration(error)) => {
             let failed = storage
                 .fail_leased_job(TerminalJobFailure {
                     api_key_id: job.api_key_id.clone(),
@@ -593,14 +638,11 @@ where
             .await;
             return Ok(ProcessOutcome::Failed { job_id: job.id });
         }
-    };
-    let transcription = match transcription {
-        Ok(transcription) => transcription,
-        Err(EngineFailure::Transient {
+        Err(ProcessingFailure::Engine(EngineFailure::Transient {
             failure_code,
             message,
             retry_after_seconds,
-        }) => {
+        })) => {
             let metric_failure_code = failure_code.clone();
             let now = OffsetDateTime::now_utc();
             let next_attempt_at = now + Duration::seconds(retry_after_seconds.unwrap_or(60).max(1));
@@ -634,10 +676,10 @@ where
                 }
             };
         }
-        Err(EngineFailure::Terminal {
+        Err(ProcessingFailure::Engine(EngineFailure::Terminal {
             failure_code,
             message,
-        }) => {
+        })) => {
             let metric_failure_code = failure_code.clone();
             let failed = storage
                 .fail_leased_job(TerminalJobFailure {
@@ -699,7 +741,11 @@ where
                     end_ms: duration_ms,
                     text: transcription.text,
                 }],
-                embedding: None,
+                embedding: Some(NewEmbedding {
+                    model: embedding.model,
+                    vector: encode_embedding_vector(&embedding.vector),
+                    created_at,
+                }),
             },
         )
         .await?;
@@ -731,15 +777,17 @@ async fn cleanup_terminal_job_audio(
     }
 }
 
-pub async fn run_worker_loop<E, D>(
+pub async fn run_worker_loop<E, B, D>(
     storage: Storage,
     accepted_audio_dir: PathBuf,
     engine: E,
+    embedding_engine: B,
     duration_probe: D,
     config: WorkerConfig,
     metrics: Metrics,
 ) where
     E: TranscriptionEngine + Sync,
+    B: EmbeddingEngine + Sync,
     D: DurationProbe + Sync,
 {
     loop {
@@ -747,6 +795,7 @@ pub async fn run_worker_loop<E, D>(
             &storage,
             &accepted_audio_dir,
             &engine,
+            &embedding_engine,
             &duration_probe,
             config.clone(),
             &metrics,
