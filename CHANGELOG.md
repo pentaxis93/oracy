@@ -4,7 +4,8 @@
 
 - Add ranked voice-note search across keyword, semantic, and hybrid modes,
   including historical-version keyword matches, current-embedding semantic
-  ranking, relevance cursors, and the shared voice-note collection filters.
+  ranking, literal full-text query handling, independent semantic and keyword
+  gates, relevance cursors, and the shared voice-note collection filters.
 - Add OpenAI-backed voice-note embedding generation, long-text chunk pooling,
   durable edit-triggered embedding regeneration, and the
   `succeeded`-requires-current-embedding workflow gate. Blank voice-note text

@@ -481,39 +481,40 @@ async fn execute_voice_note_search(
     cursor: Option<(f64, OffsetDateTime, String)>,
     limit: i64,
 ) -> Result<Vec<RankedVoiceNote>, ApiError> {
-    let Some(fts_query) = search.fts_query.as_deref() else {
-        return Ok(Vec::new());
-    };
     let mut ranks: HashMap<String, (VoiceNoteRecord, Option<usize>, Option<usize>)> =
         HashMap::new();
     if matches!(search.mode, SearchMode::Keyword | SearchMode::Hybrid) {
-        let rows = match session_id {
-            Some(session_id) => {
-                state
-                    .storage
-                    .search_session_voice_notes_keyword(
-                        api_key_id,
-                        session_id,
-                        filters,
-                        fts_query,
-                        i64::MAX,
-                    )
-                    .await
+        if let Some(fts_query) = search.fts_query.as_deref() {
+            let rows = match session_id {
+                Some(session_id) => {
+                    state
+                        .storage
+                        .search_session_voice_notes_keyword(
+                            api_key_id,
+                            session_id,
+                            filters,
+                            fts_query,
+                            i64::MAX,
+                        )
+                        .await
+                }
+                None => {
+                    state
+                        .storage
+                        .search_voice_notes_keyword(api_key_id, filters, fts_query, i64::MAX)
+                        .await
+                }
             }
-            None => {
-                state
-                    .storage
-                    .search_voice_notes_keyword(api_key_id, filters, fts_query, i64::MAX)
-                    .await
+            .map_err(|_| ApiError::internal("Failed to search voice notes."))?;
+            for (index, record) in rows.into_iter().enumerate() {
+                ranks.insert(record.id.clone(), (record, Some(index + 1), None));
             }
-        }
-        .map_err(|_| ApiError::internal("Failed to search voice notes."))?;
-        for (index, record) in rows.into_iter().enumerate() {
-            ranks.insert(record.id.clone(), (record, Some(index + 1), None));
         }
     }
 
-    if matches!(search.mode, SearchMode::Semantic | SearchMode::Hybrid) {
+    if matches!(search.mode, SearchMode::Semantic | SearchMode::Hybrid)
+        && !search.raw_query.trim().is_empty()
+    {
         let semantic_rows =
             semantic_search_rows(api_key_id, state, session_id, filters, &search.raw_query).await?;
         for (index, record) in semantic_rows.into_iter().enumerate() {
@@ -905,12 +906,17 @@ fn plain_text_fts_query(raw: &str) -> Option<String> {
     let terms = raw
         .split(|character: char| !character.is_alphanumeric())
         .filter(|term| !term.is_empty())
+        .map(fts_quoted_phrase)
         .collect::<Vec<_>>();
     if terms.is_empty() {
         None
     } else {
         Some(terms.join(" AND "))
     }
+}
+
+fn fts_quoted_phrase(term: &str) -> String {
+    format!("\"{}\"", term.replace('"', "\"\""))
 }
 
 fn voice_note_resource(

@@ -290,6 +290,9 @@ Notes:
   the deterministic tiebreaker for cursor pagination.
 - If `q` is present and `search_mode` is omitted, the backend uses
   `hybrid`.
+- `q` is plain user text, not raw full-text-search syntax. Keyword
+  search treats extracted terms literally, including terms that look like
+  full-text operators or punctuation.
 - Search results are always voice-note resources.
 - Keyword search may match current voice-note text and historical
   `VoiceNoteVersion` text, but the returned item is always the parent
@@ -297,6 +300,9 @@ Notes:
 - Semantic and hybrid search use the current embedding. After a
   voice-note text edit, semantic freshness is eventual rather than
   immediate.
+- Semantic search is gated by non-blank `q` text, not by whether `q`
+  contains keyword-search terms. In hybrid mode, keyword and semantic
+  candidate generation apply those gates independently.
 - Search results are ordered by backend relevance score descending,
   then by voice-note `created_at` descending, then by descending `id`
   as the final deterministic tiebreaker for cursor pagination.

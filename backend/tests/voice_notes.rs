@@ -1155,6 +1155,42 @@ async fn keyword_search_returns_parent_voice_notes_for_current_and_historical_ve
 }
 
 #[tokio::test]
+async fn keyword_search_treats_fts_syntax_shaped_query_text_as_literal_terms() {
+    let fixture = VoiceNoteFixture::new().await;
+    fixture
+        .insert_voice_note(VoiceNoteSeed {
+            owner: "alpha",
+            id: NOTE_OLD,
+            version_id: VERSION_OLD,
+            text: "Rock AND OR NOT NEAR Roll",
+            created_at: "2026-04-24T18:00:00.000000000Z",
+            recorded_at: "2026-04-24T17:59:00.000000000Z",
+            session_id: None,
+            tags: vec![],
+        })
+        .await;
+
+    for q in [
+        "AND",
+        "OR",
+        "NOT",
+        "NEAR",
+        "rock*",
+        "^rock",
+        "(rock)",
+        "rock:roll",
+        "Rock AND Roll",
+        "AND OR *",
+    ] {
+        let body = fixture
+            .get_json(&voice_note_search_path(q, "keyword"), "alpha-secret")
+            .await;
+
+        assert_collection_ids(body, &[NOTE_OLD]);
+    }
+}
+
+#[tokio::test]
 async fn semantic_search_orders_current_embeddings_by_cosine_similarity() {
     let openai_base_url = spawn_fake_embedding_server().await;
     let fixture = VoiceNoteFixture::new_with_openai_base_url(openai_base_url).await;
@@ -1204,6 +1240,50 @@ async fn semantic_search_orders_current_embeddings_by_cosine_similarity() {
             )
             .await,
         &[NOTE_NEW, NOTE_PAGE_C, NOTE_OLD],
+    );
+}
+
+#[tokio::test]
+async fn search_modes_gate_keyword_terms_and_semantic_query_text_independently() {
+    let openai_base_url = spawn_fake_embedding_server().await;
+    let fixture = VoiceNoteFixture::new_with_openai_base_url(openai_base_url).await;
+    fixture
+        .insert_voice_note(VoiceNoteSeed {
+            owner: "alpha",
+            id: NOTE_OLD,
+            version_id: VERSION_OLD,
+            text: "plain searchable note",
+            created_at: "2026-04-24T18:00:00.000000000Z",
+            recorded_at: "2026-04-24T17:59:00.000000000Z",
+            session_id: None,
+            tags: vec![],
+        })
+        .await;
+    fixture
+        .insert_embedding_vector("alpha", NOTE_OLD, [1.0, 0.0, 0.0])
+        .await;
+
+    assert_empty_collection(
+        fixture
+            .get_json(&voice_note_search_path("😀", "keyword"), "alpha-secret")
+            .await,
+    );
+    assert_collection_ids(
+        fixture
+            .get_json(&voice_note_search_path("😀", "semantic"), "alpha-secret")
+            .await,
+        &[NOTE_OLD],
+    );
+    assert_collection_ids(
+        fixture
+            .get_json(&voice_note_search_path("😀", "hybrid"), "alpha-secret")
+            .await,
+        &[NOTE_OLD],
+    );
+    assert_empty_collection(
+        fixture
+            .get_json(&voice_note_search_path("   ", "semantic"), "alpha-secret")
+            .await,
     );
 }
 
@@ -1945,6 +2025,14 @@ async fn assert_repeated_singular_parameter_error(response: axum::response::Resp
     let body = json_body(response).await;
     assert_eq!(body["error_code"], "repeated_singular_parameter");
     assert_eq!(body["details"][0]["field"], field);
+}
+
+fn voice_note_search_path(q: &str, search_mode: &str) -> String {
+    let query = form_urlencoded::Serializer::new(String::new())
+        .append_pair("q", q)
+        .append_pair("search_mode", search_mode)
+        .finish();
+    format!("/api/v1/voice-notes?{query}")
 }
 
 fn assert_empty_collection(body: Value) {
