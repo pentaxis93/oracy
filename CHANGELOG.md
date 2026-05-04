@@ -4,7 +4,8 @@
 
 - Add OpenAI-backed voice-note embedding generation, long-text chunk pooling,
   durable edit-triggered embedding regeneration, and the
-  `succeeded`-requires-current-embedding workflow gate.
+  `succeeded`-requires-current-embedding workflow gate. Blank voice-note text
+  updates are rejected so every current embedding has non-empty source text.
 - Add authenticated voice-note mutation APIs for text replacement with
   version history, full tag-set replacement, hard deletion with cascades, and
   edit-triggered embedding-regeneration initiation.
