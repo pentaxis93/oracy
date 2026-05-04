@@ -1244,6 +1244,32 @@ async fn semantic_search_orders_current_embeddings_by_cosine_similarity() {
 }
 
 #[tokio::test]
+async fn semantic_search_returns_empty_without_provider_when_filtered_candidates_are_empty() {
+    let fixture = VoiceNoteFixture::new().await;
+    fixture
+        .insert_voice_note(VoiceNoteSeed {
+            owner: "alpha",
+            id: NOTE_OLD,
+            version_id: VERSION_OLD,
+            text: "unmatched note",
+            created_at: "2026-04-24T18:00:00.000000000Z",
+            recorded_at: "2026-04-24T17:59:00.000000000Z",
+            session_id: None,
+            tags: vec![],
+        })
+        .await;
+
+    assert_empty_collection(
+        fixture
+            .get_json(
+                &format!("/api/v1/voice-notes?q=query&search_mode=semantic&tag_id={TAG_MISSING}"),
+                "alpha-secret",
+            )
+            .await,
+    );
+}
+
+#[tokio::test]
 async fn search_modes_gate_keyword_terms_and_semantic_query_text_independently() {
     let openai_base_url = spawn_fake_embedding_server().await;
     let fixture = VoiceNoteFixture::new_with_openai_base_url(openai_base_url).await;
@@ -1335,6 +1361,33 @@ async fn hybrid_search_uses_reciprocal_rank_fusion_for_keyword_and_semantic_resu
 
     assert_eq!(body["items"][0]["id"], NOTE_OLD);
     assert_collection_ids(body, &[NOTE_OLD, NOTE_NEW, NOTE_PAGE_C]);
+}
+
+#[tokio::test]
+async fn hybrid_search_keeps_keyword_results_without_provider_when_semantic_candidates_are_empty() {
+    let fixture = VoiceNoteFixture::new().await;
+    fixture
+        .insert_voice_note(VoiceNoteSeed {
+            owner: "alpha",
+            id: NOTE_OLD,
+            version_id: VERSION_OLD,
+            text: "apollo keyword match",
+            created_at: "2026-04-24T18:00:00.000000000Z",
+            recorded_at: "2026-04-24T17:59:00.000000000Z",
+            session_id: None,
+            tags: vec![],
+        })
+        .await;
+
+    assert_collection_ids(
+        fixture
+            .get_json(
+                "/api/v1/voice-notes?q=apollo&search_mode=hybrid",
+                "alpha-secret",
+            )
+            .await,
+        &[NOTE_OLD],
+    );
 }
 
 #[tokio::test]

@@ -6,6 +6,9 @@
   including historical-version keyword matches, current-embedding semantic
   ranking, literal full-text query handling, independent semantic and keyword
   gates, relevance cursors, and the shared voice-note collection filters.
+- Return empty semantic search results without calling the embedding provider
+  when local filters leave no current embeddings to rank, preserving hybrid
+  keyword results in the same case.
 - Add OpenAI-backed voice-note embedding generation, long-text chunk pooling,
   durable edit-triggered embedding regeneration, and the
   `succeeded`-requires-current-embedding workflow gate. Blank voice-note text

@@ -556,12 +556,6 @@ async fn semantic_search_rows(
     filters: &VoiceNoteFilters,
     q: &str,
 ) -> Result<Vec<VoiceNoteRecord>, ApiError> {
-    let engine =
-        OpenAiEmbeddingEngine::new(state.openai_base_url.clone(), state.openai_api_key.clone());
-    let query_embedding = engine
-        .embed(EmbeddingInput { text: q.to_owned() })
-        .await
-        .map_err(|_| ApiError::internal("Failed to search voice notes."))?;
     let rows = state
         .storage
         .list_voice_notes_for_search(api_key_id, session_id, filters)
@@ -573,16 +567,32 @@ async fn semantic_search_rows(
         .get_current_embeddings_for_voice_notes(api_key_id, &ids)
         .await
         .map_err(|_| ApiError::internal("Failed to search voice notes."))?;
-    let mut scored = rows
+    let candidates = rows
         .into_iter()
         .filter_map(|record| {
             let embedding = embeddings
                 .get(&record.id)
                 .and_then(|bytes| crate::storage::decode_embedding_vector(bytes))?;
-            Some((
+            Some((record, embedding))
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let engine =
+        OpenAiEmbeddingEngine::new(state.openai_base_url.clone(), state.openai_api_key.clone());
+    let query_embedding = engine
+        .embed(EmbeddingInput { text: q.to_owned() })
+        .await
+        .map_err(|_| ApiError::internal("Failed to search voice notes."))?;
+    let mut scored = candidates
+        .into_iter()
+        .map(|(record, embedding)| {
+            (
                 cosine_similarity(&query_embedding.vector, &embedding),
                 record,
-            ))
+            )
         })
         .collect::<Vec<_>>();
     scored.sort_by(|(left_score, left), (right_score, right)| {
