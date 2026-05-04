@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add a repo-defined backend CI-parity gate for contributor pre-review checks.
 - Add ranked voice-note search across keyword, semantic, and hybrid modes,
   including historical-version keyword matches, current-embedding semantic
   ranking, literal full-text query handling, independent semantic and keyword

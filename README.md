@@ -28,10 +28,7 @@ and `client/`.
 Backend:
 
 ```sh
-cd backend
-cargo fmt --check
-cargo clippy -- -D warnings
-cargo test
+./scripts/backend-ci
 ```
 
 Frontend:
