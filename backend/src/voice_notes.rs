@@ -1,6 +1,7 @@
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
-use serde::Serialize;
+use axum::http::StatusCode;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::auth::AuthenticatedKey;
@@ -9,10 +10,13 @@ use crate::collections::{
     parse_rfc3339_field, parse_time_cursor, position_cursor, query_any, query_first, query_values,
     time_cursor, timestamp, validate_rfc3339_field, validate_ulid_field, validation_error,
 };
+use crate::embedding_regeneration::EmbeddingRegenerationRequest;
 use crate::errors::{ApiError, CollectionEnvelope};
+use crate::json::JsonBody;
 use crate::state::AppState;
 use crate::storage::{
-    SegmentRecord, TagRecord, VoiceNoteFilters, VoiceNoteRecord, VoiceNoteVersionRecord,
+    ReplaceVoiceNoteTagsOutcome, SegmentRecord, TagRecord, UpdateVoiceNoteTextOutcome,
+    VoiceNoteFilters, VoiceNoteRecord, VoiceNoteVersionRecord,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +83,18 @@ pub struct TagResource {
     created_at: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceNoteTextRequest {
+    text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceNoteTagsRequest {
+    tag_ids: Vec<String>,
+}
+
 pub async fn list_voice_notes(
     authenticated_key: AuthenticatedKey,
     State(state): State<AppState>,
@@ -132,6 +148,65 @@ pub async fn get_voice_note(
         .map_err(|_| ApiError::internal("Failed to load voice note tags."))?;
 
     Ok(Json(voice_note_resource(record, tags)?))
+}
+
+pub async fn patch_voice_note(
+    authenticated_key: AuthenticatedKey,
+    State(state): State<AppState>,
+    Path(voice_note_id): Path<String>,
+    JsonBody(body): JsonBody<VoiceNoteTextRequest>,
+) -> Result<Json<VoiceNoteResource>, ApiError> {
+    validate_ulid_field("voice_note_id", &voice_note_id)?;
+    let record = match state
+        .storage
+        .update_voice_note_text(
+            authenticated_key.api_key_id.as_str(),
+            &voice_note_id,
+            &body.text,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .map_err(|_| ApiError::internal("Failed to update voice note."))?
+    {
+        UpdateVoiceNoteTextOutcome::Updated(record) => *record,
+        UpdateVoiceNoteTextOutcome::NotFound => {
+            return Err(ApiError::not_found("Voice note not found."));
+        }
+    };
+
+    if let Err(error) =
+        state
+            .embedding_regeneration_trigger
+            .initiate(EmbeddingRegenerationRequest {
+                api_key_id: authenticated_key.api_key_id.to_string(),
+                voice_note_id: voice_note_id.clone(),
+            })
+    {
+        tracing::error!(
+            voice_note_id = %voice_note_id,
+            "embedding regeneration trigger failed: {error}"
+        );
+    }
+
+    render_voice_note_resource(&state, authenticated_key.api_key_id.as_str(), record).await
+}
+
+pub async fn delete_voice_note(
+    authenticated_key: AuthenticatedKey,
+    State(state): State<AppState>,
+    Path(voice_note_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    validate_ulid_field("voice_note_id", &voice_note_id)?;
+    if !state
+        .storage
+        .delete_voice_note(authenticated_key.api_key_id.as_str(), &voice_note_id)
+        .await
+        .map_err(|_| ApiError::internal("Failed to delete voice note."))?
+    {
+        return Err(ApiError::not_found("Voice note not found."));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn list_voice_note_versions(
@@ -227,6 +302,50 @@ pub async fn list_voice_note_segments(
     Ok(Json(CollectionEnvelope { items, next_cursor }))
 }
 
+pub async fn put_voice_note_tags(
+    authenticated_key: AuthenticatedKey,
+    State(state): State<AppState>,
+    Path(voice_note_id): Path<String>,
+    JsonBody(body): JsonBody<VoiceNoteTagsRequest>,
+) -> Result<Json<VoiceNoteResource>, ApiError> {
+    validate_ulid_field("voice_note_id", &voice_note_id)?;
+    for tag_id in &body.tag_ids {
+        validate_ulid_field("tag_ids", tag_id)?;
+    }
+
+    match state
+        .storage
+        .replace_voice_note_tags(
+            authenticated_key.api_key_id.as_str(),
+            &voice_note_id,
+            &body.tag_ids,
+        )
+        .await
+        .map_err(|_| ApiError::internal("Failed to replace voice note tags."))?
+    {
+        ReplaceVoiceNoteTagsOutcome::Replaced => {}
+        ReplaceVoiceNoteTagsOutcome::NotFound => {
+            return Err(ApiError::not_found("Voice note not found."));
+        }
+        ReplaceVoiceNoteTagsOutcome::DuplicateTagIds => {
+            return Err(validation_error(
+                "tag_ids",
+                "Duplicate tag_ids are invalid.",
+            ));
+        }
+    }
+
+    let Some(record) = state
+        .storage
+        .get_voice_note(authenticated_key.api_key_id.as_str(), &voice_note_id)
+        .await
+        .map_err(|_| ApiError::internal("Failed to load voice note."))?
+    else {
+        return Err(ApiError::internal("Updated voice note was not found."));
+    };
+    render_voice_note_resource(&state, authenticated_key.api_key_id.as_str(), record).await
+}
+
 pub async fn list_session_voice_notes(
     authenticated_key: AuthenticatedKey,
     State(state): State<AppState>,
@@ -287,6 +406,20 @@ async fn ensure_voice_note_exists(
     }
 
     Ok(())
+}
+
+async fn render_voice_note_resource(
+    state: &AppState,
+    api_key_id: &str,
+    record: VoiceNoteRecord,
+) -> Result<Json<VoiceNoteResource>, ApiError> {
+    let tags = state
+        .storage
+        .list_voice_note_tags(api_key_id, &record.id)
+        .await
+        .map_err(|_| ApiError::internal("Failed to load voice note tags."))?;
+
+    Ok(Json(voice_note_resource(record, tags)?))
 }
 
 async fn render_voice_note_page(

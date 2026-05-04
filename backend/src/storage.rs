@@ -128,6 +128,12 @@ pub enum ReplaceVoiceNoteTagsOutcome {
     DuplicateTagIds,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateVoiceNoteTextOutcome {
+    Updated(Box<VoiceNoteRecord>),
+    NotFound,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmissionConflict {
     pub job_id: String,
@@ -1579,6 +1585,86 @@ impl Storage {
         .await?;
 
         row.map(voice_note_from_row).transpose()
+    }
+
+    pub async fn update_voice_note_text(
+        &self,
+        api_key_id: &str,
+        voice_note_id: &str,
+        text: &str,
+        created_at: OffsetDateTime,
+    ) -> Result<UpdateVoiceNoteTextOutcome, StorageError> {
+        let mut tx = self.begin_immediate_tx().await?;
+        let voice_note_exists: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT 1
+            FROM voice_notes
+            WHERE api_key_id = ? AND id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(voice_note_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if voice_note_exists.is_none() {
+            tx.commit().await?;
+            return Ok(UpdateVoiceNoteTextOutcome::NotFound);
+        }
+
+        let version_number: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(MAX(version_number), 0) + 1
+            FROM voice_note_versions
+            WHERE api_key_id = ? AND voice_note_id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(voice_note_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO voice_note_versions (
+                id, api_key_id, voice_note_id, version_number, text, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(new_id())
+        .bind(api_key_id)
+        .bind(voice_note_id)
+        .bind(version_number)
+        .bind(text)
+        .bind(format_timestamp(created_at)?)
+        .execute(&mut *tx)
+        .await?;
+
+        let row = sqlx::query(
+            r#"
+            SELECT
+                voice_notes.*,
+                voice_note_versions.id AS current_version_id,
+                voice_note_versions.text AS current_text
+            FROM voice_notes
+            JOIN voice_note_versions
+                ON voice_note_versions.voice_note_id = voice_notes.id
+            WHERE voice_notes.api_key_id = ?
+                AND voice_notes.id = ?
+                AND voice_note_versions.version_number = (
+                    SELECT MAX(version_number)
+                    FROM voice_note_versions
+                    WHERE voice_note_id = voice_notes.id
+                )
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(voice_note_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let updated = voice_note_from_row(row)?;
+        tx.commit().await?;
+
+        Ok(UpdateVoiceNoteTextOutcome::Updated(Box::new(updated)))
     }
 
     pub async fn list_voice_notes(

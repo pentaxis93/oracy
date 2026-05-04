@@ -7,7 +7,7 @@ use oracy_backend::storage::{
     NewOpenTranscriptionJob, NewSegment, NewSession, NewTag, NewTranscriptionJob, NewVoiceNote,
     NewVoiceNoteVersion, OpenJobOutcome, RenameTagOutcome, ReplaceVoiceNoteTagsOutcome,
     RetryOutcome, Storage, StorageError, StoreChunkOutcome, TransientJobFailure,
-    VoiceNoteMaterialization,
+    UpdateVoiceNoteTextOutcome, VoiceNoteMaterialization,
 };
 use sqlx::Row;
 use std::time::Duration as StdDuration;
@@ -1109,6 +1109,55 @@ async fn completed_voice_notes_expose_current_version_ordered_segments_and_curre
 }
 
 #[tokio::test]
+async fn voice_note_text_replacement_appends_one_current_version_without_mutating_segments() {
+    let (_tempdir, storage) = storage().await;
+    let job = created_job(&storage, "owner-a", "attempt-1").await;
+    mark_job_processing(&storage, &job.id).await;
+    storage
+        .complete_job_with_voice_note("owner-a", &job.id, materialization("voice-note-a"))
+        .await
+        .expect("materialize voice note");
+
+    let outcome = storage
+        .update_voice_note_text(
+            "owner-a",
+            "voice-note-a",
+            "edited text",
+            datetime!(2026-04-24 18:01:00 UTC),
+        )
+        .await
+        .expect("replace voice note text");
+
+    let UpdateVoiceNoteTextOutcome::Updated(updated) = outcome else {
+        panic!("expected updated voice note, got {outcome:?}");
+    };
+    assert_eq!(updated.text, "edited text");
+    assert_ne!(updated.current_version_id, "voice-note-a-version-1");
+
+    let versions = storage
+        .list_voice_note_versions("owner-a", "voice-note-a", None, 10)
+        .await
+        .expect("version history");
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0].id, updated.current_version_id);
+    assert_eq!(versions[0].text, "edited text");
+    assert_eq!(versions[1].id, "voice-note-a-version-1");
+    assert_eq!(versions[1].text, "initial text");
+
+    let segments = storage
+        .list_segments("owner-a", "voice-note-a")
+        .await
+        .expect("segments");
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| (segment.position, segment.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "first segment"), (1, "second segment")]
+    );
+}
+
+#[tokio::test]
 async fn duplicate_completion_fails_without_orphaning_materialized_rows() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
@@ -1324,6 +1373,18 @@ async fn deleting_a_voice_note_cascades_children_and_nulls_the_succeeded_job() {
         .expect("job survives");
     assert_eq!(job.status, "succeeded");
     assert_eq!(job.voice_note_id, None);
+
+    let replayed = match storage
+        .accept_job(new_job("owner-a", "attempt-1", "hash-a"))
+        .await
+        .expect("replay deleted voice note job")
+    {
+        AcceptJobOutcome::Replayed(job) => job,
+        other => panic!("expected replayed job, got {other:?}"),
+    };
+    assert_eq!(replayed.id, job.id);
+    assert_eq!(replayed.status, "succeeded");
+    assert_eq!(replayed.voice_note_id, None);
 }
 
 #[tokio::test]

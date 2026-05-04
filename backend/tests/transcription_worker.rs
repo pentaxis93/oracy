@@ -1306,6 +1306,9 @@ async fn operator_metrics_text(fixture: &WorkerFixture, metrics: Metrics) -> Str
         operator_listen_addr: "127.0.0.1:9090".parse().expect("operator listen addr"),
         openai_api_key: "test-openai-key".to_owned(),
         storage: fixture.storage.clone(),
+        embedding_regeneration_trigger: Arc::new(
+            oracy_backend::embedding_regeneration::NoopEmbeddingRegenerationTrigger,
+        ),
     };
     let response = build_operator_router(state)
         .oneshot(

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add authenticated voice-note mutation APIs for text replacement with
+  version history, full tag-set replacement, hard deletion with cascades, and
+  edit-triggered embedding-regeneration initiation.
 - Add a transcription-job abandonment sweeper that fails stale
   `accepting_chunks` jobs with `submission_abandoned` and reports swept jobs
   through operator logs and metrics.
