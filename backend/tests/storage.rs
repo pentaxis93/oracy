@@ -7,7 +7,7 @@ use oracy_backend::storage::{
     NewOpenTranscriptionJob, NewSegment, NewSession, NewTag, NewTranscriptionJob, NewVoiceNote,
     NewVoiceNoteVersion, OpenJobOutcome, RenameTagOutcome, ReplaceVoiceNoteTagsOutcome,
     RetryOutcome, Storage, StorageError, StoreChunkOutcome, TransientJobFailure,
-    UpdateVoiceNoteTextOutcome, VoiceNoteMaterialization,
+    UpdateVoiceNoteTextOutcome, VoiceNoteFilters, VoiceNoteMaterialization,
 };
 use sqlx::Row;
 use std::time::Duration as StdDuration;
@@ -134,6 +134,53 @@ async fn storage_owns_the_accepted_audio_hash_algorithm_pin() {
     assert_eq!(
         created.audio_content_hash_algorithm,
         AUDIO_CONTENT_HASH_ALGORITHM_ID
+    );
+}
+
+#[tokio::test]
+async fn keyword_search_resumes_equal_score_pages_by_created_at_and_id() {
+    let (_tempdir, storage) = storage().await;
+    for voice_note_id in ["voice-note-a", "voice-note-b", "voice-note-c"] {
+        insert_searchable_voice_note(
+            &storage,
+            "owner-a",
+            voice_note_id,
+            &format!("version-{voice_note_id}"),
+            "apollo exact",
+            "2026-04-24T18:00:00.000000000Z",
+        )
+        .await;
+    }
+
+    let first_page = storage
+        .search_voice_notes_keyword("owner-a", &VoiceNoteFilters::default(), "apollo", None, 2)
+        .await
+        .expect("first keyword page");
+    assert_eq!(
+        first_page
+            .iter()
+            .map(|row| row.record.id.as_str())
+            .collect::<Vec<_>>(),
+        ["voice-note-c", "voice-note-b"]
+    );
+
+    let cursor = first_page.last().expect("last result").cursor();
+    let second_page = storage
+        .search_voice_notes_keyword(
+            "owner-a",
+            &VoiceNoteFilters::default(),
+            "apollo",
+            Some(&cursor),
+            2,
+        )
+        .await
+        .expect("second keyword page");
+    assert_eq!(
+        second_page
+            .iter()
+            .map(|row| row.record.id.as_str())
+            .collect::<Vec<_>>(),
+        ["voice-note-a"]
     );
 }
 
@@ -2241,6 +2288,52 @@ async fn insert_voice_note_only(storage: &Storage, owner: &str, voice_note_id: &
     .execute(storage.pool())
     .await
     .expect("insert voice note");
+}
+
+async fn insert_searchable_voice_note(
+    storage: &Storage,
+    owner: &str,
+    voice_note_id: &str,
+    version_id: &str,
+    text: &str,
+    created_at: &str,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO voice_notes (
+            id, api_key_id, audio_duration_seconds, audio_format, audio_size_bytes,
+            language, model, processing_time_ms, cost_cents,
+            created_at, recorded_at, session_id
+        )
+        VALUES (
+            ?, ?, 12.5, 'wav', 401280, 'en', 'general-transcription-v1', 1843, 1,
+            ?, '2026-04-24T17:59:00.000000000Z', NULL
+        )
+        "#,
+    )
+    .bind(voice_note_id)
+    .bind(owner)
+    .bind(created_at)
+    .execute(storage.pool())
+    .await
+    .expect("insert searchable voice note");
+
+    sqlx::query(
+        r#"
+        INSERT INTO voice_note_versions (
+            id, api_key_id, voice_note_id, version_number, text, created_at
+        )
+        VALUES (?, ?, ?, 1, ?, ?)
+        "#,
+    )
+    .bind(version_id)
+    .bind(owner)
+    .bind(voice_note_id)
+    .bind(text)
+    .bind(created_at)
+    .execute(storage.pool())
+    .await
+    .expect("insert searchable voice note version");
 }
 
 async fn insert_session_row(storage: &Storage, owner: &str, session_id: &str) {

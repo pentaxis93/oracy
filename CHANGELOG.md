@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add ranked voice-note search across keyword, semantic, and hybrid modes,
+  including historical-version keyword matches, current-embedding semantic
+  ranking, literal full-text query handling, independent semantic and keyword
+  gates, relevance cursors, and the shared voice-note collection filters.
+- Return empty semantic search results without calling the embedding provider
+  when local filters leave no current embeddings to rank, preserving hybrid
+  keyword results in the same case.
+- Bound keyword-only search pagination so broad keyword matches return only
+  the requested page from storage instead of materializing the full match set.
 - Add OpenAI-backed voice-note embedding generation, long-text chunk pooling,
   durable edit-triggered embedding regeneration, and the
   `succeeded`-requires-current-embedding workflow gate. Blank voice-note text
@@ -35,8 +44,7 @@
   latest-spelling display updates, and metadata deletion cascades.
 - Add authenticated voice-note history, detail, version-history, segment, and
   session-scoped history read APIs. Collection filters compose across tags,
-  sessions, and recorded/created time ranges; search query parameters
-  conservatively return no results until the tracked search work lands.
+  sessions, and recorded/created time ranges.
 - Define the backend runtime commitment not to emit the literal
   `OPENAI_API_KEY` value through backend-controlled logs, diagnostics, or error
   surfaces.

@@ -1407,6 +1407,7 @@ async fn operator_metrics_text(fixture: &WorkerFixture, metrics: Metrics) -> Str
         metrics,
         operator_listen_addr: "127.0.0.1:9090".parse().expect("operator listen addr"),
         openai_api_key: "test-openai-key".to_owned(),
+        openai_base_url: "http://127.0.0.1".to_owned(),
         storage: fixture.storage.clone(),
     };
     let response = build_operator_router(state)

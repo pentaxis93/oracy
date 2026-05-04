@@ -475,7 +475,7 @@ mod tests {
 
         let retry_releaser = FileRetainedAudioReleaser::new_with_deletion_sync(
             fixture.accepted_audio_dir.clone(),
-            Arc::new(RecordingDeletionSync::default()),
+            Arc::new(RecordingDeletionSync),
         );
         cleanup_retained_audio_once_with_releaser(
             &fixture.storage,

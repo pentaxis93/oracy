@@ -537,18 +537,18 @@ Semantics:
   shape, filters, and pagination. This is an explicit `v0.1.0`
   governance decision to avoid duplicating voice-note collection
   surface with no semantic gain.
-- Until search semantics land, a valid `q` returns an empty
-  collection envelope after validating all supplied search and filter
-  parameters. This preserves the contract surface without presenting
-  history rows as search results.
 - Search results are always `VoiceNote` resources. Jobs, sessions,
   tags, versions, and segments are not returned as search hits.
+- Search query text is plain user text, not raw full-text-search syntax.
+  Keyword search treats extracted terms literally.
 - Keyword search supports full-text matching over current voice-note
   text and may additionally match historical voice-note-version text,
   but results always resolve to the parent `VoiceNote`.
-- Semantic search uses the current voice-note embedding.
+- Semantic search uses the current voice-note embedding and is gated by
+  non-blank raw query text, not by keyword tokenization.
 - Hybrid search combines keyword and semantic ranking over the same
-  voice-note result set.
+  voice-note result set, with keyword and semantic candidate generation
+  gated independently.
 - When `q` is present and `search_mode` is omitted, the backend
   defaults to `hybrid`.
 - Search filters support tag, session, `recorded_at` time range, and
@@ -682,9 +682,10 @@ following are true:
 - Search behavior is explicit: history and search share one voice-
   note collection contract, omitted `search_mode` with `q` defaults
   to `hybrid`, repeated `tag_id` filters intersect, results are
-  voice-note-only, deferred search returns an empty collection rather
-  than history rows, and semantic search is eventually consistent
-  after edits.
+  voice-note-only, keyword search treats query text literally,
+  semantic search uses current embeddings, hybrid search combines
+  keyword and semantic ranking, and semantic search is eventually
+  consistent after edits.
 - Deletion semantics are explicit and match resource ownership
   expectations.
 - Audio retention semantics are explicit: chunks and composed audio
