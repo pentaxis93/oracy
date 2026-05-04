@@ -16,6 +16,7 @@ use crate::audio_hash::AUDIO_CONTENT_HASH_ALGORITHM_ID;
 use crate::settings::DEFAULT_TRANSCRIPTION_MODEL;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+const EMBEDDING_REGENERATION_MAX_RETRIES: i64 = 3;
 
 #[derive(Clone, Debug)]
 pub struct Storage {
@@ -374,6 +375,52 @@ pub struct EmbeddingRecord {
     pub model: String,
     pub vector: Vec<u8>,
     pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingRegenerationJobRecord {
+    pub api_key_id: String,
+    pub voice_note_id: String,
+    pub voice_note_version_id: String,
+    pub text: String,
+    pub retry_count: i64,
+    pub max_retries: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingRegenerationFailure {
+    pub api_key_id: String,
+    pub voice_note_id: String,
+    pub lease_token: String,
+    pub failure_code: String,
+    pub failure_message: String,
+    pub now: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbeddingRegenerationRetryOutcome {
+    RetryWaiting,
+    Failed,
+}
+
+pub fn encode_embedding_vector(vector: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(vector));
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+pub fn decode_embedding_vector(bytes: &[u8]) -> Option<Vec<f32>> {
+    if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(std::mem::size_of::<f32>())
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("chunk has four bytes")))
+            .collect(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1049,6 +1096,12 @@ impl Storage {
         let mut tx = self.pool.begin().await?;
         let voice_note = materialization.voice_note;
         let version = materialization.initial_version;
+        let embedding =
+            materialization
+                .embedding
+                .ok_or_else(|| StorageError::JobNotCompletable {
+                    job_id: job_id.to_owned(),
+                })?;
         let now = format_timestamp(voice_note.created_at)?;
 
         let Some(job) = select_job_by_id(&mut tx, api_key_id, job_id).await? else {
@@ -1145,21 +1198,19 @@ impl Storage {
             .await?;
         }
 
-        if let Some(embedding) = materialization.embedding {
-            sqlx::query(
-                r#"
-                INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(&voice_note.id)
-            .bind(api_key_id)
-            .bind(&embedding.model)
-            .bind(&embedding.vector)
-            .bind(format_timestamp(embedding.created_at)?)
-            .execute(&mut *tx)
-            .await?;
-        }
+        sqlx::query(
+            r#"
+            INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&voice_note.id)
+        .bind(api_key_id)
+        .bind(&embedding.model)
+        .bind(&embedding.vector)
+        .bind(format_timestamp(embedding.created_at)?)
+        .execute(&mut *tx)
+        .await?;
 
         let result = sqlx::query(
             r#"
@@ -1622,6 +1673,7 @@ impl Storage {
         .bind(voice_note_id)
         .fetch_one(&mut *tx)
         .await?;
+        let version_id = new_id();
         sqlx::query(
             r#"
             INSERT INTO voice_note_versions (
@@ -1630,12 +1682,44 @@ impl Storage {
             VALUES (?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(new_id())
+        .bind(&version_id)
         .bind(api_key_id)
         .bind(voice_note_id)
         .bind(version_number)
         .bind(text)
         .bind(format_timestamp(created_at)?)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO embedding_regeneration_jobs (
+                voice_note_id, api_key_id, voice_note_version_id, status,
+                created_at, updated_at, retry_count, max_retries, next_attempt_at,
+                failure_code, failure_message, processing_lease_token,
+                processing_lease_expires_at
+            )
+            VALUES (?, ?, ?, 'queued', ?, ?, 0, ?, NULL, NULL, NULL, NULL, NULL)
+            ON CONFLICT(voice_note_id) DO UPDATE SET
+                api_key_id = excluded.api_key_id,
+                voice_note_version_id = excluded.voice_note_version_id,
+                status = 'queued',
+                updated_at = excluded.updated_at,
+                retry_count = 0,
+                max_retries = excluded.max_retries,
+                next_attempt_at = NULL,
+                failure_code = NULL,
+                failure_message = NULL,
+                processing_lease_token = NULL,
+                processing_lease_expires_at = NULL
+            WHERE embedding_regeneration_jobs.api_key_id = excluded.api_key_id
+            "#,
+        )
+        .bind(voice_note_id)
+        .bind(api_key_id)
+        .bind(&version_id)
+        .bind(format_timestamp(created_at)?)
+        .bind(format_timestamp(created_at)?)
+        .bind(EMBEDDING_REGENERATION_MAX_RETRIES)
         .execute(&mut *tx)
         .await?;
 
@@ -2019,6 +2103,335 @@ impl Storage {
         .await?;
 
         row.map(embedding_from_row).transpose()
+    }
+
+    pub async fn claim_next_embedding_regeneration_job(
+        &self,
+        lease_token: &str,
+        now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
+    ) -> Result<Option<EmbeddingRegenerationJobRecord>, StorageError> {
+        let mut tx = self.begin_immediate_tx().await?;
+        let now_text = format_timestamp(now)?;
+        let lease_expires_at_text = format_timestamp(lease_expires_at)?;
+        let row = sqlx::query(
+            r#"
+            SELECT
+                embedding_regeneration_jobs.api_key_id,
+                embedding_regeneration_jobs.voice_note_id,
+                embedding_regeneration_jobs.voice_note_version_id,
+                voice_note_versions.text,
+                embedding_regeneration_jobs.retry_count,
+                embedding_regeneration_jobs.max_retries
+            FROM embedding_regeneration_jobs
+            JOIN voice_note_versions
+                ON voice_note_versions.id = embedding_regeneration_jobs.voice_note_version_id
+            WHERE embedding_regeneration_jobs.status = 'queued'
+                OR (
+                    embedding_regeneration_jobs.status = 'retry_waiting'
+                    AND embedding_regeneration_jobs.next_attempt_at <= ?
+                )
+                OR (
+                    embedding_regeneration_jobs.status = 'processing'
+                    AND embedding_regeneration_jobs.processing_lease_expires_at <= ?
+                )
+            ORDER BY embedding_regeneration_jobs.created_at ASC,
+                embedding_regeneration_jobs.voice_note_id ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(&now_text)
+        .bind(&now_text)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let job = EmbeddingRegenerationJobRecord {
+            api_key_id: row.try_get("api_key_id")?,
+            voice_note_id: row.try_get("voice_note_id")?,
+            voice_note_version_id: row.try_get("voice_note_version_id")?,
+            text: row.try_get("text")?,
+            retry_count: row.try_get("retry_count")?,
+            max_retries: row.try_get("max_retries")?,
+        };
+
+        sqlx::query(
+            r#"
+            UPDATE embedding_regeneration_jobs
+            SET status = 'processing',
+                processing_lease_token = ?,
+                processing_lease_expires_at = ?,
+                next_attempt_at = NULL,
+                updated_at = ?
+            WHERE api_key_id = ? AND voice_note_id = ?
+            "#,
+        )
+        .bind(lease_token)
+        .bind(&lease_expires_at_text)
+        .bind(&now_text)
+        .bind(&job.api_key_id)
+        .bind(&job.voice_note_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(Some(job))
+    }
+
+    pub async fn complete_embedding_regeneration_job_if_current(
+        &self,
+        api_key_id: &str,
+        voice_note_id: &str,
+        voice_note_version_id: &str,
+        lease_token: &str,
+        embedding: NewEmbedding,
+    ) -> Result<bool, StorageError> {
+        let mut tx = self.begin_immediate_tx().await?;
+        let active_version_id: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT voice_note_version_id
+            FROM embedding_regeneration_jobs
+            WHERE api_key_id = ?
+                AND voice_note_id = ?
+                AND voice_note_version_id = ?
+                AND status = 'processing'
+                AND processing_lease_token = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(voice_note_id)
+        .bind(voice_note_version_id)
+        .bind(lease_token)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if active_version_id.is_none() {
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        let Some(current_version_id): Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT voice_note_versions.id
+            FROM voice_notes
+            JOIN voice_note_versions
+                ON voice_note_versions.voice_note_id = voice_notes.id
+            WHERE voice_notes.api_key_id = ?
+                AND voice_notes.id = ?
+                AND voice_note_versions.version_number = (
+                    SELECT MAX(version_number)
+                    FROM voice_note_versions
+                    WHERE voice_note_id = voice_notes.id
+                )
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(voice_note_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            sqlx::query(
+                r#"
+                DELETE FROM embedding_regeneration_jobs
+                WHERE api_key_id = ?
+                    AND voice_note_id = ?
+                    AND voice_note_version_id = ?
+                    AND status = 'processing'
+                    AND processing_lease_token = ?
+                "#,
+            )
+            .bind(api_key_id)
+            .bind(voice_note_id)
+            .bind(voice_note_version_id)
+            .bind(lease_token)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(false);
+        };
+
+        if current_version_id != voice_note_version_id {
+            sqlx::query(
+                r#"
+                DELETE FROM embedding_regeneration_jobs
+                WHERE api_key_id = ?
+                    AND voice_note_id = ?
+                    AND voice_note_version_id = ?
+                    AND status = 'processing'
+                    AND processing_lease_token = ?
+                "#,
+            )
+            .bind(api_key_id)
+            .bind(voice_note_id)
+            .bind(voice_note_version_id)
+            .bind(lease_token)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO embeddings (voice_note_id, api_key_id, model, vector, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(voice_note_id) DO UPDATE SET
+                model = excluded.model,
+                vector = excluded.vector,
+                created_at = excluded.created_at
+            WHERE embeddings.api_key_id = excluded.api_key_id
+            "#,
+        )
+        .bind(voice_note_id)
+        .bind(api_key_id)
+        .bind(&embedding.model)
+        .bind(&embedding.vector)
+        .bind(format_timestamp(embedding.created_at)?)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM embedding_regeneration_jobs
+            WHERE api_key_id = ?
+                AND voice_note_id = ?
+                AND voice_note_version_id = ?
+                AND status = 'processing'
+                AND processing_lease_token = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(voice_note_id)
+        .bind(voice_note_version_id)
+        .bind(lease_token)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(true)
+    }
+
+    pub async fn record_transient_embedding_regeneration_failure(
+        &self,
+        failure: EmbeddingRegenerationFailure,
+        next_attempt_at: OffsetDateTime,
+    ) -> Result<EmbeddingRegenerationRetryOutcome, StorageError> {
+        let mut tx = self.begin_immediate_tx().await?;
+        let retry_count: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT retry_count + 1
+            FROM embedding_regeneration_jobs
+            WHERE api_key_id = ?
+                AND voice_note_id = ?
+                AND status = 'processing'
+                AND processing_lease_token = ?
+            "#,
+        )
+        .bind(&failure.api_key_id)
+        .bind(&failure.voice_note_id)
+        .bind(&failure.lease_token)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(retry_count) = retry_count else {
+            tx.commit().await?;
+            return Ok(EmbeddingRegenerationRetryOutcome::Failed);
+        };
+        let now = format_timestamp(failure.now)?;
+        let max_retries: i64 = sqlx::query_scalar(
+            r#"
+            SELECT max_retries
+            FROM embedding_regeneration_jobs
+            WHERE api_key_id = ? AND voice_note_id = ?
+            "#,
+        )
+        .bind(&failure.api_key_id)
+        .bind(&failure.voice_note_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if retry_count >= max_retries {
+            sqlx::query(
+                r#"
+                UPDATE embedding_regeneration_jobs
+                SET status = 'failed',
+                    retry_count = ?,
+                    next_attempt_at = NULL,
+                    failure_code = ?,
+                    failure_message = ?,
+                    processing_lease_token = NULL,
+                    processing_lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE api_key_id = ? AND voice_note_id = ?
+                "#,
+            )
+            .bind(retry_count)
+            .bind(&failure.failure_code)
+            .bind(&failure.failure_message)
+            .bind(&now)
+            .bind(&failure.api_key_id)
+            .bind(&failure.voice_note_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(EmbeddingRegenerationRetryOutcome::Failed);
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE embedding_regeneration_jobs
+            SET status = 'retry_waiting',
+                retry_count = ?,
+                next_attempt_at = ?,
+                failure_code = ?,
+                failure_message = ?,
+                processing_lease_token = NULL,
+                processing_lease_expires_at = NULL,
+                updated_at = ?
+            WHERE api_key_id = ? AND voice_note_id = ?
+            "#,
+        )
+        .bind(retry_count)
+        .bind(format_timestamp(next_attempt_at)?)
+        .bind(&failure.failure_code)
+        .bind(&failure.failure_message)
+        .bind(&now)
+        .bind(&failure.api_key_id)
+        .bind(&failure.voice_note_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(EmbeddingRegenerationRetryOutcome::RetryWaiting)
+    }
+
+    pub async fn fail_embedding_regeneration_job(
+        &self,
+        failure: EmbeddingRegenerationFailure,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            UPDATE embedding_regeneration_jobs
+            SET status = 'failed',
+                next_attempt_at = NULL,
+                failure_code = ?,
+                failure_message = ?,
+                processing_lease_token = NULL,
+                processing_lease_expires_at = NULL,
+                updated_at = ?
+            WHERE api_key_id = ?
+                AND voice_note_id = ?
+                AND status = 'processing'
+                AND processing_lease_token = ?
+            "#,
+        )
+        .bind(&failure.failure_code)
+        .bind(&failure.failure_message)
+        .bind(format_timestamp(failure.now)?)
+        .bind(&failure.api_key_id)
+        .bind(&failure.voice_note_id)
+        .bind(&failure.lease_token)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn delete_voice_note(

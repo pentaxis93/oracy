@@ -576,6 +576,8 @@ Semantics:
 
 - `PATCH /api/v1/voice-notes/{voice_note_id}` changes voice-note text
   only.
+- Edited voice-note text must contain at least one non-whitespace
+  character.
 - A voice-note edit creates a new `VoiceNoteVersion`; it does not
   rewrite or delete prior versions.
 - `PUT /api/v1/voice-notes/{voice_note_id}/tags` replaces the voice

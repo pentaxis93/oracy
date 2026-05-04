@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add OpenAI-backed voice-note embedding generation, long-text chunk pooling,
+  durable edit-triggered embedding regeneration, and the
+  `succeeded`-requires-current-embedding workflow gate. Blank voice-note text
+  updates are rejected so every current embedding has non-empty source text.
 - Add authenticated voice-note mutation APIs for text replacement with
   version history, full tag-set replacement, hard deletion with cascades, and
   edit-triggered embedding-regeneration initiation.
@@ -25,9 +29,7 @@
 - Add the backend transcription-job processing worker, including leased job
   claiming, OpenAI transcription requests, FFmpeg-backed audio slicing,
   coarse segment materialization, backend-owned retries, and terminal failure
-  classification. Until #27 lands, this implementation can reach `succeeded`
-  after voice-note/version/segment materialization without a current embedding;
-  that remains a v0.1.0 release-blocker deviation.
+  classification.
 - Add authenticated tag and session management APIs, including owner-scoped
   CRUD, shared cursor pagination, case-insensitive tag identity with
   latest-spelling display updates, and metadata deletion cascades.

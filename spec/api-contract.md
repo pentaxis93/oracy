@@ -356,6 +356,7 @@ Responses:
 Notes:
 
 - The request changes voice-note text only.
+- `text` must contain at least one non-whitespace character.
 - Editing is the only adjustment path for an existing voice note. The
   backend does not re-transcribe audio against an existing voice note.
 - A successful edit creates one new `VoiceNoteVersion` and moves

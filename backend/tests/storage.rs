@@ -360,7 +360,7 @@ async fn retry_waiting_jobs_are_claimed_only_after_next_attempt_at() {
 }
 
 #[tokio::test]
-async fn leased_completion_requires_the_active_token_and_allows_missing_embedding() {
+async fn leased_completion_requires_the_active_token_and_current_embedding() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
     storage
@@ -371,8 +371,7 @@ async fn leased_completion_requires_the_active_token_and_allows_missing_embeddin
         )
         .await
         .expect("claim job");
-    let mut materialization = materialization("voice-note-a");
-    materialization.embedding = None;
+    let materialization = materialization("voice-note-a");
 
     let error = storage
         .complete_leased_job_with_voice_note(
@@ -383,6 +382,17 @@ async fn leased_completion_requires_the_active_token_and_allows_missing_embeddin
         )
         .await
         .expect_err("stale lease should not complete");
+    assert!(matches!(
+        error,
+        StorageError::JobNotCompletable { job_id } if job_id == job.id
+    ));
+
+    let mut missing_embedding = materialization.clone();
+    missing_embedding.embedding = None;
+    let error = storage
+        .complete_leased_job_with_voice_note("owner-a", &job.id, "active-lease", missing_embedding)
+        .await
+        .expect_err("missing embedding should not complete");
     assert!(matches!(
         error,
         StorageError::JobNotCompletable { job_id } if job_id == job.id
@@ -405,7 +415,7 @@ async fn leased_completion_requires_the_active_token_and_allows_missing_embeddin
             .get_current_embedding("owner-a", "voice-note-a")
             .await
             .expect("embedding lookup")
-            .is_none()
+            .is_some()
     );
 }
 

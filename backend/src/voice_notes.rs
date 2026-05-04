@@ -10,7 +10,6 @@ use crate::collections::{
     parse_rfc3339_field, parse_time_cursor, position_cursor, query_any, query_first, query_values,
     time_cursor, timestamp, validate_rfc3339_field, validate_ulid_field, validation_error,
 };
-use crate::embedding_regeneration::EmbeddingRegenerationRequest;
 use crate::errors::{ApiError, CollectionEnvelope};
 use crate::json::JsonBody;
 use crate::state::AppState;
@@ -157,6 +156,9 @@ pub async fn patch_voice_note(
     JsonBody(body): JsonBody<VoiceNoteTextRequest>,
 ) -> Result<Json<VoiceNoteResource>, ApiError> {
     validate_ulid_field("voice_note_id", &voice_note_id)?;
+    if body.text.trim().is_empty() {
+        return Err(validation_error("text", "Must not be blank."));
+    }
     let record = match state
         .storage
         .update_voice_note_text(
@@ -173,20 +175,6 @@ pub async fn patch_voice_note(
             return Err(ApiError::not_found("Voice note not found."));
         }
     };
-
-    if let Err(error) =
-        state
-            .embedding_regeneration_trigger
-            .initiate(EmbeddingRegenerationRequest {
-                api_key_id: authenticated_key.api_key_id.to_string(),
-                voice_note_id: voice_note_id.clone(),
-            })
-    {
-        tracing::error!(
-            voice_note_id = %voice_note_id,
-            "embedding regeneration trigger failed: {error}"
-        );
-    }
 
     render_voice_note_resource(&state, authenticated_key.api_key_id.as_str(), record).await
 }

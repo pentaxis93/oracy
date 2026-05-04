@@ -6,7 +6,6 @@ use std::{fmt, fmt::Debug};
 use axum::extract::FromRef;
 
 use crate::auth::AuthStore;
-use crate::embedding_regeneration::EmbeddingRegenerationTrigger;
 use crate::metrics::Metrics;
 use crate::storage::Storage;
 
@@ -18,7 +17,6 @@ pub struct AppState {
     pub operator_listen_addr: SocketAddr,
     pub openai_api_key: String,
     pub storage: Storage,
-    pub embedding_regeneration_trigger: Arc<dyn EmbeddingRegenerationTrigger>,
 }
 
 impl Debug for AppState {
@@ -31,7 +29,6 @@ impl Debug for AppState {
             .field("operator_listen_addr", &self.operator_listen_addr)
             .field("openai_api_key", &"<redacted>")
             .field("storage", &self.storage)
-            .field("embedding_regeneration_trigger", &"<trigger>")
             .finish()
     }
 }

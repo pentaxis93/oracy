@@ -10,6 +10,9 @@ use axum::routing::post;
 use axum::{Json, Router};
 use oracy_backend::auth::AuthStore;
 use oracy_backend::config::ApiKeyConfig;
+use oracy_backend::embedding::{
+    EmbeddingEngine, EmbeddingFailure, EmbeddingInput, EmbeddingOutput,
+};
 use oracy_backend::metrics::Metrics;
 use oracy_backend::retention_cleanup::{
     RetainedAudioReleaser, RetentionCleanupError, cleanup_retained_audio_once,
@@ -19,7 +22,7 @@ use oracy_backend::router::build_operator_router;
 use oracy_backend::state::AppState;
 use oracy_backend::storage::{
     AcceptJobOutcome, AcceptedChunk, FinalizeJobOutcome, NewOpenTranscriptionJob,
-    NewTranscriptionJob, OpenJobOutcome, Storage, StoreChunkOutcome,
+    NewTranscriptionJob, OpenJobOutcome, Storage, StoreChunkOutcome, decode_embedding_vector,
 };
 use oracy_backend::transcription_worker::{
     AudioSliceError, AudioSlicer, DurationProbe, DurationProbeError, EngineFailure,
@@ -44,12 +47,14 @@ async fn worker_materializes_a_queued_job_with_a_fake_engine() {
     let fixture = WorkerFixture::new().await;
     let job = fixture.create_queued_job("attempt-1", b"hello audio").await;
     let engine = FakeEngine::success("transcribed text");
+    let embedding_engine = FakeEmbeddingEngine::success(vec![0.25, 0.5, 0.75]);
     let probe = FakeDurationProbe::success(1_480);
 
     let outcome = process_one_available_job(
         &fixture.storage,
         &fixture.accepted_audio_dir,
         &engine,
+        &embedding_engine,
         &probe,
         WorkerConfig::test(),
         &Metrics::new(),
@@ -87,13 +92,16 @@ async fn worker_materializes_a_queued_job_with_a_fake_engine() {
     assert_eq!(voice_note.text, "transcribed text");
     assert_eq!(voice_note.audio_duration_seconds, 1.48);
     assert_eq!(voice_note.model, "gpt-4o-mini-transcribe");
-    assert!(
-        fixture
-            .storage
-            .get_current_embedding("owner-a", &voice_note.id)
-            .await
-            .expect("embedding lookup")
-            .is_none()
+    let embedding = fixture
+        .storage
+        .get_current_embedding("owner-a", &voice_note.id)
+        .await
+        .expect("embedding lookup")
+        .expect("current embedding exists before succeeded");
+    assert_eq!(embedding.model, "text-embedding-3-small");
+    assert_eq!(
+        decode_embedding_vector(&embedding.vector).expect("encoded vector"),
+        vec![0.25, 0.5, 0.75]
     );
     let segments = fixture
         .storage
@@ -134,6 +142,7 @@ async fn worker_releases_chunks_and_composed_audio_after_success() {
         &fixture.storage,
         &fixture.accepted_audio_dir,
         &engine,
+        &FakeEmbeddingEngine::success(vec![1.0]),
         &probe,
         WorkerConfig::test(),
         &metrics,
@@ -207,6 +216,7 @@ async fn worker_releases_chunks_and_composed_audio_after_failure() {
         &fixture.storage,
         &fixture.accepted_audio_dir,
         &engine,
+        &FakeEmbeddingEngine::success(vec![1.0]),
         &probe,
         WorkerConfig::test(),
         &Metrics::new(),
@@ -500,6 +510,7 @@ async fn worker_success_increments_operator_success_counter() {
         &fixture.storage,
         &fixture.accepted_audio_dir,
         &engine,
+        &FakeEmbeddingEngine::success(vec![1.0]),
         &probe,
         WorkerConfig::test(),
         &metrics,
@@ -531,6 +542,7 @@ async fn worker_retry_increments_operator_retry_counter_with_failure_class() {
         &fixture.storage,
         &fixture.accepted_audio_dir,
         &engine,
+        &FakeEmbeddingEngine::success(vec![1.0]),
         &probe,
         WorkerConfig::test(),
         &metrics,
@@ -565,6 +577,7 @@ async fn worker_terminal_failure_increments_operator_failure_counter_with_failur
         &fixture.storage,
         &fixture.accepted_audio_dir,
         &engine,
+        &FakeEmbeddingEngine::success(vec![1.0]),
         &probe,
         WorkerConfig::test(),
         &metrics,
@@ -595,6 +608,7 @@ async fn worker_marks_duration_probe_failure_as_audio_invalid() {
         &fixture.storage,
         &fixture.accepted_audio_dir,
         &engine,
+        &FakeEmbeddingEngine::success(vec![1.0]),
         &probe,
         WorkerConfig::test(),
         &Metrics::new(),
@@ -633,6 +647,7 @@ async fn worker_routes_transient_engine_failure_to_retry_waiting() {
         &fixture.storage,
         &fixture.accepted_audio_dir,
         &engine,
+        &FakeEmbeddingEngine::success(vec![1.0]),
         &probe,
         WorkerConfig::test(),
         &Metrics::new(),
@@ -659,6 +674,89 @@ async fn worker_routes_transient_engine_failure_to_retry_waiting() {
 }
 
 #[tokio::test]
+async fn worker_routes_transient_embedding_failure_to_retry_waiting_before_materialization() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_queued_job("attempt-transient-embedding", b"hello audio")
+        .await;
+    let engine = FakeEngine::success("transcribed text");
+    let embedding_engine =
+        FakeEmbeddingEngine::transient("engine_rate_limited", "slow down", Some(42));
+    let probe = FakeDurationProbe::success(1_480);
+
+    let outcome = process_one_available_job(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &engine,
+        &embedding_engine,
+        &probe,
+        WorkerConfig::test(),
+        &Metrics::new(),
+    )
+    .await
+    .expect("process one job");
+
+    assert_eq!(
+        outcome,
+        ProcessOutcome::RetryWaiting {
+            job_id: job.id.clone()
+        }
+    );
+    let retrying = fixture
+        .storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(retrying.status, "retry_waiting");
+    assert_eq!(
+        retrying.failure_code.as_deref(),
+        Some("engine_rate_limited")
+    );
+    assert!(retrying.next_attempt_at.is_some());
+    assert!(retrying.voice_note_id.is_none());
+}
+
+#[tokio::test]
+async fn worker_fails_empty_transcription_without_materializing_a_voice_note() {
+    let fixture = WorkerFixture::new().await;
+    let job = fixture
+        .create_queued_job("attempt-empty-transcript", b"silent audio")
+        .await;
+    let engine = FakeEngine::success(" \n\t");
+    let embedding_engine = FakeEmbeddingEngine::success(vec![1.0]);
+    let probe = FakeDurationProbe::success(1_480);
+
+    let outcome = process_one_available_job(
+        &fixture.storage,
+        &fixture.accepted_audio_dir,
+        &engine,
+        &embedding_engine,
+        &probe,
+        WorkerConfig::test(),
+        &Metrics::new(),
+    )
+    .await
+    .expect("process one job");
+
+    assert_eq!(
+        outcome,
+        ProcessOutcome::Failed {
+            job_id: job.id.clone()
+        }
+    );
+    let failed = fixture
+        .storage
+        .get_job("owner-a", &job.id)
+        .await
+        .expect("job lookup")
+        .expect("job exists");
+    assert_eq!(failed.status, "failed");
+    assert_eq!(failed.failure_code.as_deref(), Some("audio_invalid"));
+    assert!(failed.voice_note_id.is_none());
+}
+
+#[tokio::test]
 async fn worker_releases_retained_audio_when_retry_exhaustion_fails_the_job() {
     let fixture = WorkerFixture::new().await;
     let job = fixture
@@ -673,6 +771,7 @@ async fn worker_releases_retained_audio_when_retry_exhaustion_fails_the_job() {
         &fixture.storage,
         &fixture.accepted_audio_dir,
         &engine,
+        &FakeEmbeddingEngine::success(vec![1.0]),
         &probe,
         WorkerConfig::test(),
         &Metrics::new(),
@@ -730,6 +829,7 @@ async fn stalled_openai_request_records_transient_timeout_and_worker_processes_n
             &fixture.storage,
             &fixture.accepted_audio_dir,
             &engine,
+            &FakeEmbeddingEngine::success(vec![1.0]),
             &probe,
             WorkerConfig::test(),
             &Metrics::new(),
@@ -759,6 +859,7 @@ async fn stalled_openai_request_records_transient_timeout_and_worker_processes_n
             &fixture.storage,
             &fixture.accepted_audio_dir,
             &engine,
+            &FakeEmbeddingEngine::success(vec![1.0]),
             &probe,
             WorkerConfig::test(),
             &Metrics::new(),
@@ -814,6 +915,7 @@ async fn worker_renews_processing_lease_while_transcription_outlives_initial_lea
             &storage_for_worker,
             &accepted_audio_dir,
             &engine,
+            &FakeEmbeddingEngine::success(vec![1.0]),
             &probe,
             config,
             &Metrics::new(),
@@ -1306,9 +1408,6 @@ async fn operator_metrics_text(fixture: &WorkerFixture, metrics: Metrics) -> Str
         operator_listen_addr: "127.0.0.1:9090".parse().expect("operator listen addr"),
         openai_api_key: "test-openai-key".to_owned(),
         storage: fixture.storage.clone(),
-        embedding_regeneration_trigger: Arc::new(
-            oracy_backend::embedding_regeneration::NoopEmbeddingRegenerationTrigger,
-        ),
     };
     let response = build_operator_router(state)
         .oneshot(
@@ -1369,6 +1468,42 @@ impl TranscriptionEngine for FakeEngine {
         &self,
         input: TranscriptionInput,
     ) -> Result<TranscriptionOutput, EngineFailure> {
+        self.inputs.lock().expect("inputs").push(input);
+        self.output.clone()
+    }
+}
+
+#[derive(Clone)]
+struct FakeEmbeddingEngine {
+    output: Result<EmbeddingOutput, EmbeddingFailure>,
+    inputs: Arc<Mutex<Vec<EmbeddingInput>>>,
+}
+
+impl FakeEmbeddingEngine {
+    fn success(vector: Vec<f32>) -> Self {
+        Self {
+            output: Ok(EmbeddingOutput {
+                model: "text-embedding-3-small".to_owned(),
+                vector,
+            }),
+            inputs: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn transient(failure_code: &str, message: &str, retry_after_seconds: Option<i64>) -> Self {
+        Self {
+            output: Err(EmbeddingFailure::Transient {
+                failure_code: failure_code.to_owned(),
+                message: message.to_owned(),
+                retry_after_seconds,
+            }),
+            inputs: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl EmbeddingEngine for FakeEmbeddingEngine {
+    async fn embed(&self, input: EmbeddingInput) -> Result<EmbeddingOutput, EmbeddingFailure> {
         self.inputs.lock().expect("inputs").push(input);
         self.output.clone()
     }
