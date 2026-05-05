@@ -4,9 +4,9 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:oracy/models/voice_note.dart';
 import 'package:oracy/screens/history_screen.dart';
 import 'package:oracy/services/history_service.dart';
-import 'package:oracy/services/transcription_service.dart';
 
 import 'helpers/test_utils.dart';
 
@@ -16,44 +16,34 @@ class _FakeHistoryService extends HistoryService {
   final queries = <String?>[];
 
   @override
-  Future<TranscriptListResponse> getTranscripts({
-    int offset = 0,
-    int limit = 20,
+  Future<VoiceNoteCollectionResponse> getVoiceNotes({
+    String? cursor,
+    int? limit,
     String? query,
   }) async {
     queries.add(query);
-    final transcripts = query == null || query.isEmpty
-        ? [createMockTranscript(id: 'visible', transcript: 'Visible page')]
-        : [createMockTranscript(id: 'remote', transcript: 'Remote needle hit')];
-    return TranscriptListResponse(
-      transcripts: transcripts,
-      total: transcripts.length,
-      offset: offset,
-      limit: limit,
-    );
+    final voiceNotes = query == null || query.isEmpty
+        ? [createMockVoiceNote(id: 'visible', text: 'Visible page')]
+        : [createMockVoiceNote(id: 'remote', text: 'Remote needle hit')];
+    return VoiceNoteCollectionResponse(items: voiceNotes, nextCursor: null);
   }
 }
 
 class _PendingHistoryRequest {
-  final int offset;
-  final int limit;
+  final String? cursor;
+  final int? limit;
   final String? query;
-  final Completer<TranscriptListResponse> completer = Completer();
+  final Completer<VoiceNoteCollectionResponse> completer = Completer();
 
   _PendingHistoryRequest({
-    required this.offset,
+    required this.cursor,
     required this.limit,
     required this.query,
   });
 
-  void complete(List<TranscriptResponse> transcripts, {int? total}) {
+  void complete(List<VoiceNote> voiceNotes, {String? nextCursor}) {
     completer.complete(
-      TranscriptListResponse(
-        transcripts: transcripts,
-        total: total ?? transcripts.length,
-        offset: offset,
-        limit: limit,
-      ),
+      VoiceNoteCollectionResponse(items: voiceNotes, nextCursor: nextCursor),
     );
   }
 }
@@ -64,13 +54,13 @@ class _ControlledHistoryService extends HistoryService {
   final requests = <_PendingHistoryRequest>[];
 
   @override
-  Future<TranscriptListResponse> getTranscripts({
-    int offset = 0,
-    int limit = 20,
+  Future<VoiceNoteCollectionResponse> getVoiceNotes({
+    String? cursor,
+    int? limit,
     String? query,
   }) {
     final request = _PendingHistoryRequest(
-      offset: offset,
+      cursor: cursor,
       limit: limit,
       query: query,
     );
@@ -89,7 +79,7 @@ void main() {
       );
       addTearDown(container.dispose);
 
-      final notifier = container.read(transcriptHistoryProvider.notifier);
+      final notifier = container.read(voiceNoteHistoryProvider.notifier);
       final oldSearch = notifier.search('old');
       expect(service.requests.single.query, 'old');
 
@@ -97,23 +87,23 @@ void main() {
       expect(service.requests.last.query, 'new');
 
       service.requests.last.complete([
-        createMockTranscript(id: 'new-result', transcript: 'new result'),
+        createMockVoiceNote(id: 'new-result', text: 'new result'),
       ]);
       await newSearch;
 
       service.requests.first.complete([
-        createMockTranscript(id: 'old-result', transcript: 'old result'),
+        createMockVoiceNote(id: 'old-result', text: 'old result'),
       ]);
       await oldSearch;
 
-      final state = container.read(transcriptHistoryProvider);
+      final state = container.read(voiceNoteHistoryProvider);
       expect(state.query, 'new');
-      expect(state.transcripts.map((t) => t.id), ['new-result']);
+      expect(state.voiceNotes.map((t) => t.id), ['new-result']);
     },
   );
 
   testWidgets(
-    'Given a match exists outside the loaded page, When history search changes, Then the transcript collection is queried and remote results are shown',
+    'Given a match exists outside the loaded page, When history search changes, Then the voice-note collection is queried and remote results are shown',
     (tester) async {
       final service = _FakeHistoryService();
 
@@ -141,10 +131,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            historyOverride(
-              transcripts: [createMockTranscript()],
-              hasMore: true,
-            ),
+            historyOverride(voiceNotes: [createMockVoiceNote()], hasMore: true),
           ],
           child: const MaterialApp(home: HistoryScreen()),
         ),
@@ -178,13 +165,13 @@ void main() {
       service.requests.last.complete(
         List.generate(
           20,
-          (index) => createMockTranscript(
+          (index) => createMockVoiceNote(
             id: 'needle-$index',
-            transcript: 'Remote needle hit ${index + 1}',
+            text: 'Remote needle hit ${index + 1}',
             createdAt: DateTime.now().subtract(Duration(minutes: index)),
           ),
         ),
-        total: 25,
+        nextCursor: 'next-search-page',
       );
       await tester.pumpAndSettle();
 
@@ -193,7 +180,7 @@ void main() {
 
       expect(service.requests.length, 3);
       expect(service.requests.last.query, 'needle');
-      expect(service.requests.last.offset, 20);
+      expect(service.requests.last.cursor, 'next-search-page');
       expect(
         find.byType(CircularProgressIndicator, skipOffstage: false),
         findsOneWidget,
@@ -215,7 +202,7 @@ void main() {
       await tester.pump();
 
       service.requests.single.complete([
-        createMockTranscript(id: 'visible', transcript: 'Visible history'),
+        createMockVoiceNote(id: 'visible', text: 'Visible history'),
       ]);
       await tester.pumpAndSettle();
 
@@ -226,8 +213,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('No results found'), findsOneWidget);
-      expect(find.text('No transcripts yet'), findsNothing);
-      expect(find.text('No transcripts match "missing"'), findsOneWidget);
+      expect(find.text('No voice notes yet'), findsNothing);
+      expect(find.text('No voice notes match "missing"'), findsOneWidget);
     },
   );
 }
