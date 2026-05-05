@@ -88,6 +88,19 @@ client traffic:
   runtime's host gateway name such as `host.containers.internal` for Podman or
   `host.docker.internal` for Docker.
 
+  Docker Desktop provides `host.docker.internal` automatically on macOS and
+  Windows. Docker on Linux does not; add the host gateway name to the isolated
+  proxy container with `--add-host=host.docker.internal:host-gateway` or, in
+  Compose:
+
+  ```yaml
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  ```
+
+  Podman provides `host.containers.internal` automatically and does not need
+  this Docker-specific mapping.
+
   A non-loopback publish such as `0.0.0.0:8080:8080` is reachability, not protection.
   Use it only with operator-managed firewall rules or equivalent host network
   policy, and verify that the port is blocked from untrusted networks before

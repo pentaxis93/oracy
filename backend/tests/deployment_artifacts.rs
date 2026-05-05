@@ -72,6 +72,10 @@ fn deployment_readme_documents_reverse_proxy_networking_patterns() {
     assert!(readme.contains("remove the public `PublishPort=@ORACY_PUBLIC_PUBLISH@` line"));
     assert!(readme.contains("host.containers.internal"));
     assert!(readme.contains("host.docker.internal"));
+    assert!(readme.contains("--add-host=host.docker.internal:host-gateway"));
+    assert!(readme.contains("extra_hosts"));
+    assert!(readme.contains("host.docker.internal:host-gateway"));
+    assert!(readme.contains("host-gateway"));
     assert!(readme.contains("0.0.0.0:8080:8080"));
     assert!(readme.contains("is reachability, not protection"));
     assert!(readme.contains("verify that the port is blocked from untrusted networks"));
