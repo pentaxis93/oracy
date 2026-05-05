@@ -614,6 +614,42 @@ void main() {
   );
 
   test(
+    'Given a recovered queued native recording filename contains a capture timestamp, When recordedAt is derived, Then the filename timestamp wins over queue creation time',
+    () {
+      container = ProviderContainer();
+      final filenameTimestamp = DateTime.utc(2026, 4, 21, 18, 29, 55);
+      final upload = PendingUpload(
+        id: 1,
+        audioPath:
+            '${tempDir.path}/oracy_recording_${filenameTimestamp.millisecondsSinceEpoch}_recovered.wav',
+        createdAt: DateTime.utc(2026, 4, 21, 18, 34, 55),
+        retryCount: 0,
+        status: UploadStatus.pending.index,
+        idempotencyKey: 'stable-key',
+      );
+
+      expect(recordedAtForQueuedUpload(upload), filenameTimestamp);
+    },
+  );
+
+  test(
+    'Given a queued recording filename has no capture timestamp, When recordedAt is derived, Then queue creation time is used',
+    () {
+      container = ProviderContainer();
+      final upload = PendingUpload(
+        id: 1,
+        audioPath: '${tempDir.path}/oracy_recording_orphaned.wav',
+        createdAt: DateTime.utc(2026, 4, 21, 18, 34, 55),
+        retryCount: 0,
+        status: UploadStatus.pending.index,
+        idempotencyKey: 'stable-key',
+      );
+
+      expect(recordedAtForQueuedUpload(upload), upload.createdAt.toUtc());
+    },
+  );
+
+  test(
     'Given foreground terminal job failure asks for a fresh attempt, When the user retries, Then only the idempotency key changes',
     () async {
       final audioFile = await createAudioFile('fresh_foreground.wav');

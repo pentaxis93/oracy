@@ -641,7 +641,9 @@ DateTime recordedAtForQueuedUpload(PendingUpload upload) {
 }
 
 int? _recordingTimestampFromPath(String audioPath) {
-  final match = RegExp(r'oracy_recording_(\d+)\.').firstMatch(audioPath);
+  final match = RegExp(
+    r'oracy_recording_(\d+)(?:_recovered)?\.wav$',
+  ).firstMatch(audioPath);
   if (match == null) {
     return null;
   }
