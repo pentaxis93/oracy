@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Clarify that `VoiceNote.language` may be `null` in the API contract when no
+  language hint or detected language is available.
 - Refresh queued Flutter transcription idempotency keys when a saved language
   hint changes, preventing backend replay conflicts on the fresh submission.
 - Fix Flutter foreground transcription provenance so web recordings persist the
