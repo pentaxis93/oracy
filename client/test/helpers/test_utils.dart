@@ -93,18 +93,24 @@ class MockRecordingNotifier extends RecordingNotifier {
     state = RecordingInfo(
       state: RecordingState.recording,
       filePath: '/mock/recording.m4a',
+      startedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
       duration: Duration.zero,
     );
   }
 
   @override
-  Future<String?> stopRecording() async {
-    state = const RecordingInfo(
+  Future<RecordingCompletion?> stopRecording() async {
+    final completion = RecordingCompletion(
+      filePath: '/mock/recording.m4a',
+      recordedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
+    );
+    state = RecordingInfo(
       state: RecordingState.completed,
       filePath: '/mock/recording.m4a',
+      startedAt: completion.recordedAt,
       duration: Duration(seconds: 5),
     );
-    return '/mock/recording.m4a';
+    return completion;
   }
 
   @override
@@ -168,7 +174,11 @@ class MockTranscriptionNotifier extends TranscriptionNotifier {
   }
 
   @override
-  Future<void> transcribe(String filePath, {String? language}) async {
+  Future<void> transcribe(
+    String filePath, {
+    String? language,
+    required DateTime recordedAt,
+  }) async {
     state = const TranscriptionUploading(progress: 0.5);
     await Future.delayed(const Duration(milliseconds: 10));
     state = const TranscriptionProcessing();
@@ -178,7 +188,11 @@ class MockTranscriptionNotifier extends TranscriptionNotifier {
 
   @override
   Future<bool> retry({String? language}) async {
-    await transcribe('/mock/file.m4a', language: language);
+    await transcribe(
+      '/mock/file.m4a',
+      language: language,
+      recordedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
+    );
     return true;
   }
 

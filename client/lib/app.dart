@@ -188,12 +188,16 @@ class _HomePageState extends ConsumerState<HomePage>
     );
   }
 
-  void _onRecordingComplete(String filePath) {
+  void _onRecordingComplete(RecordingCompletion recording) {
     // Start transcription
     if (kDebugMode && kIsWeb) {
-      debugPrint('[HOME] _onRecordingComplete called with filePath: $filePath');
+      debugPrint(
+        '[HOME] _onRecordingComplete called with filePath: ${recording.filePath}',
+      );
     }
-    ref.read(transcriptionProvider.notifier).transcribe(filePath);
+    ref
+        .read(transcriptionProvider.notifier)
+        .transcribe(recording.filePath, recordedAt: recording.recordedAt);
   }
 
   @override

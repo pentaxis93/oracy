@@ -29,6 +29,7 @@ enum RecordingState {
 class RecordingInfo {
   final RecordingState state;
   final String? filePath;
+  final DateTime? startedAt;
   final Duration duration;
   final String? errorMessage;
   final double? amplitude;
@@ -36,6 +37,7 @@ class RecordingInfo {
   const RecordingInfo({
     required this.state,
     this.filePath,
+    this.startedAt,
     this.duration = Duration.zero,
     this.errorMessage,
     this.amplitude,
@@ -44,6 +46,7 @@ class RecordingInfo {
   RecordingInfo copyWith({
     RecordingState? state,
     String? filePath,
+    DateTime? startedAt,
     Duration? duration,
     String? errorMessage,
     double? amplitude,
@@ -51,6 +54,7 @@ class RecordingInfo {
     return RecordingInfo(
       state: state ?? this.state,
       filePath: filePath ?? this.filePath,
+      startedAt: startedAt ?? this.startedAt,
       duration: duration ?? this.duration,
       errorMessage: errorMessage ?? this.errorMessage,
       amplitude: amplitude ?? this.amplitude,
@@ -59,6 +63,20 @@ class RecordingInfo {
 
   bool get isRecording => state == RecordingState.recording;
   bool get hasFile => filePath != null && filePath!.isNotEmpty;
+}
+
+class RecordingStart {
+  final String filePath;
+  final DateTime recordedAt;
+
+  const RecordingStart({required this.filePath, required this.recordedAt});
+}
+
+class RecordingCompletion {
+  final String filePath;
+  final DateTime recordedAt;
+
+  const RecordingCompletion({required this.filePath, required this.recordedAt});
 }
 
 /// Service for managing audio recording.
@@ -80,7 +98,8 @@ class RecordingService {
   /// Start recording audio.
   ///
   /// Returns the path to the recording file (or empty string on web).
-  Future<String> startRecording() async {
+  Future<RecordingStart> startRecording() async {
+    final recordedAt = DateTime.now().toUtc();
     String path = '';
 
     // On web, we don't use file paths - record package handles it via Blob
@@ -88,7 +107,7 @@ class RecordingService {
       final recordingsDirectory =
           await RecordingRecoveryService.getPersistentRecordingsDirectory();
       await recordingsDirectory.create(recursive: true);
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final timestamp = recordedAt.millisecondsSinceEpoch;
       path = p.join(recordingsDirectory.path, 'oracy_recording_$timestamp.wav');
     }
 
@@ -119,14 +138,19 @@ class RecordingService {
       path: path,
     );
 
-    _startTime = DateTime.now();
-    return path;
+    _startTime = recordedAt;
+    return RecordingStart(filePath: path, recordedAt: recordedAt);
   }
 
   /// Stop recording and return the file path.
-  Future<String?> stopRecording() async {
+  Future<RecordingCompletion?> stopRecording() async {
+    final recordedAt = _startTime?.toUtc();
+    final path = await _recorder.stop();
     _startTime = null;
-    return await _recorder.stop();
+    if (path == null || recordedAt == null) {
+      return null;
+    }
+    return RecordingCompletion(filePath: path, recordedAt: recordedAt);
   }
 
   /// Cancel the current recording and delete the file.
@@ -200,13 +224,14 @@ class RecordingNotifier extends Notifier<RecordingInfo> {
       if (kDebugMode && kIsWeb) {
         debugPrint('[RECORDING_SERVICE] Calling _service.startRecording()...');
       }
-      final path = await _service.startRecording();
+      final recordingStart = await _service.startRecording();
       if (kDebugMode && kIsWeb) {
-        debugPrint('[RECORDING_SERVICE] Got path: $path');
+        debugPrint('[RECORDING_SERVICE] Got path: ${recordingStart.filePath}');
       }
       state = RecordingInfo(
         state: RecordingState.recording,
-        filePath: path,
+        filePath: recordingStart.filePath,
+        startedAt: recordingStart.recordedAt,
         duration: Duration.zero,
       );
       if (kDebugMode && kIsWeb) {
@@ -214,8 +239,10 @@ class RecordingNotifier extends Notifier<RecordingInfo> {
       }
 
       // Mark recording as active for crash recovery
-      if (path.isNotEmpty) {
-        await RecordingRecoveryService.markRecordingStarted(path);
+      if (recordingStart.filePath.isNotEmpty) {
+        await RecordingRecoveryService.markRecordingStarted(
+          recordingStart.filePath,
+        );
       }
 
       // Start periodic updates for duration and amplitude
@@ -235,24 +262,26 @@ class RecordingNotifier extends Notifier<RecordingInfo> {
   }
 
   /// Stop recording and return the file path.
-  Future<String?> stopRecording() async {
+  Future<RecordingCompletion?> stopRecording() async {
     if (!state.isRecording) return null;
 
     _updateTimer?.cancel();
     _updateTimer = null;
+    final duration = _service.currentDuration;
 
     try {
-      final path = await _service.stopRecording();
+      final completion = await _service.stopRecording();
 
       // Mark recording as completed for crash recovery
       await RecordingRecoveryService.markRecordingCompleted();
 
       state = RecordingInfo(
         state: RecordingState.completed,
-        filePath: path,
-        duration: _service.currentDuration,
+        filePath: completion?.filePath,
+        startedAt: completion?.recordedAt,
+        duration: duration,
       );
-      return path;
+      return completion;
     } catch (e) {
       // Mark recording as completed (even on error, it's not active anymore)
       await RecordingRecoveryService.markRecordingCompleted();

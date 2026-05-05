@@ -489,9 +489,15 @@ class TranscriptionService {
       return const TranscriptionSubmissionAcceptedWithoutVoiceNote();
     }
 
-    final voiceNoteResponse = await _dio.get(
-      '/api/v1/voice-notes/$voiceNoteId',
-    );
+    final Response<dynamic> voiceNoteResponse;
+    try {
+      voiceNoteResponse = await _dio.get('/api/v1/voice-notes/$voiceNoteId');
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404) {
+        return const TranscriptionSubmissionAcceptedWithoutVoiceNote();
+      }
+      rethrow;
+    }
     return TranscriptionSubmissionVoiceNote(
       VoiceNote.fromJson(voiceNoteResponse.data as Map<String, dynamic>),
     );
@@ -656,12 +662,24 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
   TranscriptionState build() => const TranscriptionIdle();
 
   /// Transcribe an audio file.
-  Future<void> transcribe(String filePath, {String? language}) async {
+  Future<void> transcribe(
+    String filePath, {
+    String? language,
+    required DateTime recordedAt,
+  }) async {
     _foregroundAttempt = null;
-    await _transcribe(filePath, language: language);
+    await _transcribe(
+      filePath,
+      language: language,
+      recordedAt: recordedAt.toUtc(),
+    );
   }
 
-  Future<void> _transcribe(String filePath, {String? language}) async {
+  Future<void> _transcribe(
+    String filePath, {
+    String? language,
+    DateTime? recordedAt,
+  }) async {
     if (kDebugMode) {
       debugPrint(
         '[TRANSCRIPTION] transcribe() called with filePath: $filePath',
@@ -682,7 +700,11 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
         ? null
         : await db.getUploadById(queuedUploadId);
     final foregroundAttempt = queuedUpload == null
-        ? _ensureForegroundAttempt(filePath, language: language)
+        ? _ensureForegroundAttempt(
+            filePath,
+            language: language,
+            recordedAt: recordedAt,
+          )
         : null;
 
     // Check for API key first
@@ -810,6 +832,7 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
   _ForegroundTranscriptionAttempt _ensureForegroundAttempt(
     String filePath, {
     String? language,
+    DateTime? recordedAt,
   }) {
     final existing = _foregroundAttempt;
     if (existing != null &&
@@ -818,11 +841,17 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
       return existing;
     }
 
+    if (recordedAt == null) {
+      throw StateError(
+        'Foreground transcription requires the recording start timestamp.',
+      );
+    }
+
     final attempt = _ForegroundTranscriptionAttempt(
       filePath: filePath,
       language: language,
       idempotencyKey: _uuid.v4(),
-      recordedAt: DateTime.now().toUtc(),
+      recordedAt: recordedAt.toUtc(),
     );
     _foregroundAttempt = attempt;
     return attempt;
@@ -870,7 +899,11 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
       return false;
     }
     final retryLanguage = language ?? _foregroundAttempt?.language;
-    await _transcribe(currentState.filePath!, language: retryLanguage);
+    await _transcribe(
+      currentState.filePath!,
+      language: retryLanguage,
+      recordedAt: _foregroundAttempt?.recordedAt,
+    );
     return true;
   }
 

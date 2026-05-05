@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix Flutter foreground transcription provenance so web recordings persist the
+  recording start time, and treat voice notes deleted after accepted
+  transcription as accepted work instead of failed uploads.
 - Migrate the Flutter client's submission flow to the v0.1.0 chunked
   transcription-job protocol, including client-side chunking, SHA-256 chunk
   hashes, async job polling, retry-window suppression, and final voice-note

@@ -46,6 +46,24 @@ class _SuccessfulTranscriptionService extends TranscriptionService {
   }
 }
 
+class _RecordingTimestampTranscriptionService extends TranscriptionService {
+  _RecordingTimestampTranscriptionService() : super(Dio());
+
+  final recordedAts = <DateTime>[];
+
+  @override
+  Future<TranscriptionSubmissionResult> transcribe(
+    String filePath, {
+    String? language,
+    required String idempotencyKey,
+    required DateTime recordedAt,
+    void Function(double progress)? onProgress,
+  }) async {
+    recordedAts.add(recordedAt);
+    return TranscriptionSubmissionVoiceNote(createMockVoiceNote());
+  }
+}
+
 class _RetryableForegroundTranscriptionService extends TranscriptionService {
   _RetryableForegroundTranscriptionService() : super(Dio());
 
@@ -290,6 +308,8 @@ void main() {
     return file;
   }
 
+  final testRecordingStartedAt = DateTime.utc(2026, 4, 21, 18, 29, 55);
+
   ProviderContainer createContainer(TranscriptionService service) {
     return ProviderContainer(
       overrides: [
@@ -319,7 +339,7 @@ void main() {
 
       final transcriptionFuture = container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       await storage.started.future;
 
@@ -356,7 +376,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       final state = container.read(transcriptionProvider);
       final pendingUploads = await db.getPendingUploads();
@@ -382,7 +402,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       final state = container.read(transcriptionProvider);
       final pendingUploads = await db.getPendingUploads();
@@ -403,7 +423,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       final state = container.read(transcriptionProvider);
       final pendingUploads = await db.getPendingUploads();
@@ -434,7 +454,7 @@ void main() {
       await expectLater(
         container
             .read(transcriptionProvider.notifier)
-            .transcribe(audioFile.path),
+            .transcribe(audioFile.path, recordedAt: testRecordingStartedAt),
         completes,
       );
 
@@ -474,7 +494,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       final failedUpload = await db.getUploadByAudioPath(audioFile.path);
       final pendingAfterFailure = await db.getPendingUploads();
@@ -524,7 +544,11 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path, language: 'en');
+          .transcribe(
+            audioFile.path,
+            language: 'en',
+            recordedAt: testRecordingStartedAt,
+          );
 
       expect(container.read(transcriptionProvider), isA<TranscriptionError>());
       expect(service.idempotencyKeys, hasLength(1));
@@ -546,6 +570,50 @@ void main() {
   );
 
   test(
+    'Given foreground transcription is not queued, When a recording start timestamp is supplied, Then the open request uses the recording start time',
+    () async {
+      final audioFile = await createAudioFile('web_recording.wav');
+      final recordingStartedAt = DateTime.utc(2026, 4, 21, 18, 29, 55);
+      final service = _RecordingTimestampTranscriptionService();
+      container = ProviderContainer(
+        overrides: [
+          secureStorageProvider.overrideWith(
+            (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
+          ),
+          appDatabaseProvider.overrideWithValue(db),
+          transcriptionServiceProvider.overrideWith((_) => service),
+          foregroundTranscriptionsAreQueuedProvider.overrideWithValue(false),
+        ],
+      );
+
+      await container
+          .read(transcriptionProvider.notifier)
+          .transcribe(audioFile.path, recordedAt: recordingStartedAt);
+
+      expect(service.recordedAts, [recordingStartedAt]);
+    },
+  );
+
+  test(
+    'Given a queued native recording filename contains a capture timestamp, When recordedAt is derived, Then the filename timestamp wins over queue creation time',
+    () {
+      container = ProviderContainer();
+      final filenameTimestamp = DateTime.utc(2026, 4, 21, 18, 29, 55);
+      final upload = PendingUpload(
+        id: 1,
+        audioPath:
+            '${tempDir.path}/oracy_recording_${filenameTimestamp.millisecondsSinceEpoch}.wav',
+        createdAt: DateTime.utc(2026, 4, 21, 18, 34, 55),
+        retryCount: 0,
+        status: UploadStatus.pending.index,
+        idempotencyKey: 'stable-key',
+      );
+
+      expect(recordedAtForQueuedUpload(upload), filenameTimestamp);
+    },
+  );
+
+  test(
     'Given foreground terminal job failure asks for a fresh attempt, When the user retries, Then only the idempotency key changes',
     () async {
       final audioFile = await createAudioFile('fresh_foreground.wav');
@@ -563,7 +631,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       expect(container.read(transcriptionProvider), isA<TranscriptionError>());
 
@@ -601,7 +669,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       expect(
         container.read(transcriptionProvider),
@@ -626,7 +694,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       final state = container.read(transcriptionProvider);
       final pendingUploads = await db.getPendingUploads();
@@ -649,7 +717,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       final state = container.read(transcriptionProvider);
       final pendingUploads = await db.getPendingUploads();
@@ -672,7 +740,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       final state = container.read(transcriptionProvider);
       final pendingUploads = await db.getPendingUploads();
@@ -697,7 +765,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       final state = container.read(transcriptionProvider);
       final pendingUploads = await db.getPendingUploads();
@@ -720,7 +788,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       final state = container.read(transcriptionProvider);
       final pendingUploads = await db.getPendingUploads();
@@ -743,7 +811,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       final state = container.read(transcriptionProvider);
       final pendingUploads = await db.getPendingUploads();
@@ -775,7 +843,7 @@ void main() {
 
       await container
           .read(transcriptionProvider.notifier)
-          .transcribe(audioFile.path);
+          .transcribe(audioFile.path, recordedAt: testRecordingStartedAt);
 
       final state = container.read(transcriptionProvider);
       final pendingUploads = await db.getPendingUploads();

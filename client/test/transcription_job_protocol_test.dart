@@ -27,10 +27,12 @@ class _ProtocolAdapter implements HttpClientAdapter {
   final requests = <_CapturedRequest>[];
   final List<Map<String, dynamic>> jobPolls;
   final Map<String, dynamic> openJob;
+  final int voiceNoteStatusCode;
 
   _ProtocolAdapter({
     List<Map<String, dynamic>>? jobPolls,
     Map<String, dynamic>? openJob,
+    this.voiceNoteStatusCode = 200,
   }) : jobPolls =
            jobPolls ??
            [
@@ -79,6 +81,11 @@ class _ProtocolAdapter implements HttpClientAdapter {
     }
 
     if (options.path == '/api/v1/voice-notes/voice-note-123') {
+      if (voiceNoteStatusCode != 200) {
+        return _jsonResponse({
+          'detail': 'voice note unavailable',
+        }, voiceNoteStatusCode);
+      }
       return _jsonResponse(_voiceNoteJson(), 200);
     }
 
@@ -334,6 +341,57 @@ void main() {
       expect(adapter.requests.map((request) => request.path), [
         '/api/v1/transcription-jobs',
       ]);
+    },
+  );
+
+  test(
+    'Given polling succeeds but the voice note was deleted before fetch, When transcription runs, Then the client reports accepted server work',
+    () async {
+      final audioFile = await createAudioFile('recording.wav', 4);
+      final adapter = _ProtocolAdapter(voiceNoteStatusCode: 404);
+      final dio = Dio()..httpClientAdapter = adapter;
+      final service = TranscriptionService(dio, pollInterval: Duration.zero);
+
+      final result = await service.transcribe(
+        audioFile.path,
+        idempotencyKey: 'stable-key',
+        recordedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
+      );
+
+      expect(result, isA<TranscriptionSubmissionAcceptedWithoutVoiceNote>());
+      expect(adapter.requests.map((request) => request.path), [
+        '/api/v1/transcription-jobs',
+        '/api/v1/transcription-jobs/job-123/chunks',
+        '/api/v1/transcription-jobs/job-123/finalize',
+        '/api/v1/transcription-jobs/job-123',
+        '/api/v1/transcription-jobs/job-123',
+        '/api/v1/voice-notes/voice-note-123',
+      ]);
+    },
+  );
+
+  test(
+    'Given polling succeeds but fetching the voice note is forbidden, When transcription runs, Then the client propagates the fetch error',
+    () async {
+      final audioFile = await createAudioFile('recording.wav', 4);
+      final adapter = _ProtocolAdapter(voiceNoteStatusCode: 403);
+      final dio = Dio()..httpClientAdapter = adapter;
+      final service = TranscriptionService(dio, pollInterval: Duration.zero);
+
+      await expectLater(
+        service.transcribe(
+          audioFile.path,
+          idempotencyKey: 'stable-key',
+          recordedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
+        ),
+        throwsA(
+          isA<DioException>().having(
+            (error) => error.response?.statusCode,
+            'statusCode',
+            403,
+          ),
+        ),
+      );
     },
   );
 }
