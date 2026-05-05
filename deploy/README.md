@@ -61,6 +61,43 @@ Render the templates from [`quadlet/`](quadlet/) into
 - `quadlet/oracy.container.in` renders to `oracy.container`.
 - `quadlet/oracy-data.volume.in` renders to `oracy-data.volume`.
 
+Choose the public API network surface for the reverse proxy that will receive
+client traffic:
+
+- Host-system reverse proxy: keep Oracy published only to host loopback, for
+  example `@ORACY_PUBLIC_PUBLISH@=127.0.0.1:8080:8080`, and proxy to
+  `http://127.0.0.1:8080`.
+- Shared container network: if the reverse proxy can join the same Docker or
+  Podman network as Oracy, do not publish the public API on the host. After
+  rendering `oracy.container`, remove the public `PublishPort=@ORACY_PUBLIC_PUBLISH@` line
+  and add a shared network, for example:
+
+  ```ini
+  Network=oracy-proxy.network
+  NetworkAlias=oracy
+  ```
+
+  For Podman Quadlets, provide the matching operator-owned
+  `oracy-proxy.network` unit or replace the example with your existing network.
+  Put the proxy on the same network and proxy to `http://oracy:8080`. Docker
+  Compose services in the same project use shared service DNS by default; use
+  the Compose service name or network alias `oracy` for the backend service.
+- Isolated container reverse proxy: if the proxy cannot share Oracy's
+  container network, publish Oracy on a host address reachable from that proxy,
+  for example `@ORACY_PUBLIC_PUBLISH@=0.0.0.0:8080:8080`, and proxy through the
+  runtime's host gateway name such as `host.containers.internal` for Podman or
+  `host.docker.internal` for Docker.
+
+  A non-loopback publish such as `0.0.0.0:8080:8080` is reachability, not protection.
+  Use it only with operator-managed firewall rules or equivalent host network
+  policy, and verify that the port is blocked from untrusted networks before
+  treating the binding as protected. Prefer binding to a specific private host
+  interface over `0.0.0.0` when the deployment has one.
+
+A proxy running in an isolated container cannot reach an Oracy port published
+only on host loopback unless the proxy shares the host network namespace. In
+that case, use the host-system pattern intentionally.
+
 The operator metrics publish line intentionally defaults to host loopback:
 
 ```ini
@@ -91,6 +128,7 @@ host provisioning mechanism.
 - `@ORACY_CONFIG_PATH@`: host path to the backend TOML configuration.
 - `@ORACY_STATE_DIR@`: host directory that persists SQLite and accepted audio.
 - `@ORACY_PUBLIC_PUBLISH@`: public API publish rule, such as
-  `127.0.0.1:8080:8080` or `0.0.0.0:8080:8080`.
+  `127.0.0.1:8080:8080` or `0.0.0.0:8080:8080`. Omit the rendered public
+  publish line for shared container-network proxy deployments.
 - `@ORACY_OPERATOR_HOST_PORT@`: host loopback port for metrics, normally
   `9090`.

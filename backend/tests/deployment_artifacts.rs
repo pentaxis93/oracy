@@ -63,6 +63,34 @@ fn deployment_readme_names_quadlet_rendered_filenames() {
 }
 
 #[test]
+fn deployment_readme_documents_reverse_proxy_networking_patterns() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+
+    assert!(readme.contains("127.0.0.1:8080:8080"));
+    assert!(readme.contains("Network=oracy-proxy.network"));
+    assert!(readme.contains("http://oracy:8080"));
+    assert!(readme.contains("remove the public `PublishPort=@ORACY_PUBLIC_PUBLISH@` line"));
+    assert!(readme.contains("host.containers.internal"));
+    assert!(readme.contains("host.docker.internal"));
+    assert!(readme.contains("0.0.0.0:8080:8080"));
+    assert!(readme.contains("is reachability, not protection"));
+    assert!(readme.contains("verify that the port is blocked from untrusted networks"));
+}
+
+#[test]
+fn deployment_contract_supports_common_reverse_proxy_topologies() {
+    let contract =
+        std::fs::read_to_string("../spec/deployment.md").expect("read deployment contract");
+    let public_api = markdown_section(&contract, "Public API Reverse Proxy");
+
+    assert!(public_api.contains("host-system reverse proxy"));
+    assert!(public_api.contains("shared container network"));
+    assert!(public_api.contains("isolated container reverse proxy"));
+    assert!(public_api.contains("operator-managed firewall"));
+    assert!(public_api.contains("non-loopback binding is reachability, not protection"));
+}
+
+#[test]
 fn deployment_contract_documents_selinux_labeling_for_all_state_storage() {
     let contract =
         std::fs::read_to_string("../spec/deployment.md").expect("read deployment contract");
