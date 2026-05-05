@@ -907,7 +907,7 @@ Fields:
 - `audio_format`: accepted audio format
 - `audio_size_bytes`: composed audio size in bytes
 - `language`: the language hint or detected language for the
-  transcription
+  transcription, or `null` when unavailable
 - `model`: transcription engine identifier in use when the voice note
   was produced
 - `processing_time_ms`: total server-side processing time
