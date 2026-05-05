@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refresh queued Flutter transcription idempotency keys when a saved language
+  hint changes, preventing backend replay conflicts on the fresh submission.
 - Fix Flutter foreground transcription provenance so web recordings persist the
   recording start time, and treat voice notes deleted after accepted
   transcription as accepted work instead of failed uploads.

@@ -170,7 +170,8 @@ class AppDatabase extends _$AppDatabase {
           pendingUploads,
         )..where((t) => t.id.equals(existing.id))).write(
           PendingUploadsCompanion(
-            language: languageChanged ? Value(language) : const Value.absent(),
+            language: Value(language),
+            idempotencyKey: Value(_uuid.v4()),
             updatedAt: Value(DateTime.now()),
           ),
         );
