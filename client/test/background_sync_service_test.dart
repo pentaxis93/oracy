@@ -16,13 +16,14 @@ class _SuccessfulTranscriptionService extends TranscriptionService {
   _SuccessfulTranscriptionService() : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
-    return createMockTranscript();
+    return TranscriptionSubmissionVoiceNote(createMockVoiceNote());
   }
 }
 
@@ -32,14 +33,34 @@ class _CountingTranscriptionService extends TranscriptionService {
   int callCount = 0;
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     callCount++;
-    return createMockTranscript();
+    return TranscriptionSubmissionVoiceNote(createMockVoiceNote());
+  }
+}
+
+class _AcceptedWithoutVoiceNoteTranscriptionService
+    extends TranscriptionService {
+  _AcceptedWithoutVoiceNoteTranscriptionService() : super(Dio());
+
+  int callCount = 0;
+
+  @override
+  Future<TranscriptionSubmissionResult> transcribe(
+    String filePath, {
+    String? language,
+    required String idempotencyKey,
+    required DateTime recordedAt,
+    void Function(double progress)? onProgress,
+  }) async {
+    callCount++;
+    return const TranscriptionSubmissionAcceptedWithoutVoiceNote();
   }
 }
 
@@ -216,6 +237,33 @@ void main() {
       expect(await db.getPendingUploads(), isEmpty);
       expect(await db.getUploadByAudioPath(orphanedRecording.path), isNull);
       expect(await orphanedRecording.exists(), isFalse);
+    },
+  );
+
+  test(
+    'Given background sync replays accepted server work whose voice note was deleted, When upload completes, Then the queue row is dequeued without recording failure',
+    () async {
+      final audioFile = await createAudioFile('background_deleted_replay.wav');
+      final transcriptionService =
+          _AcceptedWithoutVoiceNoteTranscriptionService();
+      await db.ensurePendingUpload(audioPath: audioFile.path);
+
+      final processed = await runBackgroundSyncPass(
+        db: db,
+        checkConnectivity: () async => [ConnectivityResult.wifi],
+        readApiKey: () async => 'oracy_sk_test',
+        createTranscriptionService: (_) => transcriptionService,
+        reconcilePersistentRecordings: (_) async => 0,
+        deleteLocalFile: (String filePath) async {
+          await File(filePath).delete();
+        },
+      );
+
+      expect(processed, isTrue);
+      expect(transcriptionService.callCount, 1);
+      expect(await db.getUploadByAudioPath(audioFile.path), isNull);
+      expect(await db.getPendingUploads(), isEmpty);
+      expect(await audioFile.exists(), isFalse);
     },
   );
 }

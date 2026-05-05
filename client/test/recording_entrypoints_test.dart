@@ -241,7 +241,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            transcriptionOverride(TranscriptionSuccess(createMockTranscript())),
+            transcriptionOverride(TranscriptionSuccess(createMockVoiceNote())),
             permissionOverride(permissions),
             recordingProvider.overrideWith(() => recordingNotifier),
           ],
@@ -251,9 +251,7 @@ void main() {
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => TranscriptResultScreen(
-                      transcript: createMockTranscript(
-                        transcript: 'Saved result',
-                      ),
+                      voiceNote: createMockVoiceNote(text: 'Saved result'),
                     ),
                   ),
                 ),
@@ -272,7 +270,7 @@ void main() {
 
       expect(permissions.checkCount, greaterThanOrEqualTo(1));
       expect(recordingNotifier.startCount, 0);
-      expect(find.text('Transcript'), findsOneWidget);
+      expect(find.text('Voice Note'), findsOneWidget);
       expect(find.text('Microphone Access Required'), findsOneWidget);
     },
   );
@@ -283,7 +281,7 @@ void main() {
       final permissions = MockPermissionService();
       final recordingNotifier = _StartupFailingRecordingNotifier();
       final transcriptionNotifier = _ResetCountingTranscriptionNotifier(
-        TranscriptionSuccess(createMockTranscript()),
+        TranscriptionSuccess(createMockVoiceNote()),
       );
 
       await tester.pumpWidget(
@@ -299,9 +297,7 @@ void main() {
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => TranscriptResultScreen(
-                      transcript: createMockTranscript(
-                        transcript: 'Saved result',
-                      ),
+                      voiceNote: createMockVoiceNote(text: 'Saved result'),
                     ),
                   ),
                 ),
@@ -320,7 +316,7 @@ void main() {
       expect(permissions.checkCount, greaterThanOrEqualTo(1));
       expect(recordingNotifier.startCount, 1);
       expect(transcriptionNotifier.resetCount, 0);
-      expect(find.text('Transcript'), findsOneWidget);
+      expect(find.text('Voice Note'), findsOneWidget);
       expect(find.text('Open result'), findsNothing);
     },
   );
@@ -339,7 +335,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            transcriptionOverride(TranscriptionSuccess(createMockTranscript())),
+            transcriptionOverride(TranscriptionSuccess(createMockVoiceNote())),
             permissionOverride(permissions),
             recordingProvider.overrideWith(() => recordingNotifier),
           ],
@@ -349,9 +345,7 @@ void main() {
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => TranscriptResultScreen(
-                      transcript: createMockTranscript(
-                        transcript: 'Saved result',
-                      ),
+                      voiceNote: createMockVoiceNote(text: 'Saved result'),
                     ),
                   ),
                 ),
@@ -370,7 +364,7 @@ void main() {
       expect(permissions.checkCount, greaterThanOrEqualTo(1));
       expect(recordingNotifier.startCount, 1);
       expect(find.text('Open result'), findsOneWidget);
-      expect(find.text('Transcript'), findsNothing);
+      expect(find.text('Voice Note'), findsNothing);
     },
   );
 }

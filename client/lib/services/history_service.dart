@@ -33,6 +33,11 @@ class HistoryService {
       response.data as Map<String, dynamic>,
     );
   }
+
+  Future<VoiceNote> getVoiceNote(String voiceNoteId) async {
+    final response = await _dio.get('/api/v1/voice-notes/$voiceNoteId');
+    return VoiceNote.fromJson(response.data as Map<String, dynamic>);
+  }
 }
 
 final historyServiceProvider = Provider<HistoryService>((ref) {

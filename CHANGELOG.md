@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Refresh queued Flutter transcription idempotency keys when a saved language
+  hint changes, preventing backend replay conflicts on the fresh submission.
+- Fix Flutter foreground transcription provenance so web recordings persist the
+  recording start time, and treat voice notes deleted after accepted
+  transcription as accepted work instead of failed uploads.
+- Migrate the Flutter client's submission flow to the v0.1.0 chunked
+  transcription-job protocol, including client-side chunking, SHA-256 chunk
+  hashes, async job polling, retry-window suppression, and final voice-note
+  fetches.
 - Migrate the Flutter client's history/search read side to the v0.1.0
   voice-note collection contract, including `{items, next_cursor}` parsing,
   cursor pagination, voice-note resource modeling, and voice-note history UI

@@ -109,7 +109,7 @@ class _HomePageState extends ConsumerState<HomePage>
         // Auto-copy to clipboard if enabled
         final autoCopyEnabled = ref.read(autoCopyEnabledProvider);
         if (autoCopyEnabled) {
-          Clipboard.setData(ClipboardData(text: next.transcript.transcript));
+          Clipboard.setData(ClipboardData(text: next.voiceNote.text));
           // Haptic feedback to indicate copy
           HapticFeedback.mediumImpact();
         }
@@ -119,7 +119,7 @@ class _HomePageState extends ConsumerState<HomePage>
           context,
           MaterialPageRoute(
             builder: (_) => TranscriptResultScreen(
-              transcript: next.transcript,
+              voiceNote: next.voiceNote,
               wasAutoCopied: autoCopyEnabled,
             ),
           ),
@@ -188,12 +188,16 @@ class _HomePageState extends ConsumerState<HomePage>
     );
   }
 
-  void _onRecordingComplete(String filePath) {
+  void _onRecordingComplete(RecordingCompletion recording) {
     // Start transcription
     if (kDebugMode && kIsWeb) {
-      debugPrint('[HOME] _onRecordingComplete called with filePath: $filePath');
+      debugPrint(
+        '[HOME] _onRecordingComplete called with filePath: ${recording.filePath}',
+      );
     }
-    ref.read(transcriptionProvider.notifier).transcribe(filePath);
+    ref
+        .read(transcriptionProvider.notifier)
+        .transcribe(recording.filePath, recordedAt: recording.recordedAt);
   }
 
   @override
@@ -266,6 +270,7 @@ class _HomePageState extends ConsumerState<HomePage>
       ),
       TranscriptionProcessing() => const _ProcessingContent(),
       TranscriptionSuccess() => const _IdleContent(), // Already navigated away
+      TranscriptionVoiceNoteDeleted() => const _VoiceNoteDeletedContent(),
       TranscriptionError(
         :final message,
         :final errorType,
@@ -277,6 +282,46 @@ class _HomePageState extends ConsumerState<HomePage>
           isRetryable: isRetryable,
         ),
     };
+  }
+}
+
+class _VoiceNoteDeletedContent extends ConsumerWidget {
+  const _VoiceNoteDeletedContent();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.delete_outline,
+            size: 64,
+            color: theme.colorScheme.primary,
+          ),
+          const SizedBox(height: 24),
+          Text('Voice Note Unavailable', style: theme.textTheme.titleLarge),
+          const SizedBox(height: 12),
+          Text(
+            'The upload was already accepted, but the voice note has since been deleted.',
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 24),
+          OutlinedButton(
+            onPressed: () {
+              ref.read(transcriptionProvider.notifier).reset();
+            },
+            child: const Text('Dismiss'),
+          ),
+        ],
+      ),
+    );
   }
 }
 

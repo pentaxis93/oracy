@@ -170,7 +170,8 @@ class AppDatabase extends _$AppDatabase {
           pendingUploads,
         )..where((t) => t.id.equals(existing.id))).write(
           PendingUploadsCompanion(
-            language: languageChanged ? Value(language) : const Value.absent(),
+            language: Value(language),
+            idempotencyKey: Value(_uuid.v4()),
             updatedAt: Value(DateTime.now()),
           ),
         );
@@ -210,6 +211,16 @@ class AppDatabase extends _$AppDatabase {
         retryCount: Value(upload.retryCount + 1),
         status: Value(UploadStatus.failed.index),
         errorMessage: Value(errorMessage),
+        updatedAt: Value(DateTime.now()),
+      ),
+    );
+  }
+
+  /// Replace the idempotency key before starting an intentional fresh attempt.
+  Future<int> replaceUploadIdempotencyKey(int id) {
+    return (update(pendingUploads)..where((t) => t.id.equals(id))).write(
+      PendingUploadsCompanion(
+        idempotencyKey: Value(_uuid.v4()),
         updatedAt: Value(DateTime.now()),
       ),
     );

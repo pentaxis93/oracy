@@ -1,17 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:oracy/models/voice_note.dart';
 import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/widgets/permission_dialog.dart';
 
-/// Screen that displays the result of a transcription.
+/// Screen that displays the voice note created from a recording.
 class TranscriptResultScreen extends ConsumerStatefulWidget {
-  final TranscriptResponse transcript;
+  final VoiceNote voiceNote;
   final bool wasAutoCopied;
 
   const TranscriptResultScreen({
     super.key,
-    required this.transcript,
+    required this.voiceNote,
     this.wasAutoCopied = false,
   });
 
@@ -45,7 +46,7 @@ class _TranscriptResultScreenState
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Transcript'),
+        title: const Text('Voice Note'),
         centerTitle: true,
         actions: [
           IconButton(
@@ -68,23 +69,23 @@ class _TranscriptResultScreenState
                   _MetadataItem(
                     icon: Icons.timer_outlined,
                     label: _formatDuration(
-                      widget.transcript.audioDurationSeconds,
+                      widget.voiceNote.audioDurationSeconds,
                     ),
                     tooltip: 'Audio duration',
                   ),
-                  if (widget.transcript.transcriptLanguage != null)
+                  if (widget.voiceNote.language != null)
                     _MetadataItem(
                       icon: Icons.language,
-                      label: widget.transcript.transcriptLanguage!
-                          .toUpperCase(),
+                      label: widget.voiceNote.language!.toUpperCase(),
                       tooltip: 'Language',
                     ),
-                  _MetadataItem(
-                    icon: Icons.attach_money,
-                    label:
-                        '\$${(widget.transcript.costCents / 100).toStringAsFixed(3)}',
-                    tooltip: 'Cost',
-                  ),
+                  if (widget.voiceNote.costCents != null)
+                    _MetadataItem(
+                      icon: Icons.attach_money,
+                      label:
+                          '\$${(widget.voiceNote.costCents! / 100).toStringAsFixed(3)}',
+                      tooltip: 'Cost',
+                    ),
                 ],
               ),
             ),
@@ -94,7 +95,7 @@ class _TranscriptResultScreenState
               child: SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
                 child: SelectableText(
-                  widget.transcript.transcript,
+                  widget.voiceNote.text,
                   style: theme.textTheme.bodyLarge?.copyWith(height: 1.6),
                 ),
               ),
@@ -130,7 +131,7 @@ class _TranscriptResultScreenState
   }
 
   void _copyTranscript(BuildContext context) {
-    Clipboard.setData(ClipboardData(text: widget.transcript.transcript));
+    Clipboard.setData(ClipboardData(text: widget.voiceNote.text));
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('Transcript copied to clipboard'),

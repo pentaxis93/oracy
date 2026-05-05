@@ -7,7 +7,7 @@ import 'package:oracy/widgets/permission_dialog.dart';
 /// A large button that handles recording start/stop with visual feedback.
 class RecordingButton extends ConsumerWidget {
   /// Callback when a recording is completed.
-  final void Function(String filePath)? onRecordingComplete;
+  final void Function(RecordingCompletion recording)? onRecordingComplete;
 
   const RecordingButton({super.key, this.onRecordingComplete});
 
@@ -78,9 +78,9 @@ class RecordingButton extends ConsumerWidget {
       if (kDebugMode && kIsWeb) {
         debugPrint('[RECORDING_BUTTON] Stopping recording...');
       }
-      final path = await notifier.stopRecording();
-      if (path != null && onRecordingComplete != null) {
-        onRecordingComplete!(path);
+      final recording = await notifier.stopRecording();
+      if (recording != null && onRecordingComplete != null) {
+        onRecordingComplete!(recording);
       }
     } else {
       // Check permission and start recording

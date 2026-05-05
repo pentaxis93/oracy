@@ -93,18 +93,24 @@ class MockRecordingNotifier extends RecordingNotifier {
     state = RecordingInfo(
       state: RecordingState.recording,
       filePath: '/mock/recording.m4a',
+      startedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
       duration: Duration.zero,
     );
   }
 
   @override
-  Future<String?> stopRecording() async {
-    state = const RecordingInfo(
+  Future<RecordingCompletion?> stopRecording() async {
+    final completion = RecordingCompletion(
+      filePath: '/mock/recording.m4a',
+      recordedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
+    );
+    state = RecordingInfo(
       state: RecordingState.completed,
       filePath: '/mock/recording.m4a',
+      startedAt: completion.recordedAt,
       duration: Duration(seconds: 5),
     );
-    return '/mock/recording.m4a';
+    return completion;
   }
 
   @override
@@ -168,17 +174,25 @@ class MockTranscriptionNotifier extends TranscriptionNotifier {
   }
 
   @override
-  Future<void> transcribe(String filePath, {String? language}) async {
+  Future<void> transcribe(
+    String filePath, {
+    String? language,
+    required DateTime recordedAt,
+  }) async {
     state = const TranscriptionUploading(progress: 0.5);
     await Future.delayed(const Duration(milliseconds: 10));
     state = const TranscriptionProcessing();
     await Future.delayed(const Duration(milliseconds: 10));
-    state = TranscriptionSuccess(createMockTranscript());
+    state = TranscriptionSuccess(createMockVoiceNote());
   }
 
   @override
   Future<bool> retry({String? language}) async {
-    await transcribe('/mock/file.m4a', language: language);
+    await transcribe(
+      '/mock/file.m4a',
+      language: language,
+      recordedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
+    );
     return true;
   }
 
@@ -260,41 +274,6 @@ List<VoiceNote> createMockVoiceNoteList({int count = 5}) {
     (index) => createMockVoiceNote(
       id: 'mock-id-$index',
       text: 'Mock voice note number ${index + 1}.',
-      createdAt: DateTime.now().subtract(Duration(days: index)),
-    ),
-  );
-}
-
-/// Creates a mock TranscriptResponse for testing.
-TranscriptResponse createMockTranscript({
-  String? id,
-  String? transcript,
-  double? audioDurationSeconds,
-  int? costCents,
-  DateTime? createdAt,
-  String? language,
-}) {
-  return TranscriptResponse(
-    id: id ?? 'mock-id-123',
-    transcript: transcript ?? 'This is a mock transcript for testing purposes.',
-    audioDurationSeconds: audioDurationSeconds ?? 30.0,
-    audioFormat: 'm4a',
-    audioSizeBytes: 50000,
-    transcriptLanguage: language ?? 'en',
-    whisperModel: 'whisper-1',
-    processingTimeMs: 1500,
-    costCents: costCents ?? 1,
-    createdAt: createdAt ?? DateTime.now(),
-  );
-}
-
-/// Creates a list of mock transcripts for testing.
-List<TranscriptResponse> createMockTranscriptList({int count = 5}) {
-  return List.generate(
-    count,
-    (index) => createMockTranscript(
-      id: 'mock-id-$index',
-      transcript: 'Mock transcript number ${index + 1}.',
       createdAt: DateTime.now().subtract(Duration(days: index)),
     ),
   );
