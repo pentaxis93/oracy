@@ -11,11 +11,12 @@ Volume=@ORACY_CONFIG_PATH@:/etc/oracy/oracy.toml:ro
 Volume=oracy-data.volume:/var/lib/oracy:rw
 PublishPort=@ORACY_PUBLIC_PUBLISH@
 PublishPort=127.0.0.1:@ORACY_OPERATOR_HOST_PORT@:9090
+StopTimeout=30
 
 [Service]
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
+TimeoutStopSec=40
 
 [Install]
 WantedBy=default.target
