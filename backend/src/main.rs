@@ -82,18 +82,35 @@ async fn serve_public_and_operator(
     operator_listen_addr: SocketAddr,
     operator_app: axum::Router,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (shutdown_sender, _) = broadcast::channel(1);
-    tokio::spawn(wait_for_shutdown_signal(shutdown_sender.clone()));
+    let ShutdownBroadcast {
+        sender,
+        public_receiver,
+        operator_receiver,
+    } = shutdown_broadcast();
+    tokio::spawn(wait_for_shutdown_signal(sender));
 
     tokio::try_join!(
-        serve(listen_addr, app, shutdown_sender.subscribe()),
-        serve(
-            operator_listen_addr,
-            operator_app,
-            shutdown_sender.subscribe()
-        ),
+        serve(listen_addr, app, public_receiver),
+        serve(operator_listen_addr, operator_app, operator_receiver),
     )?;
     Ok(())
+}
+
+struct ShutdownBroadcast {
+    sender: broadcast::Sender<()>,
+    public_receiver: broadcast::Receiver<()>,
+    operator_receiver: broadcast::Receiver<()>,
+}
+
+fn shutdown_broadcast() -> ShutdownBroadcast {
+    let (sender, public_receiver) = broadcast::channel(1);
+    let operator_receiver = sender.subscribe();
+
+    ShutdownBroadcast {
+        sender,
+        public_receiver,
+        operator_receiver,
+    }
 }
 
 async fn serve(
@@ -130,4 +147,16 @@ fn init_tracing() {
         .with_target(false)
         .compact()
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shutdown_broadcast;
+
+    #[test]
+    fn shutdown_broadcast_has_server_receivers_before_sender_can_be_spawned() {
+        let shutdown = shutdown_broadcast();
+
+        assert_eq!(shutdown.sender.receiver_count(), 2);
+    }
 }
