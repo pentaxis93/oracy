@@ -49,9 +49,12 @@ printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" > /var/lib/oracy/oracy.env
 
 ## Install Quadlets
 
-Copy the templates from [`quadlet/`](quadlet/) into
-`~/.config/containers/systemd/` for the service account and replace the
-`@...@` placeholders with host values.
+Render the templates from [`quadlet/`](quadlet/) into
+`~/.config/containers/systemd/` for the service account, replacing the
+`@...@` placeholders with host values and removing the `.in` suffix:
+
+- `quadlet/oracy.container.in` renders to `oracy.container`.
+- `quadlet/oracy-data.volume.in` renders to `oracy-data.volume`.
 
 The operator metrics publish line intentionally defaults to host loopback:
 

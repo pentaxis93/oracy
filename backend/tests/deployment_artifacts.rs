@@ -44,6 +44,14 @@ fn deployment_readme_manages_the_quadlet_generated_service_unit() {
     assert!(!readme.contains("systemctl --user enable oracy.service"));
 }
 
+#[test]
+fn deployment_readme_names_quadlet_rendered_filenames() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+
+    assert!(readme.contains("oracy.container"));
+    assert!(readme.contains("oracy-data.volume"));
+}
+
 fn quadlet_seconds(template: &str, key: &str) -> u64 {
     template
         .lines()
