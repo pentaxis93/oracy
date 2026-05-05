@@ -1,0 +1,8 @@
+listen_addr = "0.0.0.0:8080"
+operator_listen_addr = "0.0.0.0:9090"
+accepted_audio_dir = "/var/lib/oracy/accepted-audio"
+database_path = "/var/lib/oracy/oracy.sqlite"
+
+[[api_keys]]
+api_key_id = "operator-issued-id"
+key = "operator-issued-secret"

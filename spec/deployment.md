@@ -13,6 +13,10 @@ durability commitments under nominal load.
 behavior. This document describes the infrastructure responsibilities behind
 those settings.
 
+The generic container and Quadlet artifacts that implement this contract ship
+in [`deploy/`](../deploy/). Those artifacts are templates: the repository owns
+the build and service shape, while operators provide concrete host bindings.
+
 ## Audience
 
 This document is for operators standing up Oracy on POSIX Linux

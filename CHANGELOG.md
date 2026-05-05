@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add backend container and Quadlet deployment templates, including
+  bind-backed persistence, example configuration, loopback-default operator
+  metrics publishing, and graceful SIGTERM shutdown.
 - Clarify that `VoiceNote.language` may be `null` in the API contract when no
   language hint or detected language is available.
 - Refresh queued Flutter transcription idempotency keys when a saved language

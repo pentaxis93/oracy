@@ -12,6 +12,7 @@ use oracy_backend::transcription_worker::{
     FfmpegAudioSlicer, FfprobeDurationProbe, OpenAiTranscriptionEngine, WorkerConfig,
     run_worker_loop,
 };
+use tokio::sync::broadcast;
 use tracing::error;
 
 #[tokio::main]
@@ -81,20 +82,61 @@ async fn serve_public_and_operator(
     operator_listen_addr: SocketAddr,
     operator_app: axum::Router,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let ShutdownBroadcast {
+        sender,
+        public_receiver,
+        operator_receiver,
+    } = shutdown_broadcast();
+    tokio::spawn(wait_for_shutdown_signal(sender));
+
     tokio::try_join!(
-        serve(listen_addr, app),
-        serve(operator_listen_addr, operator_app),
+        serve(listen_addr, app, public_receiver),
+        serve(operator_listen_addr, operator_app, operator_receiver),
     )?;
     Ok(())
+}
+
+struct ShutdownBroadcast {
+    sender: broadcast::Sender<()>,
+    public_receiver: broadcast::Receiver<()>,
+    operator_receiver: broadcast::Receiver<()>,
+}
+
+fn shutdown_broadcast() -> ShutdownBroadcast {
+    let (sender, public_receiver) = broadcast::channel(1);
+    let operator_receiver = sender.subscribe();
+
+    ShutdownBroadcast {
+        sender,
+        public_receiver,
+        operator_receiver,
+    }
 }
 
 async fn serve(
     listen_addr: SocketAddr,
     app: axum::Router,
+    mut shutdown: broadcast::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown.recv().await;
+        })
+        .await?;
     Ok(())
+}
+
+async fn wait_for_shutdown_signal(shutdown: broadcast::Sender<()>) {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+
+    let _ = shutdown.send(());
 }
 
 fn init_tracing() {
@@ -105,4 +147,16 @@ fn init_tracing() {
         .with_target(false)
         .compact()
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shutdown_broadcast;
+
+    #[test]
+    fn shutdown_broadcast_has_server_receivers_before_sender_can_be_spawned() {
+        let shutdown = shutdown_broadcast();
+
+        assert_eq!(shutdown.sender.receiver_count(), 2);
+    }
 }

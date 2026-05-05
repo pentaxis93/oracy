@@ -2,6 +2,7 @@
 
 `backend/` contains the Rust service for Oracy's `v0.1.0` backend. The
 backend targets Linux deployment and assumes POSIX filesystem semantics.
+Container and Quadlet deployment artifacts live in [`../deploy/`](../deploy/).
 
 Run the service with `ORACY_CONFIG` set to a TOML configuration file and
 `OPENAI_API_KEY` set to a valid OpenAI credential:

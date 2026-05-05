@@ -1,4 +1,14 @@
 use std::fs;
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
+use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(unix)]
+use std::thread;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use oracy_backend::bootstrap::{BootstrapError, load_runtime_from_env, load_runtime_from_path};
 use tempfile::TempDir;
@@ -781,6 +791,81 @@ key = "key-one"
 }
 
 #[tokio::test]
+async fn startup_accepts_shipped_deployment_example_config_after_operator_paths_are_bound() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let state_dir = tempdir.path().join("state");
+    let accepted_audio_dir = state_dir.join("accepted-audio");
+    fs::create_dir_all(&accepted_audio_dir).expect("create accepted audio dir");
+
+    let example = fs::read_to_string("../deploy/examples/oracy.toml")
+        .expect("read shipped deployment example config");
+    let configured = example
+        .replace("0.0.0.0:8080", "127.0.0.1:0")
+        .replace("0.0.0.0:9090", "127.0.0.1:1")
+        .replace("/var/lib/oracy", &state_dir.display().to_string())
+        .replace("operator-issued-secret", "key-one");
+    let config_path = tempdir.path().join("oracy.toml");
+    fs::write(&config_path, configured).expect("write operator-bound config");
+
+    load_runtime_from_path(&config_path)
+        .await
+        .expect("deployment example should load once operator paths exist");
+}
+
+#[cfg(unix)]
+#[test]
+fn backend_process_exits_zero_after_sigterm() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let accepted_audio_dir = tempdir.path().join("accepted-audio");
+    fs::create_dir(&accepted_audio_dir).expect("create accepted audio dir");
+    let listen_port = unused_loopback_port();
+    let operator_port = unused_loopback_port();
+    assert_ne!(listen_port, operator_port);
+    let config_path = write_config(
+        &tempdir,
+        format!(
+            r#"
+listen_addr = "127.0.0.1:{listen_port}"
+operator_listen_addr = "127.0.0.1:{operator_port}"
+accepted_audio_dir = "{}"
+
+[[api_keys]]
+api_key_id = "alpha"
+key = "key-one"
+"#,
+            accepted_audio_dir.display()
+        ),
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_oracy-backend"))
+        .env("ORACY_CONFIG", &config_path)
+        .env("OPENAI_API_KEY", "test-openai-key")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn backend");
+
+    wait_for_tcp_listener(&mut child, listen_port);
+    wait_for_tcp_listener(&mut child, operator_port);
+
+    let signal_status = Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status()
+        .expect("send SIGTERM");
+    assert!(signal_status.success(), "kill -TERM should succeed");
+
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5)).unwrap_or_else(|| {
+        panic_with_child_output(&mut child, "backend did not exit after SIGTERM")
+    });
+
+    assert!(
+        status.success(),
+        "SIGTERM should trigger graceful shutdown with exit code 0, got {status}"
+    );
+}
+
+#[tokio::test]
 async fn startup_accepts_relative_accepted_audio_dir_resolved_against_config() {
     let tempdir = TempDir::new().expect("tempdir");
     let expected_dir = tempdir.path().join("accepted-audio");
@@ -1005,4 +1090,71 @@ fn write_config_without_database_path(tempdir: &TempDir, contents: String) -> st
     let path = tempdir.path().join("oracy.toml");
     fs::write(&path, contents.trim_start()).expect("write config");
     path
+}
+
+#[cfg(unix)]
+// FIXME(#86): This probe-then-bind helper has a TOCTOU port race; avoid new
+// process-level integration test reuse until the race-free strategy lands.
+fn unused_loopback_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind unused port")
+        .local_addr()
+        .expect("local addr")
+        .port()
+}
+
+#[cfg(unix)]
+fn wait_for_tcp_listener(child: &mut Child, port: u16) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let addr: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .expect("loopback socket address");
+
+    loop {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("poll child") {
+            panic_with_child_output(
+                child,
+                &format!("backend exited before listener {addr} became ready: {status}"),
+            );
+        }
+        if Instant::now() >= deadline {
+            panic_with_child_output(
+                child,
+                &format!("backend listener {addr} did not become ready"),
+            );
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll child") {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(unix)]
+fn panic_with_child_output(child: &mut Child, message: &str) -> ! {
+    let _ = child.kill();
+    let _ = child.wait();
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut stdout);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    panic!("{message}\nstdout:\n{stdout}\nstderr:\n{stderr}");
 }
