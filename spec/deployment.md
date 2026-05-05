@@ -71,6 +71,10 @@ Operators must provide a database path with these properties:
 - The database file and its WAL and SHM siblings survive backend restarts.
 - The database file and its WAL and SHM siblings are on a volume that persists
   across container or host reboots in the operator's deployment.
+- On SELinux-enforcing hosts, the parent directory is labeled so a confined
+  Podman container can create and write the database file and SQLite sidecar
+  files. The shipped Quadlet template satisfies this for dedicated Oracy state
+  paths through private Podman relabeling.
 
 SQLite relies on filesystem support for `fsync` and atomic rename for
 crash-safety. Filesystems or mounts that weaken those semantics do not satisfy
