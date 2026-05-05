@@ -255,6 +255,42 @@ void main() {
   );
 
   test(
+    'Given retry waiting with a non-future attempt time, When polling the job, Then polling uses the fixed interval',
+    () async {
+      final audioFile = await createAudioFile('recording.wav', 4);
+      const pollInterval = Duration(seconds: 5);
+
+      for (final nextAttemptAt in [
+        '2026-04-21T18:29:50Z',
+        '2026-04-21T18:30:00Z',
+      ]) {
+        final adapter = _ProtocolAdapter(
+          jobPolls: [
+            _jobJson(status: 'retry_waiting', nextAttemptAt: nextAttemptAt),
+            _jobJson(status: 'succeeded', voiceNoteId: 'voice-note-123'),
+          ],
+        );
+        final dio = Dio()..httpClientAdapter = adapter;
+        final sleeps = <Duration>[];
+        final service = TranscriptionService(
+          dio,
+          pollInterval: pollInterval,
+          sleep: (duration) async => sleeps.add(duration),
+          now: () => DateTime.utc(2026, 4, 21, 18, 30),
+        );
+
+        await service.transcribe(
+          audioFile.path,
+          idempotencyKey: 'live-key-$nextAttemptAt',
+          recordedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
+        );
+
+        expect(sleeps, [pollInterval, pollInterval]);
+      }
+    },
+  );
+
+  test(
     'Given opening replays a succeeded job, When transcription runs, Then the client fetches the voice note without pushing chunks again',
     () async {
       final audioFile = await createAudioFile('recording.wav', 4);

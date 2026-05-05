@@ -514,7 +514,7 @@ class TranscriptionService {
     }
 
     final delay = job.nextAttemptAt!.difference(_now().toUtc());
-    return delay.isNegative ? Duration.zero : delay;
+    return delay <= Duration.zero ? pollInterval : delay;
   }
 }
 
