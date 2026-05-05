@@ -17,6 +17,7 @@ use crate::settings::DEFAULT_TRANSCRIPTION_MODEL;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 const EMBEDDING_REGENERATION_MAX_RETRIES: i64 = 3;
+const TEMP_EMBEDDING_CANDIDATE_INSERT_CHUNK_SIZE: usize = 30_000;
 
 #[derive(Clone, Debug)]
 pub struct Storage {
@@ -2336,21 +2337,44 @@ impl Storage {
         if voice_note_ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let mut query = QueryBuilder::new(
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
             r#"
-            SELECT voice_note_id, vector
-            FROM embeddings
-            WHERE api_key_id =
+            CREATE TEMP TABLE IF NOT EXISTS temp_voice_note_embedding_candidates (
+                voice_note_id TEXT PRIMARY KEY
+            )
             "#,
-        );
-        query.push_bind(api_key_id);
-        query.push(" AND voice_note_id IN (");
-        let mut separated = query.separated(", ");
-        for voice_note_id in voice_note_ids {
-            separated.push_bind(voice_note_id);
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM temp_voice_note_embedding_candidates")
+            .execute(&mut *tx)
+            .await?;
+        for chunk in voice_note_ids.chunks(TEMP_EMBEDDING_CANDIDATE_INSERT_CHUNK_SIZE) {
+            let mut query = QueryBuilder::new(
+                "INSERT OR IGNORE INTO temp_voice_note_embedding_candidates (voice_note_id) ",
+            );
+            query.push_values(chunk, |mut row, voice_note_id| {
+                row.push_bind(voice_note_id);
+            });
+            query.build().execute(&mut *tx).await?;
         }
-        separated.push_unseparated(")");
-        let rows = query.build().fetch_all(&self.pool).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT embeddings.voice_note_id, embeddings.vector
+            FROM embeddings
+            JOIN temp_voice_note_embedding_candidates
+                ON temp_voice_note_embedding_candidates.voice_note_id = embeddings.voice_note_id
+            WHERE embeddings.api_key_id = ?
+            "#,
+        )
+        .bind(api_key_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM temp_voice_note_embedding_candidates")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         let mut embeddings = HashMap::new();
         for row in rows {
             embeddings.insert(row.try_get("voice_note_id")?, row.try_get("vector")?);

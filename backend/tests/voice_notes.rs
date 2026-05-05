@@ -10,6 +10,7 @@ use oracy_backend::router::build_router;
 use oracy_backend::state::AppState;
 use oracy_backend::storage::{Storage, encode_embedding_vector};
 use serde_json::{Value, json};
+use sqlx::{QueryBuilder, Sqlite};
 use tempfile::TempDir;
 use time::macros::datetime;
 use tower::util::ServiceExt;
@@ -1391,6 +1392,32 @@ async fn hybrid_search_keeps_keyword_results_without_provider_when_semantic_cand
 }
 
 #[tokio::test]
+async fn semantic_and_hybrid_search_skip_provider_when_large_candidate_set_has_no_embeddings() {
+    let fixture = VoiceNoteFixture::new().await;
+    fixture
+        .insert_large_unembedded_search_candidate_set("alpha")
+        .await;
+
+    assert_empty_collection(
+        fixture
+            .get_json(
+                "/api/v1/voice-notes?q=query&search_mode=semantic",
+                "alpha-secret",
+            )
+            .await,
+    );
+    assert_collection_ids(
+        fixture
+            .get_json(
+                "/api/v1/voice-notes?q=apollo&search_mode=hybrid",
+                "alpha-secret",
+            )
+            .await,
+        &["bulk-note-00000"],
+    );
+}
+
+#[tokio::test]
 async fn search_filters_and_cursors_apply_to_relevance_ordered_results() {
     let fixture = VoiceNoteFixture::new().await;
     fixture.insert_session("alpha", SESSION_A).await;
@@ -1981,6 +2008,72 @@ impl VoiceNoteFixture {
         .execute(self.storage.pool())
         .await
         .expect("insert segment");
+    }
+
+    async fn insert_large_unembedded_search_candidate_set(&self, owner: &str) {
+        const CANDIDATE_COUNT: usize = 33_000;
+        const INSERT_CHUNK_SIZE: usize = 2_500;
+
+        for start in (0..CANDIDATE_COUNT).step_by(INSERT_CHUNK_SIZE) {
+            let end = (start + INSERT_CHUNK_SIZE).min(CANDIDATE_COUNT);
+            let mut query = QueryBuilder::<Sqlite>::new(
+                r#"
+                INSERT INTO voice_notes (
+                    id, api_key_id, audio_duration_seconds, audio_format, audio_size_bytes,
+                    language, model, processing_time_ms, cost_cents,
+                    created_at, recorded_at, session_id
+                )
+                "#,
+            );
+            query.push_values(start..end, |mut row, index| {
+                row.push_bind(format!("bulk-note-{index:05}"))
+                    .push_bind(owner)
+                    .push_bind(12.5_f64)
+                    .push_bind("wav")
+                    .push_bind(401_280_i64)
+                    .push_bind("en")
+                    .push_bind("gpt-4o-mini-transcribe")
+                    .push_bind(1_843_i64)
+                    .push_bind(Option::<i64>::None)
+                    .push_bind("2026-04-24T18:00:00.000000000Z")
+                    .push_bind("2026-04-24T17:59:00.000000000Z")
+                    .push_bind(Option::<&str>::None);
+            });
+            query
+                .build()
+                .execute(self.storage.pool())
+                .await
+                .expect("insert large voice note candidate set");
+        }
+
+        for start in (0..CANDIDATE_COUNT).step_by(INSERT_CHUNK_SIZE) {
+            let end = (start + INSERT_CHUNK_SIZE).min(CANDIDATE_COUNT);
+            let mut query = QueryBuilder::<Sqlite>::new(
+                r#"
+                INSERT INTO voice_note_versions (
+                    id, api_key_id, voice_note_id, version_number, text, created_at
+                )
+                "#,
+            );
+            query.push_values(start..end, |mut row, index| {
+                let text = if index == 0 {
+                    "apollo keyword match"
+                } else {
+                    "quiet note"
+                };
+                row.push_bind(format!("bulk-version-{index:05}"))
+                    .push_bind(owner)
+                    .push_bind(format!("bulk-note-{index:05}"))
+                    .push_bind(1_i64)
+                    .push_bind(text)
+                    .push_bind("2026-04-24T18:00:00.000000000Z");
+            });
+            query
+                .build()
+                .execute(self.storage.pool())
+                .await
+                .expect("insert large voice note version candidate set");
+        }
     }
 
     async fn insert_embedding(&self, owner: &str, voice_note_id: &str) {

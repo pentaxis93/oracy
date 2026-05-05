@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Add a repo-defined backend CI-parity gate for contributor pre-review checks.
+- Fix semantic and hybrid voice-note search over large filtered candidate sets
+  so embedding lookup no longer fails on SQLite host-parameter limits.
 - Add ranked voice-note search across keyword, semantic, and hybrid modes,
   including historical-version keyword matches, current-embedding semantic
   ranking, literal full-text query handling, independent semantic and keyword

@@ -1240,6 +1240,67 @@ async fn completed_voice_notes_expose_current_version_ordered_segments_and_curre
 }
 
 #[tokio::test]
+async fn current_embedding_lookup_accepts_more_candidates_than_sqlite_variable_limit() {
+    let (_tempdir, storage) = storage().await;
+    insert_searchable_voice_note(
+        &storage,
+        "owner-a",
+        "voice-note-a",
+        "version-a",
+        "alpha note",
+        "2026-04-24T18:00:00.000000000Z",
+    )
+    .await;
+    insert_searchable_voice_note(
+        &storage,
+        "owner-b",
+        "voice-note-b",
+        "version-b",
+        "beta note",
+        "2026-04-24T18:00:00.000000000Z",
+    )
+    .await;
+    storage
+        .replace_current_embedding(
+            "owner-a",
+            "voice-note-a",
+            NewEmbedding {
+                model: "embedding-v1".to_owned(),
+                vector: vec![1, 2, 3],
+                created_at: datetime!(2026-04-24 18:00:31 UTC),
+            },
+        )
+        .await
+        .expect("insert alpha embedding");
+    storage
+        .replace_current_embedding(
+            "owner-b",
+            "voice-note-b",
+            NewEmbedding {
+                model: "embedding-v1".to_owned(),
+                vector: vec![4, 5, 6],
+                created_at: datetime!(2026-04-24 18:00:31 UTC),
+            },
+        )
+        .await
+        .expect("insert beta embedding");
+    let mut candidate_ids = (0..33_000)
+        .map(|index| format!("missing-{index}"))
+        .collect::<Vec<_>>();
+    candidate_ids.push("voice-note-a".to_owned());
+    candidate_ids.push("voice-note-b".to_owned());
+
+    let embeddings = storage
+        .get_current_embeddings_for_voice_notes("owner-a", &candidate_ids)
+        .await
+        .expect("embedding lookup above SQLite variable limit");
+
+    assert_eq!(embeddings.len(), 1);
+    assert_eq!(embeddings.get("voice-note-a"), Some(&vec![1, 2, 3]));
+    assert!(!embeddings.contains_key("voice-note-b"));
+}
+
+#[tokio::test]
 async fn voice_note_text_replacement_appends_one_current_version_without_mutating_segments() {
     let (_tempdir, storage) = storage().await;
     let job = created_job(&storage, "owner-a", "attempt-1").await;
