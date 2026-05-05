@@ -20,3 +20,13 @@ fn quadlet_template_mounts_host_bound_state_through_volume_template() {
     assert!(volume.contains("Type=none"));
     assert!(volume.contains("Options=bind"));
 }
+
+#[test]
+fn deployment_readme_manages_the_quadlet_generated_service_unit() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+
+    assert!(readme.contains("systemctl --user start oracy.service"));
+    assert!(readme.contains("systemctl --user status oracy.service"));
+    assert!(!readme.contains("systemctl --user start oracy.container"));
+    assert!(!readme.contains("systemctl --user enable oracy.service"));
+}

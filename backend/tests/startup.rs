@@ -1093,6 +1093,8 @@ fn write_config_without_database_path(tempdir: &TempDir, contents: String) -> st
 }
 
 #[cfg(unix)]
+// FIXME(#86): This probe-then-bind helper has a TOCTOU port race; avoid new
+// process-level integration test reuse until the race-free strategy lands.
 fn unused_loopback_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .expect("bind unused port")

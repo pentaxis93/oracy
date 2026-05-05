@@ -66,16 +66,14 @@ After templating:
 
 ```sh
 systemctl --user daemon-reload
-systemctl --user start oracy.container
+systemctl --user start oracy.service
 systemctl --user status oracy.service
 ```
 
-For boot persistence under user-scope systemd, enable lingering for the service
-account through the host provisioning mechanism and enable the generated unit:
-
-```sh
-systemctl --user enable oracy.service
-```
+The Quadlet template's `[Install]` relationship makes the generated service
+part of the user default target at `daemon-reload` time. For boot persistence
+under user-scope systemd, enable lingering for the service account through the
+host provisioning mechanism.
 
 ## Operator-Owned Values
 
