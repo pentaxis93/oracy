@@ -232,7 +232,7 @@ VoiceNote createMockVoiceNote({
   int? costCents,
   DateTime? createdAt,
   DateTime? recordedAt,
-  String? language,
+  String? language = 'en',
 }) {
   final created = createdAt ?? DateTime.now();
   return VoiceNote(
@@ -242,7 +242,7 @@ VoiceNote createMockVoiceNote({
     audioDurationSeconds: audioDurationSeconds ?? 30.0,
     audioFormat: 'm4a',
     audioSizeBytes: 50000,
-    language: language ?? 'en',
+    language: language,
     model: 'gpt-4o-mini-transcribe',
     processingTimeMs: 1500,
     costCents: costCents ?? 1,

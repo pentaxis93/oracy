@@ -10,6 +10,7 @@ class VoiceNoteDetailScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final language = voiceNote.language;
 
     return Scaffold(
       appBar: AppBar(
@@ -37,11 +38,12 @@ class VoiceNoteDetailScreen extends StatelessWidget {
                     label: _formatDuration(voiceNote.audioDurationSeconds),
                     tooltip: 'Audio duration',
                   ),
-                  _MetadataItem(
-                    icon: Icons.language,
-                    label: voiceNote.language.toUpperCase(),
-                    tooltip: 'Language',
-                  ),
+                  if (language != null)
+                    _MetadataItem(
+                      icon: Icons.language,
+                      label: language.toUpperCase(),
+                      tooltip: 'Language',
+                    ),
                   _MetadataItem(
                     icon: Icons.attach_money,
                     label: _formatCost(voiceNote.costCents),

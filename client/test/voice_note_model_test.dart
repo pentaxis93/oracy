@@ -1,7 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:oracy/models/voice_note.dart';
 
-Map<String, dynamic> _voiceNoteJson({Object? costCents = 1}) {
+Map<String, dynamic> _voiceNoteJson({
+  Object? costCents = 1,
+  Object? language = 'en',
+}) {
   return {
     'id': '01JS8D6E2S3T1J7H9J2Q2N4P5R',
     'current_version_id': '01JS9P1D6CK9M0N1P2Q3R4S5T6',
@@ -9,7 +12,7 @@ Map<String, dynamic> _voiceNoteJson({Object? costCents = 1}) {
     'audio_duration_seconds': 12.5,
     'audio_format': 'm4a',
     'audio_size_bytes': 401280,
-    'language': 'en',
+    'language': language,
     'model': 'gpt-4o-mini-transcribe',
     'processing_time_ms': 1843,
     'cost_cents': costCents,
@@ -60,6 +63,15 @@ void main() {
       final voiceNote = VoiceNote.fromJson(_voiceNoteJson(costCents: null));
 
       expect(voiceNote.costCents, isNull);
+    },
+  );
+
+  test(
+    'Given language is null, When a voice note is parsed, Then the nullable language is preserved',
+    () {
+      final voiceNote = VoiceNote.fromJson(_voiceNoteJson(language: null));
+
+      expect(voiceNote.language, isNull);
     },
   );
 

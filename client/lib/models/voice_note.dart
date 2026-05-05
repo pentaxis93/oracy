@@ -26,7 +26,7 @@ class VoiceNote {
   final double audioDurationSeconds;
   final String audioFormat;
   final int audioSizeBytes;
-  final String language;
+  final String? language;
   final String model;
   final int processingTimeMs;
   final int? costCents;
@@ -60,7 +60,7 @@ class VoiceNote {
       audioDurationSeconds: (json['audio_duration_seconds'] as num).toDouble(),
       audioFormat: json['audio_format'] as String,
       audioSizeBytes: json['audio_size_bytes'] as int,
-      language: json['language'] as String,
+      language: json['language'] as String?,
       model: json['model'] as String,
       processingTimeMs: json['processing_time_ms'] as int,
       costCents: json['cost_cents'] as int?,

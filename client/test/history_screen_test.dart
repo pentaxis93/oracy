@@ -144,6 +144,36 @@ void main() {
   );
 
   testWidgets(
+    'Given a voice note has no language, When history is rendered, Then the note appears without a language badge',
+    (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            historyOverride(
+              voiceNotes: [
+                createMockVoiceNote(
+                  id: 'no-language',
+                  text: 'Visible note without language',
+                  language: null,
+                ),
+              ],
+            ),
+          ],
+          child: const MaterialApp(home: HistoryScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 20));
+
+      expect(
+        find.textContaining('Visible note without language'),
+        findsOneWidget,
+      );
+      expect(find.text('EN'), findsNothing);
+    },
+  );
+
+  testWidgets(
     'Given active search has more pages, When the results are scrolled, Then the next search page loads with a footer spinner',
     (tester) async {
       final service = _ControlledHistoryService();

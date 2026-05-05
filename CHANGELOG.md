@@ -6,6 +6,8 @@
   voice-note collection contract, including `{items, next_cursor}` parsing,
   cursor pagination, voice-note resource modeling, and voice-note history UI
   copy.
+- Fix Flutter history parsing and rendering for voice notes whose `language`
+  field is null.
 - Add a repo-defined backend CI-parity gate for contributor pre-review checks.
 - Fix semantic and hybrid voice-note search over large filtered candidate sets
   so embedding lookup no longer fails on SQLite host-parameter limits.
