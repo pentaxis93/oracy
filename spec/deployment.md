@@ -46,6 +46,9 @@ Operators must provide a directory with these properties:
 - Contents survive backend restarts.
 - Contents are on a volume that persists across container or host reboots in
   the operator's deployment.
+- On SELinux-enforcing hosts, the directory is labeled so a confined Podman
+  container can read and write it. The shipped Quadlet template satisfies this
+  for dedicated Oracy state paths through private Podman relabeling.
 
 Capacity must cover active chunked-submission state. The directory holds chunks
 while jobs are in `accepting_chunks`, plus composed audio while jobs are in
@@ -68,6 +71,10 @@ Operators must provide a database path with these properties:
 - The database file and its WAL and SHM siblings survive backend restarts.
 - The database file and its WAL and SHM siblings are on a volume that persists
   across container or host reboots in the operator's deployment.
+- On SELinux-enforcing hosts, the parent directory is labeled so a confined
+  Podman container can create and write the database file and SQLite sidecar
+  files. The shipped Quadlet template satisfies this for dedicated Oracy state
+  paths through private Podman relabeling.
 
 SQLite relies on filesystem support for `fsync` and atomic rename for
 crash-safety. Filesystems or mounts that weaken those semantics do not satisfy

@@ -22,6 +22,16 @@ fn quadlet_template_mounts_host_bound_state_through_volume_template() {
 }
 
 #[test]
+fn quadlet_template_privately_relabels_selinux_visible_mounts() {
+    let template = std::fs::read_to_string("../deploy/quadlet/oracy.container.in")
+        .expect("read container Quadlet template");
+
+    assert!(template.contains("Volume=@ORACY_CONFIG_PATH@:/etc/oracy/oracy.toml:ro,Z"));
+    assert!(template.contains("Volume=oracy-data.volume:/var/lib/oracy:rw,Z"));
+    assert!(!template.contains("SecurityLabelDisable=true"));
+}
+
+#[test]
 fn quadlet_template_grants_podman_a_full_thirty_second_stop_window() {
     let template = std::fs::read_to_string("../deploy/quadlet/oracy.container.in")
         .expect("read container Quadlet template");
@@ -52,6 +62,19 @@ fn deployment_readme_names_quadlet_rendered_filenames() {
     assert!(readme.contains("oracy-data.volume"));
 }
 
+#[test]
+fn deployment_contract_documents_selinux_labeling_for_all_state_storage() {
+    let contract =
+        std::fs::read_to_string("../spec/deployment.md").expect("read deployment contract");
+    let accepted_audio = markdown_section(&contract, "Accepted Audio Directory");
+    let sqlite_database = markdown_section(&contract, "SQLite Database File");
+
+    assert!(accepted_audio.contains("On SELinux-enforcing hosts"));
+    assert!(sqlite_database.contains("On SELinux-enforcing hosts"));
+    assert!(sqlite_database.contains("parent directory"));
+    assert!(sqlite_database.contains("SQLite sidecar files"));
+}
+
 fn quadlet_seconds(template: &str, key: &str) -> u64 {
     template
         .lines()
@@ -59,4 +82,17 @@ fn quadlet_seconds(template: &str, key: &str) -> u64 {
         .unwrap_or_else(|| panic!("{key} should be declared"))
         .parse()
         .unwrap_or_else(|_| panic!("{key} should be declared as plain seconds"))
+}
+
+fn markdown_section<'a>(document: &'a str, heading: &str) -> &'a str {
+    let start_marker = format!("## {heading}");
+    let start = document
+        .find(&start_marker)
+        .unwrap_or_else(|| panic!("{heading} section should exist"));
+    let after_heading = start + start_marker.len();
+    let end = document[after_heading..]
+        .find("\n## ")
+        .map_or(document.len(), |offset| after_heading + offset);
+
+    &document[start..end]
 }

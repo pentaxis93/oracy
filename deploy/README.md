@@ -30,6 +30,11 @@ The backend process inside the container must be able to create and update
 On rootless Podman deployments, verify the host ownership and UID/GID mapping
 used by the service account before starting the unit.
 
+The shipped Quadlet template privately relabels the mounted config file and
+state volume for confined Podman containers on SELinux-enforcing hosts. Use
+host paths dedicated to this Oracy service; do not share those paths with other
+containers.
+
 ## Configure The Backend
 
 Use [`examples/oracy.toml`](examples/oracy.toml) as the starting point for the
