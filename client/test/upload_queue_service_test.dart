@@ -10,7 +10,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:oracy/db/database.dart';
-import 'package:oracy/models/voice_note.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/services/upload_queue_service.dart';
@@ -51,16 +50,16 @@ class _CountingTranscriptionService extends TranscriptionService {
   final List<String?> idempotencyKeys = [];
 
   @override
-  Future<VoiceNote> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
-    DateTime? recordedAt,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     callCount++;
     idempotencyKeys.add(idempotencyKey);
-    return createMockVoiceNote();
+    return TranscriptionSubmissionVoiceNote(createMockVoiceNote());
   }
 }
 
@@ -71,11 +70,11 @@ class _RetryingTranscriptionService extends TranscriptionService {
   final List<String?> idempotencyKeys = [];
 
   @override
-  Future<VoiceNote> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
-    DateTime? recordedAt,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     callCount++;
@@ -88,7 +87,26 @@ class _RetryingTranscriptionService extends TranscriptionService {
       );
     }
 
-    return createMockVoiceNote();
+    return TranscriptionSubmissionVoiceNote(createMockVoiceNote());
+  }
+}
+
+class _AcceptedWithoutVoiceNoteTranscriptionService
+    extends TranscriptionService {
+  _AcceptedWithoutVoiceNoteTranscriptionService() : super(Dio());
+
+  int callCount = 0;
+
+  @override
+  Future<TranscriptionSubmissionResult> transcribe(
+    String filePath, {
+    String? language,
+    required String idempotencyKey,
+    required DateTime recordedAt,
+    void Function(double progress)? onProgress,
+  }) async {
+    callCount++;
+    return const TranscriptionSubmissionAcceptedWithoutVoiceNote();
   }
 }
 
@@ -509,6 +527,31 @@ void main() {
         equals([queuedUpload.idempotencyKey]),
       );
       expect(await db.getUploadById(uploadId), isNull);
+      expect(await audioFile.exists(), isFalse);
+    },
+  );
+
+  test(
+    'Given queue processing replays accepted server work whose voice note was deleted, When upload completes, Then the queue row is dequeued without recording failure',
+    () async {
+      final audioFile = await createAudioFile('queue_deleted_replay.wav');
+      final transcriptionService =
+          _AcceptedWithoutVoiceNoteTranscriptionService();
+      final service = UploadQueueService(
+        db: db,
+        transcriptionService: transcriptionService,
+        connectivity: Connectivity(),
+        deleteLocalFile: (String filePath) async {
+          await File(filePath).delete();
+        },
+      );
+
+      await service.queueUpload(audioFile.path);
+      await service.processQueue();
+
+      expect(transcriptionService.callCount, 1);
+      expect(await db.getUploadByAudioPath(audioFile.path), isNull);
+      expect(await db.getPendingUploads(), isEmpty);
       expect(await audioFile.exists(), isFalse);
     },
   );

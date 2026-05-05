@@ -76,6 +76,21 @@ class TranscriptionJob {
   bool get isTerminal => status == 'succeeded' || status == 'failed';
 }
 
+sealed class TranscriptionSubmissionResult {
+  const TranscriptionSubmissionResult();
+}
+
+class TranscriptionSubmissionVoiceNote extends TranscriptionSubmissionResult {
+  final VoiceNote voiceNote;
+
+  const TranscriptionSubmissionVoiceNote(this.voiceNote);
+}
+
+class TranscriptionSubmissionAcceptedWithoutVoiceNote
+    extends TranscriptionSubmissionResult {
+  const TranscriptionSubmissionAcceptedWithoutVoiceNote();
+}
+
 /// State for transcription operations.
 sealed class TranscriptionState {
   const TranscriptionState();
@@ -97,6 +112,10 @@ class TranscriptionProcessing extends TranscriptionState {
 class TranscriptionSuccess extends TranscriptionState {
   final VoiceNote voiceNote;
   const TranscriptionSuccess(this.voiceNote);
+}
+
+class TranscriptionVoiceNoteDeleted extends TranscriptionState {
+  const TranscriptionVoiceNoteDeleted();
 }
 
 /// Types of transcription errors for better UI differentiation.
@@ -144,6 +163,10 @@ final localFileDeleterProvider = Provider<LocalFileDeleter>((ref) {
   return defaultLocalFileDeleter;
 });
 
+final foregroundTranscriptionsAreQueuedProvider = Provider<bool>((ref) {
+  return !kIsWeb;
+});
+
 class TranscriptionError extends TranscriptionState {
   final String message;
   final TranscriptionErrorType errorType;
@@ -163,6 +186,29 @@ class TranscriptionError extends TranscriptionState {
                errorType == TranscriptionErrorType.unknown);
 
   bool get isAuthError => errorType == TranscriptionErrorType.auth;
+}
+
+class _ForegroundTranscriptionAttempt {
+  final String filePath;
+  final String? language;
+  final String idempotencyKey;
+  final DateTime recordedAt;
+
+  const _ForegroundTranscriptionAttempt({
+    required this.filePath,
+    required this.language,
+    required this.idempotencyKey,
+    required this.recordedAt,
+  });
+
+  _ForegroundTranscriptionAttempt withFreshIdempotencyKey() {
+    return _ForegroundTranscriptionAttempt(
+      filePath: filePath,
+      language: language,
+      idempotencyKey: _uuid.v4(),
+      recordedAt: recordedAt,
+    );
+  }
 }
 
 String? _extractResponseDetail(Object? responseData) {
@@ -362,11 +408,11 @@ class TranscriptionService {
   /// Upload an audio file through the v0.1.0 transcription-job protocol.
   /// On native platforms, filePath is a file system path.
   /// On web, filePath is a blob URL (blob:https://...).
-  Future<VoiceNote> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
-    DateTime? recordedAt,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     if (kDebugMode) {
@@ -398,9 +444,8 @@ class TranscriptionService {
     }
 
     final chunks = chunkAudio(fileData.bytes);
-    final stableIdempotencyKey = idempotencyKey ?? _uuid.v4();
     final openBody = <String, dynamic>{
-      'recorded_at': (recordedAt ?? _now()).toUtc().toIso8601String(),
+      'recorded_at': recordedAt.toUtc().toIso8601String(),
       'chunk_count': chunks.length,
       'audio_format': audioFormat,
     };
@@ -412,7 +457,7 @@ class TranscriptionService {
       data: openBody,
       options: Options(
         contentType: Headers.jsonContentType,
-        headers: {'Idempotency-Key': stableIdempotencyKey},
+        headers: {'Idempotency-Key': idempotencyKey},
       ),
     );
 
@@ -441,19 +486,15 @@ class TranscriptionService {
     final succeeded = await _pollUntilTerminal(job);
     final voiceNoteId = succeeded.voiceNoteId;
     if (voiceNoteId == null || voiceNoteId.isEmpty) {
-      throw const TranscriptionClientException(
-        UploadFailureClassification(
-          message: 'Transcription succeeded but no voice note was returned.',
-          errorType: TranscriptionErrorType.transcription,
-          isRetryable: false,
-        ),
-      );
+      return const TranscriptionSubmissionAcceptedWithoutVoiceNote();
     }
 
     final voiceNoteResponse = await _dio.get(
       '/api/v1/voice-notes/$voiceNoteId',
     );
-    return VoiceNote.fromJson(voiceNoteResponse.data as Map<String, dynamic>);
+    return TranscriptionSubmissionVoiceNote(
+      VoiceNote.fromJson(voiceNoteResponse.data as Map<String, dynamic>),
+    );
   }
 
   Future<void> _pushChunk(
@@ -609,11 +650,18 @@ final transcriptionServiceProvider = Provider<TranscriptionService>((ref) {
 
 /// Notifier for managing transcription state.
 class TranscriptionNotifier extends Notifier<TranscriptionState> {
+  _ForegroundTranscriptionAttempt? _foregroundAttempt;
+
   @override
   TranscriptionState build() => const TranscriptionIdle();
 
   /// Transcribe an audio file.
   Future<void> transcribe(String filePath, {String? language}) async {
+    _foregroundAttempt = null;
+    await _transcribe(filePath, language: language);
+  }
+
+  Future<void> _transcribe(String filePath, {String? language}) async {
     if (kDebugMode) {
       debugPrint(
         '[TRANSCRIPTION] transcribe() called with filePath: $filePath',
@@ -633,6 +681,9 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
     final queuedUpload = queuedUploadId == null
         ? null
         : await db.getUploadById(queuedUploadId);
+    final foregroundAttempt = queuedUpload == null
+        ? _ensureForegroundAttempt(filePath, language: language)
+        : null;
 
     // Check for API key first
     final storage = ref.read(secureStorageProvider);
@@ -645,6 +696,15 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
         await db.markAsPending(queuedUploadId);
       }
 
+      _handleForegroundFailure(
+        foregroundAttempt,
+        const UploadFailureClassification(
+          message:
+              'No API key configured. Please add your API key in Settings.',
+          errorType: TranscriptionErrorType.auth,
+          isRetryable: true,
+        ),
+      );
       state = TranscriptionError(
         'No API key configured. Please add your API key in Settings.',
         errorType: TranscriptionErrorType.auth,
@@ -663,12 +723,13 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
 
       state = const TranscriptionUploading(progress: 0.0);
 
-      final voiceNote = await service.transcribe(
+      final result = await service.transcribe(
         filePath,
         language: language,
-        idempotencyKey: queuedUpload?.idempotencyKey,
+        idempotencyKey:
+            queuedUpload?.idempotencyKey ?? foregroundAttempt!.idempotencyKey,
         recordedAt: queuedUpload == null
-            ? null
+            ? foregroundAttempt!.recordedAt
             : recordedAtForQueuedUpload(queuedUpload),
         onProgress: (progress) {
           // Only update if still in uploading state
@@ -691,13 +752,20 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
         );
       }
 
-      state = TranscriptionSuccess(voiceNote);
+      _foregroundAttempt = null;
+      state = switch (result) {
+        TranscriptionSubmissionVoiceNote(:final voiceNote) =>
+          TranscriptionSuccess(voiceNote),
+        TranscriptionSubmissionAcceptedWithoutVoiceNote() =>
+          const TranscriptionVoiceNoteDeleted(),
+      };
     } on DioException catch (e) {
       final classification = classifyUploadFailure(e);
       await _markQueuedUploadFailed(
         queuedUploadId,
         classification: classification,
       );
+      _handleForegroundFailure(foregroundAttempt, classification);
       state = TranscriptionError(
         classification.message,
         errorType: classification.errorType,
@@ -710,6 +778,7 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
         queuedUploadId,
         classification: classification,
       );
+      _handleForegroundFailure(foregroundAttempt, classification);
 
       if (kDebugMode) {
         debugPrint('[TRANSCRIPTION] Caught exception: $e');
@@ -728,13 +797,53 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
     String filePath, {
     String? language,
   }) async {
-    if (kIsWeb || filePath.isEmpty) {
+    if (!ref.read(foregroundTranscriptionsAreQueuedProvider) ||
+        filePath.isEmpty) {
       return null;
     }
 
     return ref
         .read(appDatabaseProvider)
         .ensurePendingUpload(audioPath: filePath, language: language);
+  }
+
+  _ForegroundTranscriptionAttempt _ensureForegroundAttempt(
+    String filePath, {
+    String? language,
+  }) {
+    final existing = _foregroundAttempt;
+    if (existing != null &&
+        existing.filePath == filePath &&
+        existing.language == language) {
+      return existing;
+    }
+
+    final attempt = _ForegroundTranscriptionAttempt(
+      filePath: filePath,
+      language: language,
+      idempotencyKey: _uuid.v4(),
+      recordedAt: DateTime.now().toUtc(),
+    );
+    _foregroundAttempt = attempt;
+    return attempt;
+  }
+
+  void _handleForegroundFailure(
+    _ForegroundTranscriptionAttempt? attempt,
+    UploadFailureClassification classification,
+  ) {
+    if (attempt == null) {
+      return;
+    }
+
+    if (!classification.isRetryable) {
+      _foregroundAttempt = null;
+      return;
+    }
+
+    _foregroundAttempt = classification.requiresFreshIdempotencyKey
+        ? attempt.withFreshIdempotencyKey()
+        : attempt;
   }
 
   Future<void> _markQueuedUploadFailed(
@@ -760,12 +869,14 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
     if (currentState is! TranscriptionError || currentState.filePath == null) {
       return false;
     }
-    await transcribe(currentState.filePath!, language: language);
+    final retryLanguage = language ?? _foregroundAttempt?.language;
+    await _transcribe(currentState.filePath!, language: retryLanguage);
     return true;
   }
 
   /// Reset to idle state.
   void reset() {
+    _foregroundAttempt = null;
     state = const TranscriptionIdle();
   }
 }

@@ -178,12 +178,13 @@ void main() {
         sleep: (duration) async => sleeps.add(duration),
       );
 
-      final voiceNote = await service.transcribe(
+      final result = await service.transcribe(
         audioFile.path,
         language: 'en',
         idempotencyKey: 'stable-key',
         recordedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
       );
+      final voiceNote = (result as TranscriptionSubmissionVoiceNote).voiceNote;
 
       expect(voiceNote.id, 'voice-note-123');
       expect(voiceNote.text, 'chunked protocol complete');
@@ -300,16 +301,38 @@ void main() {
       final dio = Dio()..httpClientAdapter = adapter;
       final service = TranscriptionService(dio);
 
-      final voiceNote = await service.transcribe(
+      final result = await service.transcribe(
         audioFile.path,
         idempotencyKey: 'stable-key',
         recordedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
       );
+      final voiceNote = (result as TranscriptionSubmissionVoiceNote).voiceNote;
 
       expect(voiceNote.id, 'voice-note-123');
       expect(adapter.requests.map((request) => request.path), [
         '/api/v1/transcription-jobs',
         '/api/v1/voice-notes/voice-note-123',
+      ]);
+    },
+  );
+
+  test(
+    'Given opening replays a succeeded job whose voice note was deleted, When transcription runs, Then the client reports accepted server work without fetching a voice note',
+    () async {
+      final audioFile = await createAudioFile('recording.wav', 4);
+      final adapter = _ProtocolAdapter(openJob: _jobJson(status: 'succeeded'));
+      final dio = Dio()..httpClientAdapter = adapter;
+      final service = TranscriptionService(dio);
+
+      final result = await service.transcribe(
+        audioFile.path,
+        idempotencyKey: 'stable-key',
+        recordedAt: DateTime.utc(2026, 4, 21, 18, 29, 55),
+      );
+
+      expect(result, isA<TranscriptionSubmissionAcceptedWithoutVoiceNote>());
+      expect(adapter.requests.map((request) => request.path), [
+        '/api/v1/transcription-jobs',
       ]);
     },
   );

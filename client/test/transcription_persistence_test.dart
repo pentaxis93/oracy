@@ -7,7 +7,6 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/db/database.dart';
-import 'package:oracy/models/voice_note.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/services/upload_retry_policy.dart';
@@ -18,11 +17,11 @@ class _FailingTranscriptionService extends TranscriptionService {
   _FailingTranscriptionService() : super(Dio());
 
   @override
-  Future<VoiceNote> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
-    DateTime? recordedAt,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     throw DioException(
@@ -36,14 +35,93 @@ class _SuccessfulTranscriptionService extends TranscriptionService {
   _SuccessfulTranscriptionService() : super(Dio());
 
   @override
-  Future<VoiceNote> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
-    DateTime? recordedAt,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
-    return createMockVoiceNote();
+    return TranscriptionSubmissionVoiceNote(createMockVoiceNote());
+  }
+}
+
+class _RetryableForegroundTranscriptionService extends TranscriptionService {
+  _RetryableForegroundTranscriptionService() : super(Dio());
+
+  int callCount = 0;
+  final List<String> idempotencyKeys = [];
+  final List<DateTime> recordedAts = [];
+
+  @override
+  Future<TranscriptionSubmissionResult> transcribe(
+    String filePath, {
+    String? language,
+    required String idempotencyKey,
+    required DateTime recordedAt,
+    void Function(double progress)? onProgress,
+  }) async {
+    callCount++;
+    idempotencyKeys.add(idempotencyKey);
+    recordedAts.add(recordedAt);
+
+    if (callCount == 1) {
+      throw DioException(
+        requestOptions: RequestOptions(path: '/api/v1/transcription-jobs'),
+        type: DioExceptionType.receiveTimeout,
+      );
+    }
+
+    return TranscriptionSubmissionVoiceNote(createMockVoiceNote());
+  }
+}
+
+class _FreshAttemptForegroundTranscriptionService extends TranscriptionService {
+  _FreshAttemptForegroundTranscriptionService() : super(Dio());
+
+  int callCount = 0;
+  final List<String> idempotencyKeys = [];
+  final List<DateTime> recordedAts = [];
+
+  @override
+  Future<TranscriptionSubmissionResult> transcribe(
+    String filePath, {
+    String? language,
+    required String idempotencyKey,
+    required DateTime recordedAt,
+    void Function(double progress)? onProgress,
+  }) async {
+    callCount++;
+    idempotencyKeys.add(idempotencyKey);
+    recordedAts.add(recordedAt);
+
+    if (callCount == 1) {
+      throw const TranscriptionClientException(
+        UploadFailureClassification(
+          message: 'Backend retries were exhausted.',
+          errorType: TranscriptionErrorType.transcription,
+          isRetryable: true,
+          requiresFreshIdempotencyKey: true,
+        ),
+      );
+    }
+
+    return TranscriptionSubmissionVoiceNote(createMockVoiceNote());
+  }
+}
+
+class _DeletedReplayTranscriptionService extends TranscriptionService {
+  _DeletedReplayTranscriptionService() : super(Dio());
+
+  @override
+  Future<TranscriptionSubmissionResult> transcribe(
+    String filePath, {
+    String? language,
+    required String idempotencyKey,
+    required DateTime recordedAt,
+    void Function(double progress)? onProgress,
+  }) async {
+    return const TranscriptionSubmissionAcceptedWithoutVoiceNote();
   }
 }
 
@@ -57,11 +135,11 @@ class _ApiKeySensitiveTranscriptionService extends TranscriptionService {
   }) : super(Dio());
 
   @override
-  Future<VoiceNote> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
-    DateTime? recordedAt,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     final apiKey = await storage.getApiKey();
@@ -77,7 +155,7 @@ class _ApiKeySensitiveTranscriptionService extends TranscriptionService {
       );
     }
 
-    return createMockVoiceNote();
+    return TranscriptionSubmissionVoiceNote(createMockVoiceNote());
   }
 }
 
@@ -89,11 +167,11 @@ class _StatusCodeFailingTranscriptionService extends TranscriptionService {
     : super(Dio());
 
   @override
-  Future<VoiceNote> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
-    DateTime? recordedAt,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     throw DioException(
@@ -119,11 +197,11 @@ class _PlainTextResponseFailingTranscriptionService
   }) : super(Dio());
 
   @override
-  Future<VoiceNote> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
-    DateTime? recordedAt,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     throw DioException(
@@ -142,11 +220,11 @@ class _TimeoutTranscriptionService extends TranscriptionService {
   _TimeoutTranscriptionService() : super(Dio());
 
   @override
-  Future<VoiceNote> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
-    DateTime? recordedAt,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     throw DioException(
@@ -160,11 +238,11 @@ class _ThrowingTranscriptionService extends TranscriptionService {
   _ThrowingTranscriptionService() : super(Dio());
 
   @override
-  Future<VoiceNote> transcribe(
+  Future<TranscriptionSubmissionResult> transcribe(
     String filePath, {
     String? language,
-    String? idempotencyKey,
-    DateTime? recordedAt,
+    required String idempotencyKey,
+    required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     throw StateError('local file read failed');
@@ -425,6 +503,118 @@ void main() {
       expect(await db.getUploadByAudioPath(audioFile.path), isNull);
       expect(await db.getPendingUploads(), isEmpty);
       expect(await audioFile.exists(), isFalse);
+    },
+  );
+
+  test(
+    'Given foreground transcription is not queued, When a retryable failure is retried, Then the retry reuses the same idempotency key and recorded timestamp',
+    () async {
+      final audioFile = await createAudioFile('web_retry.wav');
+      final service = _RetryableForegroundTranscriptionService();
+      container = ProviderContainer(
+        overrides: [
+          secureStorageProvider.overrideWith(
+            (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
+          ),
+          appDatabaseProvider.overrideWithValue(db),
+          transcriptionServiceProvider.overrideWith((_) => service),
+          foregroundTranscriptionsAreQueuedProvider.overrideWithValue(false),
+        ],
+      );
+
+      await container
+          .read(transcriptionProvider.notifier)
+          .transcribe(audioFile.path, language: 'en');
+
+      expect(container.read(transcriptionProvider), isA<TranscriptionError>());
+      expect(service.idempotencyKeys, hasLength(1));
+      expect(await db.getUploadByAudioPath(audioFile.path), isNull);
+
+      final retried = await container
+          .read(transcriptionProvider.notifier)
+          .retry();
+
+      expect(retried, isTrue);
+      expect(
+        container.read(transcriptionProvider),
+        isA<TranscriptionSuccess>(),
+      );
+      expect(service.idempotencyKeys, hasLength(2));
+      expect(service.idempotencyKeys[1], service.idempotencyKeys[0]);
+      expect(service.recordedAts[1], service.recordedAts[0]);
+    },
+  );
+
+  test(
+    'Given foreground terminal job failure asks for a fresh attempt, When the user retries, Then only the idempotency key changes',
+    () async {
+      final audioFile = await createAudioFile('fresh_foreground.wav');
+      final service = _FreshAttemptForegroundTranscriptionService();
+      container = ProviderContainer(
+        overrides: [
+          secureStorageProvider.overrideWith(
+            (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
+          ),
+          appDatabaseProvider.overrideWithValue(db),
+          transcriptionServiceProvider.overrideWith((_) => service),
+          foregroundTranscriptionsAreQueuedProvider.overrideWithValue(false),
+        ],
+      );
+
+      await container
+          .read(transcriptionProvider.notifier)
+          .transcribe(audioFile.path);
+
+      expect(container.read(transcriptionProvider), isA<TranscriptionError>());
+
+      final retried = await container
+          .read(transcriptionProvider.notifier)
+          .retry();
+
+      expect(retried, isTrue);
+      expect(
+        container.read(transcriptionProvider),
+        isA<TranscriptionSuccess>(),
+      );
+      expect(service.idempotencyKeys, hasLength(2));
+      expect(service.idempotencyKeys[1], isNot(service.idempotencyKeys[0]));
+      expect(service.recordedAts[1], service.recordedAts[0]);
+    },
+  );
+
+  test(
+    'Given foreground replay accepted server work whose voice note was deleted, When the user dismisses it, Then transcription returns to idle and cannot retry the old attempt',
+    () async {
+      final audioFile = await createAudioFile('deleted_replay.wav');
+      container = ProviderContainer(
+        overrides: [
+          secureStorageProvider.overrideWith(
+            (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
+          ),
+          appDatabaseProvider.overrideWithValue(db),
+          transcriptionServiceProvider.overrideWith(
+            (_) => _DeletedReplayTranscriptionService(),
+          ),
+          foregroundTranscriptionsAreQueuedProvider.overrideWithValue(false),
+        ],
+      );
+
+      await container
+          .read(transcriptionProvider.notifier)
+          .transcribe(audioFile.path);
+
+      expect(
+        container.read(transcriptionProvider),
+        isA<TranscriptionVoiceNoteDeleted>(),
+      );
+
+      container.read(transcriptionProvider.notifier).reset();
+
+      expect(container.read(transcriptionProvider), isA<TranscriptionIdle>());
+      expect(
+        await container.read(transcriptionProvider.notifier).retry(),
+        isFalse,
+      );
     },
   );
 

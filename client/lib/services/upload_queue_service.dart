@@ -129,7 +129,7 @@ class UploadQueueService {
       await _transcriptionService.transcribe(
         upload.audioPath,
         language: upload.language,
-        idempotencyKey: upload.idempotencyKey,
+        idempotencyKey: upload.idempotencyKey!,
         recordedAt: recordedAtForQueuedUpload(upload),
       );
 
