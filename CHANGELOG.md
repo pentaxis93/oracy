@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Migrate the Flutter client's history/search read side to the v0.1.0
+  voice-note collection contract, including `{items, next_cursor}` parsing,
+  cursor pagination, voice-note resource modeling, and voice-note history UI
+  copy.
+- Preserve backend relevance order when rendering Flutter history search
+  results while keeping date grouping for normal history browsing.
+- Fix Flutter history parsing and rendering for voice notes whose `language`
+  field is null.
 - Add a repo-defined backend CI-parity gate for contributor pre-review checks.
 - Fix semantic and hybrid voice-note search over large filtered candidate sets
   so embedding lookup no longer fails on SQLite host-parameter limits.
