@@ -22,6 +22,16 @@ fn quadlet_template_mounts_host_bound_state_through_volume_template() {
 }
 
 #[test]
+fn quadlet_template_privately_relabels_selinux_visible_mounts() {
+    let template = std::fs::read_to_string("../deploy/quadlet/oracy.container.in")
+        .expect("read container Quadlet template");
+
+    assert!(template.contains("Volume=@ORACY_CONFIG_PATH@:/etc/oracy/oracy.toml:ro,Z"));
+    assert!(template.contains("Volume=oracy-data.volume:/var/lib/oracy:rw,Z"));
+    assert!(!template.contains("SecurityLabelDisable=true"));
+}
+
+#[test]
 fn quadlet_template_grants_podman_a_full_thirty_second_stop_window() {
     let template = std::fs::read_to_string("../deploy/quadlet/oracy.container.in")
         .expect("read container Quadlet template");

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix the backend Quadlet template's SELinux handling so dedicated
+  config and state mounts work under default confined Podman on
+  SELinux-enforcing hosts.
 - Add backend container and Quadlet deployment templates, including
   bind-backed persistence, example configuration, loopback-default operator
   metrics publishing, and graceful SIGTERM shutdown.
