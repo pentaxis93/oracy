@@ -130,6 +130,7 @@ class UploadQueueService {
         upload.audioPath,
         language: upload.language,
         idempotencyKey: upload.idempotencyKey,
+        recordedAt: recordedAtForQueuedUpload(upload),
       );
 
       await finalizeSuccessfulUpload(

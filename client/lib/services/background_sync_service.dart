@@ -158,6 +158,7 @@ Future<void> _processUpload(
       upload.audioPath,
       language: upload.language,
       idempotencyKey: upload.idempotencyKey,
+      recordedAt: recordedAtForQueuedUpload(upload),
     );
 
     debugPrint('Background sync: Upload successful');

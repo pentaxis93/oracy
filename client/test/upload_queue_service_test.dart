@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:oracy/db/database.dart';
+import 'package:oracy/models/voice_note.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/services/upload_queue_service.dart';
@@ -50,15 +51,16 @@ class _CountingTranscriptionService extends TranscriptionService {
   final List<String?> idempotencyKeys = [];
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     callCount++;
     idempotencyKeys.add(idempotencyKey);
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 
@@ -69,10 +71,11 @@ class _RetryingTranscriptionService extends TranscriptionService {
   final List<String?> idempotencyKeys = [];
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     callCount++;
@@ -80,12 +83,12 @@ class _RetryingTranscriptionService extends TranscriptionService {
 
     if (callCount == 1) {
       throw DioException(
-        requestOptions: RequestOptions(path: '/api/v1/transcribe'),
+        requestOptions: RequestOptions(path: '/api/v1/transcription-jobs'),
         type: DioExceptionType.connectionError,
       );
     }
 
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 

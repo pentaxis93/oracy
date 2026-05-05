@@ -1,9 +1,14 @@
+import 'dart:async';
+
+import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/db/database.dart';
+import 'package:oracy/models/voice_note.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/upload_retry_policy.dart';
+import 'package:uuid/uuid.dart';
 
 // Conditional imports for platform-specific file handling
 import 'transcription_service_stub.dart'
@@ -11,46 +16,64 @@ import 'transcription_service_stub.dart'
     if (dart.library.html) 'transcription_service_web.dart'
     as platform;
 
-/// Response from the transcription API.
-class TranscriptResponse {
-  final String id;
-  final String transcript;
-  final double audioDurationSeconds;
-  final String? audioFormat;
-  final int? audioSizeBytes;
-  final String? transcriptLanguage;
-  final String? whisperModel;
-  final int? processingTimeMs;
-  final int costCents;
-  final DateTime createdAt;
+const int maxTranscriptionChunkBytes = 26214400;
+const int maxTranscriptionChunkCount = 256;
+const Duration defaultTranscriptionPollInterval = Duration(seconds: 5);
 
-  const TranscriptResponse({
+final _uuid = const Uuid();
+
+typedef TranscriptionSleep = Future<void> Function(Duration duration);
+typedef TranscriptionNow = DateTime Function();
+
+Future<void> _defaultSleep(Duration duration) => Future.delayed(duration);
+
+class TranscriptionClientException implements Exception {
+  final UploadFailureClassification classification;
+
+  const TranscriptionClientException(this.classification);
+
+  @override
+  String toString() => classification.message;
+}
+
+class TranscriptionJob {
+  final String id;
+  final String status;
+  final int chunkCount;
+  final int chunksReceived;
+  final DateTime? nextAttemptAt;
+  final String? failureMessage;
+  final bool? retryableByClient;
+  final String? voiceNoteId;
+
+  const TranscriptionJob({
     required this.id,
-    required this.transcript,
-    required this.audioDurationSeconds,
-    this.audioFormat,
-    this.audioSizeBytes,
-    this.transcriptLanguage,
-    this.whisperModel,
-    this.processingTimeMs,
-    required this.costCents,
-    required this.createdAt,
+    required this.status,
+    required this.chunkCount,
+    required this.chunksReceived,
+    this.nextAttemptAt,
+    this.failureMessage,
+    this.retryableByClient,
+    this.voiceNoteId,
   });
 
-  factory TranscriptResponse.fromJson(Map<String, dynamic> json) {
-    return TranscriptResponse(
+  factory TranscriptionJob.fromJson(Map<String, dynamic> json) {
+    final nextAttemptAtValue = json['next_attempt_at'];
+    return TranscriptionJob(
       id: json['id'] as String,
-      transcript: json['transcript'] as String,
-      audioDurationSeconds: (json['audio_duration_seconds'] as num).toDouble(),
-      audioFormat: json['audio_format'] as String?,
-      audioSizeBytes: json['audio_size_bytes'] as int?,
-      transcriptLanguage: json['transcript_language'] as String?,
-      whisperModel: json['whisper_model'] as String?,
-      processingTimeMs: json['processing_time_ms'] as int?,
-      costCents: json['cost_cents'] as int,
-      createdAt: DateTime.parse(json['created_at'] as String),
+      status: json['status'] as String,
+      chunkCount: json['chunk_count'] as int,
+      chunksReceived: json['chunks_received'] as int,
+      nextAttemptAt: nextAttemptAtValue is String
+          ? DateTime.parse(nextAttemptAtValue)
+          : null,
+      failureMessage: json['failure_message'] as String?,
+      retryableByClient: json['retryable_by_client'] as bool?,
+      voiceNoteId: json['voice_note_id'] as String?,
     );
   }
+
+  bool get isTerminal => status == 'succeeded' || status == 'failed';
 }
 
 /// State for transcription operations.
@@ -72,8 +95,8 @@ class TranscriptionProcessing extends TranscriptionState {
 }
 
 class TranscriptionSuccess extends TranscriptionState {
-  final TranscriptResponse transcript;
-  const TranscriptionSuccess(this.transcript);
+  final VoiceNote voiceNote;
+  const TranscriptionSuccess(this.voiceNote);
 }
 
 /// Types of transcription errors for better UI differentiation.
@@ -101,11 +124,13 @@ class UploadFailureClassification {
   final String message;
   final TranscriptionErrorType errorType;
   final bool isRetryable;
+  final bool requiresFreshIdempotencyKey;
 
   const UploadFailureClassification({
     required this.message,
     required this.errorType,
     required this.isRetryable,
+    this.requiresFreshIdempotencyKey = false,
   });
 }
 
@@ -150,6 +175,10 @@ String? _extractResponseDetail(Object? responseData) {
 }
 
 UploadFailureClassification classifyUploadFailure(Object error) {
+  if (error is TranscriptionClientException) {
+    return error.classification;
+  }
+
   if (error is! DioException) {
     return UploadFailureClassification(
       message: 'Transcription failed: $error',
@@ -171,7 +200,7 @@ UploadFailureClassification classifyUploadFailure(Object error) {
 
   if (statusCode == 413) {
     return const UploadFailureClassification(
-      message: 'Audio file is too large (max 25MB).',
+      message: 'Audio chunk is too large (max 25 MiB).',
       errorType: TranscriptionErrorType.fileValidation,
       isRetryable: false,
     );
@@ -179,8 +208,7 @@ UploadFailureClassification classifyUploadFailure(Object error) {
 
   if (statusCode == 415) {
     return const UploadFailureClassification(
-      message:
-          'Unsupported audio format. Supported: mp3, mp4, m4a, wav, webm, opus.',
+      message: 'Unsupported audio format. Supported: m4a, mp3, wav, webm.',
       errorType: TranscriptionErrorType.fileValidation,
       isRetryable: false,
     );
@@ -249,6 +277,10 @@ Future<void> recordUploadFailure(
   UploadFailureClassification classification,
 ) async {
   if (classification.isRetryable) {
+    if (classification.requiresFreshIdempotencyKey) {
+      await db.replaceUploadIdempotencyKey(uploadId);
+    }
+
     final upload = await db.getUploadById(uploadId);
     if (upload != null && upload.retryCount + 1 >= maxRetryAttempts) {
       await db.incrementRetryCount(
@@ -312,19 +344,29 @@ Future<void> retryPendingUploadCleanup(
   }
 }
 
-/// Service for uploading audio and getting transcriptions.
+/// Service for uploading audio and getting voice notes.
 class TranscriptionService {
   final Dio _dio;
+  final Duration pollInterval;
+  final TranscriptionSleep _sleep;
+  final TranscriptionNow _now;
 
-  TranscriptionService(this._dio);
+  TranscriptionService(
+    this._dio, {
+    this.pollInterval = defaultTranscriptionPollInterval,
+    TranscriptionSleep sleep = _defaultSleep,
+    TranscriptionNow? now,
+  }) : _sleep = sleep,
+       _now = now ?? DateTime.now;
 
-  /// Upload an audio file for transcription.
+  /// Upload an audio file through the v0.1.0 transcription-job protocol.
   /// On native platforms, filePath is a file system path.
   /// On web, filePath is a blob URL (blob:https://...).
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     if (kDebugMode) {
@@ -344,34 +386,135 @@ class TranscriptionService {
       );
     }
 
-    final formFields = <String, dynamic>{
-      'file': multipartFileFromFileData(fileData),
-    };
-    if (language != null) {
-      formFields['language'] = language;
+    final audioFormat = audioFormatFromFilename(fileData.filename);
+    if (audioFormat == null) {
+      throw const TranscriptionClientException(
+        UploadFailureClassification(
+          message: 'Unsupported audio format. Supported: m4a, mp3, wav, webm.',
+          errorType: TranscriptionErrorType.fileValidation,
+          isRetryable: false,
+        ),
+      );
     }
 
-    final formData = FormData.fromMap(formFields);
+    final chunks = chunkAudio(fileData.bytes);
+    final stableIdempotencyKey = idempotencyKey ?? _uuid.v4();
+    final openBody = <String, dynamic>{
+      'recorded_at': (recordedAt ?? _now()).toUtc().toIso8601String(),
+      'chunk_count': chunks.length,
+      'audio_format': audioFormat,
+    };
+    if (language != null) {
+      openBody['language'] = language;
+    }
+    final openResponse = await _dio.post(
+      '/api/v1/transcription-jobs',
+      data: openBody,
+      options: Options(
+        contentType: Headers.jsonContentType,
+        headers: {'Idempotency-Key': stableIdempotencyKey},
+      ),
+    );
 
-    final response = await _dio.post(
-      '/api/v1/transcribe',
+    var job = TranscriptionJob.fromJson(
+      openResponse.data as Map<String, dynamic>,
+    );
+
+    if (job.status == 'accepting_chunks') {
+      for (var index = 0; index < chunks.length; index++) {
+        final chunk = chunks[index];
+        await _pushChunk(job.id, index, chunk, fileData);
+        onProgress?.call((index + 1) / chunks.length);
+      }
+
+      final finalizeResponse = await _dio.post(
+        '/api/v1/transcription-jobs/${job.id}/finalize',
+        options: Options(receiveTimeout: const Duration(minutes: 5)),
+      );
+      job = TranscriptionJob.fromJson(
+        finalizeResponse.data as Map<String, dynamic>,
+      );
+    } else {
+      onProgress?.call(1.0);
+    }
+
+    final succeeded = await _pollUntilTerminal(job);
+    final voiceNoteId = succeeded.voiceNoteId;
+    if (voiceNoteId == null || voiceNoteId.isEmpty) {
+      throw const TranscriptionClientException(
+        UploadFailureClassification(
+          message: 'Transcription succeeded but no voice note was returned.',
+          errorType: TranscriptionErrorType.transcription,
+          isRetryable: false,
+        ),
+      );
+    }
+
+    final voiceNoteResponse = await _dio.get(
+      '/api/v1/voice-notes/$voiceNoteId',
+    );
+    return VoiceNote.fromJson(voiceNoteResponse.data as Map<String, dynamic>);
+  }
+
+  Future<void> _pushChunk(
+    String jobId,
+    int chunkIndex,
+    Uint8List chunk,
+    FileData fileData,
+  ) async {
+    final formData = FormData.fromMap({
+      'chunk_index': chunkIndex.toString(),
+      'chunk_sha256': sha256Hex(chunk),
+      'file': MultipartFile.fromBytes(
+        chunk,
+        filename:
+            'chunk-$chunkIndex.${audioFormatFromFilename(fileData.filename) ?? 'bin'}',
+        contentType: fileData.contentType,
+      ),
+    });
+
+    await _dio.post(
+      '/api/v1/transcription-jobs/$jobId/chunks',
       data: formData,
       options: Options(
         contentType: 'multipart/form-data',
-        receiveTimeout: const Duration(minutes: 5),
         sendTimeout: const Duration(minutes: 2),
-        headers: idempotencyKey == null
-            ? null
-            : {'Idempotency-Key': idempotencyKey},
       ),
-      onSendProgress: (sent, total) {
-        if (total > 0 && onProgress != null) {
-          onProgress(sent / total);
-        }
-      },
     );
+  }
 
-    return TranscriptResponse.fromJson(response.data as Map<String, dynamic>);
+  Future<TranscriptionJob> _pollUntilTerminal(TranscriptionJob job) async {
+    var current = job;
+    while (!current.isTerminal) {
+      await _sleep(_pollDelay(current));
+      final response = await _dio.get('/api/v1/transcription-jobs/${job.id}');
+      current = TranscriptionJob.fromJson(
+        response.data as Map<String, dynamic>,
+      );
+    }
+
+    if (current.status == 'succeeded') {
+      return current;
+    }
+
+    final retryable = current.retryableByClient ?? false;
+    throw TranscriptionClientException(
+      UploadFailureClassification(
+        message: current.failureMessage ?? 'Transcription failed.',
+        errorType: TranscriptionErrorType.transcription,
+        isRetryable: retryable,
+        requiresFreshIdempotencyKey: retryable,
+      ),
+    );
+  }
+
+  Duration _pollDelay(TranscriptionJob job) {
+    if (job.status != 'retry_waiting' || job.nextAttemptAt == null) {
+      return pollInterval;
+    }
+
+    final delay = job.nextAttemptAt!.difference(_now().toUtc());
+    return delay.isNegative ? Duration.zero : delay;
   }
 }
 
@@ -394,6 +537,68 @@ MultipartFile multipartFileFromFileData(FileData fileData) {
     filename: fileData.filename,
     contentType: fileData.contentType,
   );
+}
+
+String? audioFormatFromFilename(String filename) {
+  final extension = filename.split('.').last.toLowerCase();
+  return switch (extension) {
+    'm4a' || 'mp3' || 'wav' || 'webm' => extension,
+    _ => null,
+  };
+}
+
+List<Uint8List> chunkAudio(Uint8List bytes) {
+  if (bytes.isEmpty) {
+    throw const TranscriptionClientException(
+      UploadFailureClassification(
+        message: 'Audio file is empty.',
+        errorType: TranscriptionErrorType.fileValidation,
+        isRetryable: false,
+      ),
+    );
+  }
+
+  final chunkCount = (bytes.length / maxTranscriptionChunkBytes).ceil();
+  if (chunkCount > maxTranscriptionChunkCount) {
+    throw const TranscriptionClientException(
+      UploadFailureClassification(
+        message: 'Audio file is too large for v0.1.0 chunked submission.',
+        errorType: TranscriptionErrorType.fileValidation,
+        isRetryable: false,
+      ),
+    );
+  }
+
+  return [
+    for (
+      var offset = 0;
+      offset < bytes.length;
+      offset += maxTranscriptionChunkBytes
+    )
+      Uint8List.sublistView(
+        bytes,
+        offset,
+        (offset + maxTranscriptionChunkBytes).clamp(0, bytes.length),
+      ),
+  ];
+}
+
+String sha256Hex(Uint8List bytes) => sha256.convert(bytes).toString();
+
+DateTime recordedAtForQueuedUpload(PendingUpload upload) {
+  final timestamp = _recordingTimestampFromPath(upload.audioPath);
+  if (timestamp != null) {
+    return DateTime.fromMillisecondsSinceEpoch(timestamp, isUtc: true);
+  }
+  return upload.createdAt.toUtc();
+}
+
+int? _recordingTimestampFromPath(String audioPath) {
+  final match = RegExp(r'oracy_recording_(\d+)\.').firstMatch(audioPath);
+  if (match == null) {
+    return null;
+  }
+  return int.tryParse(match.group(1)!);
 }
 
 /// Provider for transcription service.
@@ -458,10 +663,13 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
 
       state = const TranscriptionUploading(progress: 0.0);
 
-      final transcript = await service.transcribe(
+      final voiceNote = await service.transcribe(
         filePath,
         language: language,
         idempotencyKey: queuedUpload?.idempotencyKey,
+        recordedAt: queuedUpload == null
+            ? null
+            : recordedAtForQueuedUpload(queuedUpload),
         onProgress: (progress) {
           // Only update if still in uploading state
           if (state is TranscriptionUploading) {
@@ -483,7 +691,7 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
         );
       }
 
-      state = TranscriptionSuccess(transcript);
+      state = TranscriptionSuccess(voiceNote);
     } on DioException catch (e) {
       final classification = classifyUploadFailure(e);
       await _markQueuedUploadFailed(

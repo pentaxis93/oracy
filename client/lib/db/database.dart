@@ -215,6 +215,16 @@ class AppDatabase extends _$AppDatabase {
     );
   }
 
+  /// Replace the idempotency key before starting an intentional fresh attempt.
+  Future<int> replaceUploadIdempotencyKey(int id) {
+    return (update(pendingUploads)..where((t) => t.id.equals(id))).write(
+      PendingUploadsCompanion(
+        idempotencyKey: Value(_uuid.v4()),
+        updatedAt: Value(DateTime.now()),
+      ),
+    );
+  }
+
   /// Mark upload as permanently failed and excluded from automatic retries.
   Future<int> markAsTerminalFailure(int id, {String? errorMessage}) {
     return (update(pendingUploads)..where((t) => t.id.equals(id))).write(

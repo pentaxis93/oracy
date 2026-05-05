@@ -7,6 +7,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/db/database.dart';
+import 'package:oracy/models/voice_note.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/services/upload_retry_policy.dart';
@@ -17,14 +18,15 @@ class _FailingTranscriptionService extends TranscriptionService {
   _FailingTranscriptionService() : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     throw DioException(
-      requestOptions: RequestOptions(path: '/api/v1/transcribe'),
+      requestOptions: RequestOptions(path: '/api/v1/transcription-jobs'),
       type: DioExceptionType.connectionError,
     );
   }
@@ -34,13 +36,14 @@ class _SuccessfulTranscriptionService extends TranscriptionService {
   _SuccessfulTranscriptionService() : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 
@@ -54,18 +57,19 @@ class _ApiKeySensitiveTranscriptionService extends TranscriptionService {
   }) : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     final apiKey = await storage.getApiKey();
     if (apiKey != validApiKey) {
       throw DioException(
-        requestOptions: RequestOptions(path: '/api/v1/transcribe'),
+        requestOptions: RequestOptions(path: '/api/v1/transcription-jobs'),
         response: Response(
-          requestOptions: RequestOptions(path: '/api/v1/transcribe'),
+          requestOptions: RequestOptions(path: '/api/v1/transcription-jobs'),
           statusCode: 401,
           data: {'detail': 'invalid key'},
         ),
@@ -73,7 +77,7 @@ class _ApiKeySensitiveTranscriptionService extends TranscriptionService {
       );
     }
 
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 
@@ -85,16 +89,17 @@ class _StatusCodeFailingTranscriptionService extends TranscriptionService {
     : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     throw DioException(
-      requestOptions: RequestOptions(path: '/api/v1/transcribe'),
+      requestOptions: RequestOptions(path: '/api/v1/transcription-jobs'),
       response: Response(
-        requestOptions: RequestOptions(path: '/api/v1/transcribe'),
+        requestOptions: RequestOptions(path: '/api/v1/transcription-jobs'),
         statusCode: statusCode,
         data: detail == null ? null : {'detail': detail},
       ),
@@ -114,16 +119,17 @@ class _PlainTextResponseFailingTranscriptionService
   }) : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     throw DioException(
-      requestOptions: RequestOptions(path: '/api/v1/transcribe'),
+      requestOptions: RequestOptions(path: '/api/v1/transcription-jobs'),
       response: Response(
-        requestOptions: RequestOptions(path: '/api/v1/transcribe'),
+        requestOptions: RequestOptions(path: '/api/v1/transcription-jobs'),
         statusCode: statusCode,
         data: responseData,
       ),
@@ -136,14 +142,15 @@ class _TimeoutTranscriptionService extends TranscriptionService {
   _TimeoutTranscriptionService() : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     throw DioException(
-      requestOptions: RequestOptions(path: '/api/v1/transcribe'),
+      requestOptions: RequestOptions(path: '/api/v1/transcription-jobs'),
       type: DioExceptionType.connectionTimeout,
     );
   }
@@ -153,10 +160,11 @@ class _ThrowingTranscriptionService extends TranscriptionService {
   _ThrowingTranscriptionService() : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     throw StateError('local file read failed');
@@ -643,6 +651,45 @@ void main() {
       expect(await db.getPendingUploads(), isEmpty);
       expect(await db.getPendingCount(), 1);
       expect(await db.watchTerminalFailureUploads().first, hasLength(1));
+    },
+  );
+
+  test(
+    'Given a terminal job failure is retryable by the client, When the failure is recorded, Then the queued upload receives a fresh idempotency key',
+    () async {
+      container = ProviderContainer();
+      final audioFile = await createAudioFile('fresh_attempt.wav');
+      final uploadId = await db.ensurePendingUpload(audioPath: audioFile.path);
+      final originalUpload = await db.getUploadById(uploadId);
+
+      await recordUploadFailure(
+        db,
+        uploadId,
+        const UploadFailureClassification(
+          message: 'Backend retries were exhausted.',
+          errorType: TranscriptionErrorType.transcription,
+          isRetryable: true,
+          requiresFreshIdempotencyKey: true,
+        ),
+      );
+
+      final failedUpload = await db.getUploadById(uploadId);
+
+      expect(originalUpload, isNotNull);
+      expect(failedUpload, isNotNull);
+      expect(failedUpload!.status, UploadStatus.failed.index);
+      expect(
+        failedUpload.idempotencyKey,
+        isNot(originalUpload!.idempotencyKey),
+      );
+      expect(
+        failedUpload.idempotencyKey,
+        matches(
+          RegExp(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+          ),
+        ),
+      );
     },
   );
 }

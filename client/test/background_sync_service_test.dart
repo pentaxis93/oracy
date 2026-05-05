@@ -6,6 +6,7 @@ import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:oracy/db/database.dart';
+import 'package:oracy/models/voice_note.dart';
 import 'package:oracy/services/background_sync_service.dart';
 import 'package:oracy/services/recording_recovery_service.dart';
 import 'package:oracy/services/transcription_service.dart';
@@ -16,13 +17,14 @@ class _SuccessfulTranscriptionService extends TranscriptionService {
   _SuccessfulTranscriptionService() : super(Dio());
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 
@@ -32,14 +34,15 @@ class _CountingTranscriptionService extends TranscriptionService {
   int callCount = 0;
 
   @override
-  Future<TranscriptResponse> transcribe(
+  Future<VoiceNote> transcribe(
     String filePath, {
     String? language,
     String? idempotencyKey,
+    DateTime? recordedAt,
     void Function(double progress)? onProgress,
   }) async {
     callCount++;
-    return createMockTranscript();
+    return createMockVoiceNote();
   }
 }
 

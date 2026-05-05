@@ -173,7 +173,7 @@ class MockTranscriptionNotifier extends TranscriptionNotifier {
     await Future.delayed(const Duration(milliseconds: 10));
     state = const TranscriptionProcessing();
     await Future.delayed(const Duration(milliseconds: 10));
-    state = TranscriptionSuccess(createMockTranscript());
+    state = TranscriptionSuccess(createMockVoiceNote());
   }
 
   @override
@@ -260,41 +260,6 @@ List<VoiceNote> createMockVoiceNoteList({int count = 5}) {
     (index) => createMockVoiceNote(
       id: 'mock-id-$index',
       text: 'Mock voice note number ${index + 1}.',
-      createdAt: DateTime.now().subtract(Duration(days: index)),
-    ),
-  );
-}
-
-/// Creates a mock TranscriptResponse for testing.
-TranscriptResponse createMockTranscript({
-  String? id,
-  String? transcript,
-  double? audioDurationSeconds,
-  int? costCents,
-  DateTime? createdAt,
-  String? language,
-}) {
-  return TranscriptResponse(
-    id: id ?? 'mock-id-123',
-    transcript: transcript ?? 'This is a mock transcript for testing purposes.',
-    audioDurationSeconds: audioDurationSeconds ?? 30.0,
-    audioFormat: 'm4a',
-    audioSizeBytes: 50000,
-    transcriptLanguage: language ?? 'en',
-    whisperModel: 'whisper-1',
-    processingTimeMs: 1500,
-    costCents: costCents ?? 1,
-    createdAt: createdAt ?? DateTime.now(),
-  );
-}
-
-/// Creates a list of mock transcripts for testing.
-List<TranscriptResponse> createMockTranscriptList({int count = 5}) {
-  return List.generate(
-    count,
-    (index) => createMockTranscript(
-      id: 'mock-id-$index',
-      transcript: 'Mock transcript number ${index + 1}.',
       createdAt: DateTime.now().subtract(Duration(days: index)),
     ),
   );

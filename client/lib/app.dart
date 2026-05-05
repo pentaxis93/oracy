@@ -109,7 +109,7 @@ class _HomePageState extends ConsumerState<HomePage>
         // Auto-copy to clipboard if enabled
         final autoCopyEnabled = ref.read(autoCopyEnabledProvider);
         if (autoCopyEnabled) {
-          Clipboard.setData(ClipboardData(text: next.transcript.transcript));
+          Clipboard.setData(ClipboardData(text: next.voiceNote.text));
           // Haptic feedback to indicate copy
           HapticFeedback.mediumImpact();
         }
@@ -119,7 +119,7 @@ class _HomePageState extends ConsumerState<HomePage>
           context,
           MaterialPageRoute(
             builder: (_) => TranscriptResultScreen(
-              transcript: next.transcript,
+              voiceNote: next.voiceNote,
               wasAutoCopied: autoCopyEnabled,
             ),
           ),
