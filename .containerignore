@@ -1,0 +1,9 @@
+.git
+.github
+backend/target
+client
+server
+src
+target
+*.swp
+*.tmp

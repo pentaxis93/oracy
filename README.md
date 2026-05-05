@@ -18,6 +18,7 @@ documentation drifts, the spec wins.
 
 - [`backend/`](backend/) — Rust service.
 - [`client/`](client/) — Flutter application.
+- [`deploy/`](deploy/) — backend container and Quadlet deployment templates.
 - [`spec/`](spec/) — API contract and backend requirements.
 
 ## Quality Gates

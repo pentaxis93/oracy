@@ -1,0 +1,8 @@
+[Unit]
+Description=Oracy backend persistent state
+
+[Volume]
+VolumeName=oracy-data
+Device=@ORACY_STATE_DIR@
+Type=none
+Options=bind

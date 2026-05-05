@@ -12,6 +12,7 @@ use oracy_backend::transcription_worker::{
     FfmpegAudioSlicer, FfprobeDurationProbe, OpenAiTranscriptionEngine, WorkerConfig,
     run_worker_loop,
 };
+use tokio::sync::broadcast;
 use tracing::error;
 
 #[tokio::main]
@@ -81,9 +82,16 @@ async fn serve_public_and_operator(
     operator_listen_addr: SocketAddr,
     operator_app: axum::Router,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let (shutdown_sender, _) = broadcast::channel(1);
+    tokio::spawn(wait_for_shutdown_signal(shutdown_sender.clone()));
+
     tokio::try_join!(
-        serve(listen_addr, app),
-        serve(operator_listen_addr, operator_app),
+        serve(listen_addr, app, shutdown_sender.subscribe()),
+        serve(
+            operator_listen_addr,
+            operator_app,
+            shutdown_sender.subscribe()
+        ),
     )?;
     Ok(())
 }
@@ -91,10 +99,27 @@ async fn serve_public_and_operator(
 async fn serve(
     listen_addr: SocketAddr,
     app: axum::Router,
+    mut shutdown: broadcast::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown.recv().await;
+        })
+        .await?;
     Ok(())
+}
+
+async fn wait_for_shutdown_signal(shutdown: broadcast::Sender<()>) {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+
+    let _ = shutdown.send(());
 }
 
 fn init_tracing() {
