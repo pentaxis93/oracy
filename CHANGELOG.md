@@ -6,6 +6,8 @@
   voice-note collection contract, including `{items, next_cursor}` parsing,
   cursor pagination, voice-note resource modeling, and voice-note history UI
   copy.
+- Preserve backend relevance order when rendering Flutter history search
+  results while keeping date grouping for normal history browsing.
 - Fix Flutter history parsing and rendering for voice notes whose `language`
   field is null.
 - Add a repo-defined backend CI-parity gate for contributor pre-review checks.

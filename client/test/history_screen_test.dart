@@ -126,6 +126,100 @@ void main() {
   );
 
   testWidgets(
+    'Given search results span dates, When history renders, Then response order is preserved',
+    (tester) async {
+      final service = _ControlledHistoryService();
+      final now = DateTime.now();
+      final todayStart = DateTime(now.year, now.month, now.day);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [historyServiceProvider.overrideWithValue(service)],
+          child: const MaterialApp(home: HistoryScreen()),
+        ),
+      );
+      await tester.pump();
+
+      service.requests.single.complete([]);
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), 'needle');
+      await tester.pump(const Duration(milliseconds: 350));
+
+      service.requests.last.complete([
+        createMockVoiceNote(
+          id: 'older-relevant',
+          text: 'Older relevant hit',
+          createdAt: now.subtract(const Duration(days: 3)),
+        ),
+        createMockVoiceNote(
+          id: 'newer-less-relevant',
+          text: 'Newer less relevant hit',
+          createdAt: todayStart.add(const Duration(hours: 12)),
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Today'), findsNothing);
+      expect(
+        tester.getTopLeft(find.textContaining('Older relevant hit')).dy,
+        lessThan(
+          tester.getTopLeft(find.textContaining('Newer less relevant hit')).dy,
+        ),
+      );
+    },
+  );
+
+  testWidgets(
+    'Given browse history spans dates, When history renders, Then date grouping is preserved',
+    (tester) async {
+      final now = DateTime.now();
+      final todayStart = DateTime(now.year, now.month, now.day);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            historyOverride(
+              voiceNotes: [
+                createMockVoiceNote(
+                  id: 'today-note',
+                  text: 'Today history note',
+                  createdAt: todayStart.add(const Duration(hours: 12)),
+                ),
+                createMockVoiceNote(
+                  id: 'yesterday-note',
+                  text: 'Yesterday history note',
+                  createdAt: todayStart
+                      .subtract(const Duration(days: 1))
+                      .add(const Duration(hours: 12)),
+                ),
+              ],
+            ),
+          ],
+          child: const MaterialApp(home: HistoryScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 20));
+
+      expect(find.text('Today'), findsOneWidget);
+      expect(find.text('Yesterday'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('Today')).dy,
+        lessThan(
+          tester.getTopLeft(find.textContaining('Today history note')).dy,
+        ),
+      );
+      expect(
+        tester.getTopLeft(find.text('Yesterday')).dy,
+        lessThan(
+          tester.getTopLeft(find.textContaining('Yesterday history note')).dy,
+        ),
+      );
+    },
+  );
+
+  testWidgets(
     'Given more history pages exist but none is loading, When history is rendered, Then the footer spinner is hidden',
     (tester) async {
       await tester.pumpWidget(

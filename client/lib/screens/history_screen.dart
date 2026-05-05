@@ -233,57 +233,49 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
       return const _EmptyView();
     }
 
-    final grouped = _DateGroupedVoiceNotes.fromList(filteredVoiceNotes);
+    final children = <Widget>[];
+    Widget voiceNoteTile(VoiceNote voiceNote) => _VoiceNoteTile(
+      voiceNote: voiceNote,
+      onTap: () => _openVoiceNote(voiceNote),
+      searchQuery: searchQuery,
+    );
+
+    if (state.query.isNotEmpty) {
+      children.addAll(filteredVoiceNotes.map(voiceNoteTile));
+    } else {
+      final grouped = _DateGroupedVoiceNotes.fromList(filteredVoiceNotes);
+
+      if (grouped.today.isNotEmpty) {
+        children.add(_DateHeader(label: 'Today'));
+        children.addAll(grouped.today.map(voiceNoteTile));
+      }
+
+      if (grouped.yesterday.isNotEmpty) {
+        children.add(_DateHeader(label: 'Yesterday'));
+        children.addAll(grouped.yesterday.map(voiceNoteTile));
+      }
+
+      for (final entry in grouped.older.entries) {
+        children.add(_DateHeader(label: entry.key));
+        children.addAll(entry.value.map(voiceNoteTile));
+      }
+    }
+
+    if (state.isLoadingMore) {
+      children.add(
+        const Padding(
+          padding: EdgeInsets.all(16),
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
 
     return RefreshIndicator(
       onRefresh: () => ref.read(voiceNoteHistoryProvider.notifier).refresh(),
       child: ListView(
         controller: _scrollController,
         padding: const EdgeInsets.only(bottom: 16),
-        children: [
-          // Today
-          if (grouped.today.isNotEmpty) ...[
-            _DateHeader(label: 'Today'),
-            ...grouped.today.map(
-              (voiceNote) => _VoiceNoteTile(
-                voiceNote: voiceNote,
-                onTap: () => _openVoiceNote(voiceNote),
-                searchQuery: searchQuery,
-              ),
-            ),
-          ],
-
-          // Yesterday
-          if (grouped.yesterday.isNotEmpty) ...[
-            _DateHeader(label: 'Yesterday'),
-            ...grouped.yesterday.map(
-              (voiceNote) => _VoiceNoteTile(
-                voiceNote: voiceNote,
-                onTap: () => _openVoiceNote(voiceNote),
-                searchQuery: searchQuery,
-              ),
-            ),
-          ],
-
-          // Older (by month)
-          for (final entry in grouped.older.entries) ...[
-            _DateHeader(label: entry.key),
-            ...entry.value.map(
-              (voiceNote) => _VoiceNoteTile(
-                voiceNote: voiceNote,
-                onTap: () => _openVoiceNote(voiceNote),
-                searchQuery: searchQuery,
-              ),
-            ),
-          ],
-
-          // Loading indicator
-          if (state.isLoadingMore)
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Center(child: CircularProgressIndicator()),
-            ),
-        ],
+        children: children,
       ),
     );
   }
