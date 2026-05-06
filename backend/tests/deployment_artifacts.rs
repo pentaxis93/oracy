@@ -140,6 +140,37 @@ fn deployment_readme_constructs_all_fresh_quadlet_references() {
 }
 
 #[test]
+fn deployment_readme_documents_existing_deployment_cutover_structure() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+    let cutover = markdown_section(&readme, "Cut Over From An Existing Deployment");
+
+    assert!(cutover.contains("pre-cutover validation"));
+    assert!(cutover.contains("new-stack standup"));
+    assert!(cutover.contains("swap"));
+    assert!(cutover.contains("decommission"));
+    assert!(cutover.contains("post-cutover validation"));
+    assert!(cutover.contains("rollback"));
+    assert!(cutover.contains("previous deployment"));
+    assert!(cutover.contains("previous ingress"));
+    assert!(cutover.contains("Provision A Fresh Reverse Proxy Substrate"));
+}
+
+#[test]
+fn deployment_readme_classifies_cutover_reversibility_and_data_handling() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+    let cutover = markdown_section(&readme, "Cut Over From An Existing Deployment");
+    let normalized = normalize_whitespace(cutover);
+
+    assert!(cutover.contains("reversible"));
+    assert!(cutover.contains("irreversible-state"));
+    assert!(cutover.contains("preserve"));
+    assert!(cutover.contains("discard"));
+    assert!(cutover.contains("capture for separate migration"));
+    assert!(normalized.contains("migration tooling is out of scope"));
+    assert!(normalized.contains("accepted by the new stack after the swap"));
+}
+
+#[test]
 fn deployment_readme_resolves_shared_network_reference_to_ingress_unit() {
     let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
     let normalized = normalize_whitespace(&readme);
