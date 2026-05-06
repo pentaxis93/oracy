@@ -8,8 +8,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/db/database.dart';
 import 'package:oracy/services/api_client.dart';
+import 'package:oracy/services/preferences_service.dart';
 import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/services/upload_retry_policy.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'helpers/test_utils.dart';
 
@@ -288,10 +290,14 @@ void main() {
   late Directory tempDir;
   late AppDatabase db;
   late ProviderContainer container;
+  late SharedPreferences prefs;
 
   setUp(() async {
     tempDir = await Directory.systemTemp.createTemp('oracy_test_');
     db = AppDatabase(NativeDatabase.memory());
+    SharedPreferences.setMockInitialValues({});
+    prefs = await SharedPreferences.getInstance();
+    await PreferencesService(prefs).markApiKeyBoundToCurrentUrl();
   });
 
   tearDown(() async {
@@ -313,6 +319,7 @@ void main() {
   ProviderContainer createContainer(TranscriptionService service) {
     return ProviderContainer(
       overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
         secureStorageProvider.overrideWith(
           (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
         ),
@@ -329,6 +336,7 @@ void main() {
       final storage = _BlockingHasApiKeyStorage();
       container = ProviderContainer(
         overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
           secureStorageProvider.overrideWith((_) => storage),
           appDatabaseProvider.overrideWithValue(db),
           transcriptionServiceProvider.overrideWith(
@@ -366,6 +374,7 @@ void main() {
       final audioFile = await createAudioFile('missing_key.wav');
       container = ProviderContainer(
         overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
           secureStorageProvider.overrideWith((_) => MockSecureStorage()),
           appDatabaseProvider.overrideWithValue(db),
           transcriptionServiceProvider.overrideWith(
@@ -481,6 +490,7 @@ void main() {
       final audioFile = await createAudioFile('auth_retry.wav');
       container = ProviderContainer(
         overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
           secureStorageProvider.overrideWith((_) => storage),
           appDatabaseProvider.overrideWithValue(db),
           transcriptionServiceProvider.overrideWith(
@@ -533,6 +543,7 @@ void main() {
       final service = _RetryableForegroundTranscriptionService();
       container = ProviderContainer(
         overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
           secureStorageProvider.overrideWith(
             (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
           ),
@@ -577,6 +588,7 @@ void main() {
       final service = _RecordingTimestampTranscriptionService();
       container = ProviderContainer(
         overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
           secureStorageProvider.overrideWith(
             (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
           ),
@@ -597,7 +609,9 @@ void main() {
   test(
     'Given a queued native recording filename contains a capture timestamp, When recordedAt is derived, Then the filename timestamp wins over queue creation time',
     () {
-      container = ProviderContainer();
+      container = ProviderContainer(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      );
       final filenameTimestamp = DateTime.utc(2026, 4, 21, 18, 29, 55);
       final upload = PendingUpload(
         id: 1,
@@ -616,7 +630,9 @@ void main() {
   test(
     'Given a recovered queued native recording filename contains a capture timestamp, When recordedAt is derived, Then the filename timestamp wins over queue creation time',
     () {
-      container = ProviderContainer();
+      container = ProviderContainer(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      );
       final filenameTimestamp = DateTime.utc(2026, 4, 21, 18, 29, 55);
       final upload = PendingUpload(
         id: 1,
@@ -635,7 +651,9 @@ void main() {
   test(
     'Given a queued recording filename has no capture timestamp, When recordedAt is derived, Then queue creation time is used',
     () {
-      container = ProviderContainer();
+      container = ProviderContainer(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      );
       final upload = PendingUpload(
         id: 1,
         audioPath: '${tempDir.path}/oracy_recording_orphaned.wav',
@@ -656,6 +674,7 @@ void main() {
       final service = _FreshAttemptForegroundTranscriptionService();
       container = ProviderContainer(
         overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
           secureStorageProvider.overrideWith(
             (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
           ),
@@ -692,6 +711,7 @@ void main() {
       final audioFile = await createAudioFile('deleted_replay.wav');
       container = ProviderContainer(
         overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
           secureStorageProvider.overrideWith(
             (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
           ),
@@ -864,6 +884,7 @@ void main() {
       final audioFile = await createAudioFile('cleanup_pending.wav');
       container = ProviderContainer(
         overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
           secureStorageProvider.overrideWith(
             (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
           ),
@@ -911,7 +932,9 @@ void main() {
   test(
     'Given a retryable upload has exhausted automatic retries, When another retryable failure is recorded, Then it becomes a terminal failure for manual recovery',
     () async {
-      container = ProviderContainer();
+      container = ProviderContainer(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      );
       final audioFile = await createAudioFile('exhausted_retry.wav');
       final uploadId = await db.ensurePendingUpload(audioPath: audioFile.path);
       await (db.update(
@@ -951,7 +974,9 @@ void main() {
   test(
     'Given a terminal job failure is retryable by the client, When the failure is recorded, Then the queued upload receives a fresh idempotency key',
     () async {
-      container = ProviderContainer();
+      container = ProviderContainer(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      );
       final audioFile = await createAudioFile('fresh_attempt.wav');
       final uploadId = await db.ensurePendingUpload(audioPath: audioFile.path);
       final originalUpload = await db.getUploadById(uploadId);

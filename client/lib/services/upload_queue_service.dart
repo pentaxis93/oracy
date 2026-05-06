@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/db/database.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/background_sync_service.dart';
+import 'package:oracy/services/preferences_service.dart';
 import 'package:oracy/services/recording_recovery_service.dart';
 import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/services/upload_retry_policy.dart';
@@ -239,12 +240,19 @@ final uploadQueueServiceProvider = Provider<UploadQueueService?>((ref) {
 
   final db = ref.watch(appDatabaseProvider);
   final storage = ref.watch(secureStorageProvider);
+  final preferences = ref.watch(preferencesServiceProvider);
   final transcriptionService = ref.watch(transcriptionServiceProvider);
 
   final service = UploadQueueService(
     db: db,
     transcriptionService: transcriptionService,
-    hasApiKey: storage.hasApiKey,
+    hasApiKey: () async {
+      await preferences.reconcileApiCredentialBinding(
+        hasApiKey: storage.hasApiKey,
+        deleteApiKey: storage.deleteApiKey,
+      );
+      return storage.hasApiKey();
+    },
   );
 
   // Start the service

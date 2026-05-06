@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/services/api_client.dart';
 import 'package:oracy/services/preferences_service.dart';
+import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/services/upload_queue_service.dart';
 
 /// Provider for the current API key value (for display purposes).
@@ -27,15 +28,25 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   final _apiKeyController = TextEditingController();
+  final _serverUrlController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
+  final _serverFormKey = GlobalKey<FormState>();
   bool _isLoading = false;
   bool _obscureApiKey = true;
   bool _hasExistingKey = false;
+  bool _hasServerOverride = false;
 
   @override
   void initState() {
     super.initState();
+    _loadServerUrl();
     _loadExistingKey();
+  }
+
+  void _loadServerUrl() {
+    final preferences = ref.read(preferencesServiceProvider);
+    _serverUrlController.text = preferences.apiBaseUrl;
+    _hasServerOverride = preferences.apiBaseUrlOverride != null;
   }
 
   Future<void> _loadExistingKey() async {
@@ -51,6 +62,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   @override
   void dispose() {
     _apiKeyController.dispose();
+    _serverUrlController.dispose();
     super.dispose();
   }
 
@@ -62,6 +74,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     try {
       final storage = ref.read(secureStorageProvider);
       await storage.setApiKey(_apiKeyController.text.trim());
+      await ref.read(preferencesServiceProvider).markApiKeyBoundToCurrentUrl();
 
       // Invalidate the hasApiKey provider to refresh state
       ref.invalidate(hasApiKeyProvider);
@@ -145,6 +158,116 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
         );
       }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  String? _validateServerUrl(String? value) {
+    try {
+      normalizeApiBaseUrl(value ?? '');
+      return null;
+    } on FormatException catch (e) {
+      return e.message;
+    }
+  }
+
+  Future<bool> _confirmServerUrlChange(String nextBaseUrl) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Change Server'),
+            content: Text(
+              'Changing the server URL clears your stored API key. '
+              'You will need to enter an API key for $nextBaseUrl.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Change Server'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  void _refreshApiConfiguration() {
+    ref.invalidate(preferencesServiceProvider);
+    ref.invalidate(apiClientFactoryProvider);
+    ref.invalidate(apiClientProvider);
+    ref.invalidate(transcriptionServiceProvider);
+    ref.invalidate(uploadQueueServiceProvider);
+    ref.invalidate(hasApiKeyProvider);
+    ref.invalidate(apiKeyDisplayProvider);
+  }
+
+  Future<void> _applyServerUrl(String nextBaseUrl) async {
+    final preferences = ref.read(preferencesServiceProvider);
+    final storage = ref.read(secureStorageProvider);
+
+    if (nextBaseUrl == normalizeApiBaseUrl(kDefaultBaseUrl)) {
+      await preferences.clearApiBaseUrlOverride();
+    } else {
+      await preferences.setApiBaseUrlOverride(nextBaseUrl);
+    }
+    await storage.deleteApiKey();
+    await preferences.markApiKeyBoundToCurrentUrl();
+
+    _refreshApiConfiguration();
+
+    if (mounted) {
+      setState(() {
+        _hasExistingKey = false;
+        _hasServerOverride = preferences.apiBaseUrlOverride != null;
+        _serverUrlController.text = preferences.apiBaseUrl;
+      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Server URL updated')));
+    }
+  }
+
+  Future<void> _saveServerUrl() async {
+    if (!_serverFormKey.currentState!.validate()) return;
+
+    final preferences = ref.read(preferencesServiceProvider);
+    final nextBaseUrl = normalizeApiBaseUrl(_serverUrlController.text);
+    if (nextBaseUrl == preferences.apiBaseUrl) {
+      setState(() => _serverUrlController.text = nextBaseUrl);
+      return;
+    }
+
+    final confirmed = await _confirmServerUrlChange(nextBaseUrl);
+    if (!confirmed) return;
+
+    setState(() => _isLoading = true);
+    try {
+      await _applyServerUrl(nextBaseUrl);
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _resetServerUrl() async {
+    final preferences = ref.read(preferencesServiceProvider);
+    if (preferences.apiBaseUrlOverride == null) return;
+
+    final defaultBaseUrl = normalizeApiBaseUrl(kDefaultBaseUrl);
+    final confirmed = await _confirmServerUrlChange(defaultBaseUrl);
+    if (!confirmed) return;
+
+    setState(() => _isLoading = true);
+    try {
+      await _applyServerUrl(defaultBaseUrl);
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);
@@ -272,7 +395,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
               const SizedBox(height: 32),
 
-              // Server URL Section (informational for now)
               Text(
                 'Server',
                 style: theme.textTheme.titleMedium?.copyWith(
@@ -280,11 +402,43 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ),
               ),
               const SizedBox(height: 8),
-              Card(
-                child: ListTile(
-                  leading: const Icon(Icons.dns),
-                  title: const Text('Server URL'),
-                  subtitle: const Text(kDefaultBaseUrl),
+              Form(
+                key: _serverFormKey,
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        TextFormField(
+                          controller: _serverUrlController,
+                          keyboardType: TextInputType.url,
+                          decoration: const InputDecoration(
+                            labelText: 'Server URL',
+                            hintText: kDefaultBaseUrl,
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.dns),
+                          ),
+                          validator: _validateServerUrl,
+                          onFieldSubmitted: (_) => _saveServerUrl(),
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton.icon(
+                          onPressed: _isLoading ? null : _saveServerUrl,
+                          icon: const Icon(Icons.save),
+                          label: const Text('Save Server URL'),
+                        ),
+                        if (_hasServerOverride) ...[
+                          const SizedBox(height: 8),
+                          OutlinedButton.icon(
+                            onPressed: _isLoading ? null : _resetServerUrl,
+                            icon: const Icon(Icons.restore),
+                            label: const Text('Reset to Default'),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
               ),
 

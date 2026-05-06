@@ -2,12 +2,16 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:oracy/services/api_base_url_config.dart';
+import 'package:oracy/services/preferences_service.dart';
+
+export 'package:oracy/services/api_base_url_config.dart'
+    show kDefaultBaseUrl, normalizeApiBaseUrl;
 
 /// Key used to store the API key in secure storage.
 const kApiKeyStorageKey = 'oracy_api_key';
 
-/// Default API base URL.
-const kDefaultBaseUrl = 'https://api.oracy.app';
+typedef CredentialBindingReconciler = Future<void> Function();
 
 /// Service for secure storage of sensitive data.
 class SecureStorageService {
@@ -45,20 +49,32 @@ final secureStorageProvider = Provider<SecureStorageService>((ref) {
 /// Interceptor that adds Bearer token authentication to requests.
 class AuthInterceptor extends Interceptor {
   final SecureStorageService _storage;
+  final CredentialBindingReconciler? _reconcileCredentialBinding;
   final void Function()? onAuthError;
 
-  AuthInterceptor(this._storage, {this.onAuthError});
+  AuthInterceptor(
+    this._storage, {
+    CredentialBindingReconciler? reconcileCredentialBinding,
+    this.onAuthError,
+  }) : _reconcileCredentialBinding = reconcileCredentialBinding;
 
   @override
   void onRequest(
     RequestOptions options,
     RequestInterceptorHandler handler,
   ) async {
-    final apiKey = await _storage.getApiKey();
-    if (apiKey != null && apiKey.isNotEmpty) {
-      options.headers['Authorization'] = 'Bearer $apiKey';
+    try {
+      await _reconcileCredentialBinding?.call();
+      final apiKey = await _storage.getApiKey();
+      if (apiKey != null && apiKey.isNotEmpty) {
+        options.headers['Authorization'] = 'Bearer $apiKey';
+      }
+      handler.next(options);
+    } catch (e, stackTrace) {
+      handler.reject(
+        DioException(requestOptions: options, error: e, stackTrace: stackTrace),
+      );
     }
-    handler.next(options);
   }
 
   @override
@@ -91,10 +107,15 @@ class ApiClientConfig {
 /// Factory for creating configured Dio instances.
 class ApiClientFactory {
   final SecureStorageService _storage;
+  final CredentialBindingReconciler? _reconcileCredentialBinding;
   final ApiClientConfig config;
   void Function()? onAuthError;
 
-  ApiClientFactory(this._storage, {this.config = const ApiClientConfig()});
+  ApiClientFactory(
+    this._storage, {
+    CredentialBindingReconciler? reconcileCredentialBinding,
+    this.config = const ApiClientConfig(),
+  }) : _reconcileCredentialBinding = reconcileCredentialBinding;
 
   /// Create a new Dio instance with authentication.
   Dio createClient() {
@@ -112,7 +133,13 @@ class ApiClientFactory {
     );
 
     // Add auth interceptor
-    dio.interceptors.add(AuthInterceptor(_storage, onAuthError: onAuthError));
+    dio.interceptors.add(
+      AuthInterceptor(
+        _storage,
+        reconcileCredentialBinding: _reconcileCredentialBinding,
+        onAuthError: onAuthError,
+      ),
+    );
 
     // Add logging in debug mode
     assert(() {
@@ -137,7 +164,15 @@ class ApiClientFactory {
 /// Provider for API client factory.
 final apiClientFactoryProvider = Provider<ApiClientFactory>((ref) {
   final storage = ref.watch(secureStorageProvider);
-  return ApiClientFactory(storage);
+  final preferences = ref.watch(preferencesServiceProvider);
+  return ApiClientFactory(
+    storage,
+    reconcileCredentialBinding: () => preferences.reconcileApiCredentialBinding(
+      hasApiKey: storage.hasApiKey,
+      deleteApiKey: storage.deleteApiKey,
+    ),
+    config: ApiClientConfig(baseUrl: preferences.apiBaseUrl),
+  );
 });
 
 /// Provider for the main Dio client.
@@ -151,5 +186,10 @@ final apiClientProvider = Provider<Dio>((ref) {
 /// Provider for checking if the user has configured an API key.
 final hasApiKeyProvider = FutureProvider<bool>((ref) async {
   final storage = ref.watch(secureStorageProvider);
+  final preferences = ref.watch(preferencesServiceProvider);
+  await preferences.reconcileApiCredentialBinding(
+    hasApiKey: storage.hasApiKey,
+    deleteApiKey: storage.deleteApiKey,
+  );
   return storage.hasApiKey();
 });
