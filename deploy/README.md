@@ -230,6 +230,41 @@ other state, and `/config` carries persistent configuration state. The
 paths with named Podman volumes; a stateless proxy container loses
 certificates on restart and can create avoidable ACME rate-limit pressure.
 
+## Cut Over From An Existing Deployment
+
+Existing deployments can differ in version, process manager, container runtime,
+proxy placement, storage layout, and whether the reverse proxy was bundled with
+the old stack. Treat the old system as the previous deployment, previous
+ingress, and previous state. Do not assume its shape when planning cutover.
+
+Decide the previous state disposition before touching ingress:
+
+| Disposition | Classification | Operator commitment |
+|-------------|----------------|---------------------|
+| `preserve` | Reversible | Keep the previous state readable by the previous deployment until the new public path has passed validation and the rollback window is closed. |
+| `capture for separate migration` | Reversible until the captured copy becomes the only retained source | Stop old writers long enough to take a consistent copy or archive for later migration. The migration tooling is out of scope for `v0.1.0`; this capture only preserves material for separate work. |
+| `discard` | `irreversible-state` | Remove previous state only after explicit operator acceptance that the old data and rollback surface are no longer needed. |
+
+Classify every cutover operation before running it:
+
+| Phase | Classification | Required outcome |
+|-------|----------------|------------------|
+| pre-cutover validation | Reversible | The previous public path is healthy, the previous state disposition is chosen, rollback ownership is assigned, and the operator knows which previous ingress setting can be restored. |
+| new-stack standup | Reversible | The new Oracy backend starts beside the previous deployment on private ports, networks, and state paths that do not steal production traffic. |
+| ingress candidate wiring | Reversible | The new backend is reachable through a candidate route while the previous ingress still serves production. If cutover decouples a proxy that used to be bundled with the previous deployment, use `Provision A Fresh Reverse Proxy Substrate` as the construction reference for the new operator-owned ingress fabric. |
+| candidate validation | Reversible | Health, authentication, transcription submission, history/search reads, and metrics are validated against the candidate route without depending on production DNS or the old public path being disabled. |
+| swap | `irreversible-state` boundary | Public DNS, proxy routing, load-balancer target, or equivalent ingress ownership moves from the previous deployment to the new stack. New client writes may now land in the new state store. |
+| post-cutover validation | `irreversible-state` boundary | The public Oracy URL, operator metrics path, retained-audio path, and SQLite persistence path validate on the new stack after real ingress has moved. |
+| decommission | `irreversible-state` once state or rollback surfaces are removed | Disable the previous deployment only after post-cutover validation passes. Remove previous state, secrets, routes, volumes, or host bindings only after the rollback window is intentionally closed. |
+
+If the new deployment fails after the swap, roll back ingress first: restore the
+previous DNS, proxy route, load-balancer target, or host publish that pointed to
+the previous deployment. Restart or re-enable the previous deployment against
+preserved previous state, then validate the old public path before making more
+changes. Any writes accepted by the new stack after the swap are not
+automatically present in the previous state; preserve the new state for separate
+reconciliation rather than deleting it during rollback.
+
 ## Operator-Owned Values
 
 - `@ORACY_IMAGE@`: the locally built image tag, such as `localhost/oracy:0.1.0`.
