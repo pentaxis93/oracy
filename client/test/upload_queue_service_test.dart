@@ -11,8 +11,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:oracy/db/database.dart';
 import 'package:oracy/services/api_client.dart';
+import 'package:oracy/services/preferences_service.dart';
 import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/services/upload_queue_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'helpers/test_utils.dart';
 
@@ -116,12 +118,16 @@ void main() {
 
   late Directory tempDir;
   late AppDatabase db;
+  late SharedPreferences prefs;
   late ConnectivityPlatform originalConnectivityPlatform;
   late _FakeConnectivityPlatform fakeConnectivityPlatform;
 
   setUp(() async {
     tempDir = await Directory.systemTemp.createTemp('oracy_upload_queue_test_');
     db = AppDatabase(NativeDatabase.memory());
+    SharedPreferences.setMockInitialValues({});
+    prefs = await SharedPreferences.getInstance();
+    await PreferencesService(prefs).markApiKeyBoundToCurrentUrl();
     originalConnectivityPlatform = ConnectivityPlatform.instance;
     fakeConnectivityPlatform = _FakeConnectivityPlatform([
       ConnectivityResult.wifi,
@@ -175,6 +181,7 @@ void main() {
       final transcriptionService = _CountingTranscriptionService();
       final container = ProviderContainer(
         overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
           secureStorageProvider.overrideWith((_) => storage),
           appDatabaseProvider.overrideWithValue(db),
           transcriptionServiceProvider.overrideWith(
@@ -203,6 +210,7 @@ void main() {
       final transcriptionService = _CountingTranscriptionService();
       final container = ProviderContainer(
         overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
           secureStorageProvider.overrideWith((_) => storage),
           appDatabaseProvider.overrideWithValue(db),
           transcriptionServiceProvider.overrideWith(

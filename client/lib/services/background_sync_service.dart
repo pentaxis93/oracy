@@ -30,14 +30,28 @@ const Duration staleUploadingRestoreThreshold = Duration(minutes: 10);
 
 typedef ConnectivityCheck = Future<List<ConnectivityResult>> Function();
 typedef ApiKeyReader = Future<String?> Function();
+typedef ApiKeyDeleter = Future<void> Function();
 typedef BackgroundTranscriptionServiceFactory =
     TranscriptionService Function(String apiKey);
 typedef BackgroundRecordingReconciler = Future<int> Function(AppDatabase db);
 
-Future<String> readBackgroundApiBaseUrl() async {
+Future<String> readBackgroundApiBaseUrl({
+  ApiKeyReader? readApiKey,
+  ApiKeyDeleter? deleteApiKey,
+}) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.reload();
-  return PreferencesService(prefs).apiBaseUrl;
+  final preferences = PreferencesService(prefs);
+  if (readApiKey != null && deleteApiKey != null) {
+    await preferences.reconcileApiCredentialBinding(
+      hasApiKey: () async {
+        final apiKey = await readApiKey();
+        return apiKey != null && apiKey.isNotEmpty;
+      },
+      deleteApiKey: deleteApiKey,
+    );
+  }
+  return preferences.apiBaseUrl;
 }
 
 /// Top-level callback dispatcher for workmanager.
@@ -53,7 +67,10 @@ void callbackDispatcher() {
       final connectivity = Connectivity();
       const storage = FlutterSecureStorage();
       final db = AppDatabase();
-      final apiBaseUrl = await readBackgroundApiBaseUrl();
+      final apiBaseUrl = await readBackgroundApiBaseUrl(
+        readApiKey: () => storage.read(key: kApiKeyStorageKey),
+        deleteApiKey: () => storage.delete(key: kApiKeyStorageKey),
+      );
 
       try {
         return await runBackgroundSyncPass(

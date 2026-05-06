@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:oracy/db/database.dart';
 import 'package:oracy/models/voice_note.dart';
 import 'package:oracy/services/api_client.dart';
+import 'package:oracy/services/preferences_service.dart';
 import 'package:oracy/services/upload_retry_policy.dart';
 import 'package:uuid/uuid.dart';
 
@@ -711,6 +712,12 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
 
     // Check for API key first
     final storage = ref.read(secureStorageProvider);
+    await ref
+        .read(preferencesServiceProvider)
+        .reconcileApiCredentialBinding(
+          hasApiKey: storage.hasApiKey,
+          deleteApiKey: storage.deleteApiKey,
+        );
     final hasKey = await storage.hasApiKey();
     if (kDebugMode) {
       debugPrint('[TRANSCRIPTION] hasApiKey: $hasKey');

@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 class PreferenceKeys {
   static const String autoCopyToClipboard = 'auto_copy_to_clipboard';
   static const String apiBaseUrl = 'api_base_url';
+  static const String lastEffectiveApiBaseUrl = 'last_effective_api_base_url';
 }
 
 /// Service for managing user preferences.
@@ -28,12 +29,43 @@ class PreferencesService {
     if (value == null || value.trim().isEmpty) {
       return null;
     }
-    return normalizeApiBaseUrl(value);
+    try {
+      return normalizeApiBaseUrl(value);
+    } on FormatException {
+      return null;
+    }
   }
 
   /// Effective API base URL for this install.
   String get apiBaseUrl =>
       apiBaseUrlOverride ?? normalizeApiBaseUrl(kDefaultBaseUrl);
+
+  /// Last effective API base URL that stored credentials were bound to.
+  String? get lastEffectiveApiBaseUrl =>
+      _prefs.getString(PreferenceKeys.lastEffectiveApiBaseUrl);
+
+  /// Record that the currently stored API key belongs to the current server.
+  Future<void> markApiKeyBoundToCurrentUrl() async {
+    await _prefs.setString(PreferenceKeys.lastEffectiveApiBaseUrl, apiBaseUrl);
+  }
+
+  /// Ensure any stored API key is only used with its bound server URL.
+  Future<void> reconcileApiCredentialBinding({
+    required Future<bool> Function() hasApiKey,
+    required Future<void> Function() deleteApiKey,
+  }) async {
+    final currentBaseUrl = apiBaseUrl;
+    final lastBaseUrl = lastEffectiveApiBaseUrl;
+
+    if (lastBaseUrl != currentBaseUrl && await hasApiKey()) {
+      await deleteApiKey();
+    }
+
+    await _prefs.setString(
+      PreferenceKeys.lastEffectiveApiBaseUrl,
+      currentBaseUrl,
+    );
+  }
 
   /// Store a runtime API base URL override.
   Future<void> setApiBaseUrlOverride(String value) async {

@@ -30,18 +30,12 @@ String normalizeApiBaseUrl(String value) {
     );
   }
 
-  final pathSegments = uri.pathSegments
-      .where((segment) => segment.isNotEmpty)
-      .toList();
-  final normalizedPath = pathSegments.isEmpty
-      ? ''
-      : '/${pathSegments.join('/')}';
+  final hasPath = uri.pathSegments.any((segment) => segment.isNotEmpty);
+  if (hasPath) {
+    throw const FormatException('Server URL must not include a path.');
+  }
 
   return uri
-      .replace(
-        scheme: scheme,
-        host: uri.host.toLowerCase(),
-        path: normalizedPath,
-      )
+      .replace(scheme: scheme, host: uri.host.toLowerCase(), path: '')
       .toString();
 }

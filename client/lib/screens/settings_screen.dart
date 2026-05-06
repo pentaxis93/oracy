@@ -74,6 +74,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     try {
       final storage = ref.read(secureStorageProvider);
       await storage.setApiKey(_apiKeyController.text.trim());
+      await ref.read(preferencesServiceProvider).markApiKeyBoundToCurrentUrl();
 
       // Invalidate the hasApiKey provider to refresh state
       ref.invalidate(hasApiKeyProvider);
@@ -217,6 +218,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await preferences.setApiBaseUrlOverride(nextBaseUrl);
     }
     await storage.deleteApiKey();
+    await preferences.markApiKeyBoundToCurrentUrl();
 
     _refreshApiConfiguration();
 

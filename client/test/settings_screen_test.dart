@@ -45,7 +45,7 @@ void main() {
 
       await tester.enterText(
         find.widgetWithText(TextFormField, 'Server URL'),
-        ' https://staging.oracy.app/api/ ',
+        ' https://staging.oracy.app/ ',
       );
       await tester.tap(find.text('Save Server URL'));
       await tester.pumpAndSettle();
@@ -53,7 +53,8 @@ void main() {
       await tester.pumpAndSettle();
 
       final service = PreferencesService(prefs);
-      expect(service.apiBaseUrlOverride, 'https://staging.oracy.app/api');
+      expect(service.apiBaseUrlOverride, 'https://staging.oracy.app');
+      expect(service.lastEffectiveApiBaseUrl, 'https://staging.oracy.app');
       expect(await storage.hasApiKey(), isFalse);
       expect(find.text('API Key Configured'), findsNothing);
     },
@@ -76,6 +77,10 @@ void main() {
 
       expect(service.apiBaseUrlOverride, isNull);
       expect(service.apiBaseUrl, kDefaultBaseUrl);
+      expect(
+        service.lastEffectiveApiBaseUrl,
+        normalizeApiBaseUrl(kDefaultBaseUrl),
+      );
       expect(await storage.hasApiKey(), isFalse);
     },
   );
@@ -99,6 +104,29 @@ void main() {
       expect(PreferencesService(prefs).apiBaseUrlOverride, isNull);
       expect(await storage.hasApiKey(), isTrue);
       expect(find.text('Change Server'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'Given a saved API key, When the key is stored, Then it is bound to the current effective server URL',
+    (tester) async {
+      final prefs = await SharedPreferences.getInstance();
+      final storage = MockSecureStorage();
+
+      await pumpSettings(tester, prefs: prefs, storage: storage);
+
+      await tester.ensureVisible(find.widgetWithText(TextFormField, 'API Key'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'API Key'),
+        'oracy_sk_new_key',
+      );
+      await tester.tap(find.text('Save API Key'));
+      await tester.pumpAndSettle();
+
+      final service = PreferencesService(prefs);
+      expect(await storage.getApiKey(), 'oracy_sk_new_key');
+      expect(service.lastEffectiveApiBaseUrl, service.apiBaseUrl);
     },
   );
 }

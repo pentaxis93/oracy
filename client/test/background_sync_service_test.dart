@@ -95,11 +95,44 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       await PreferencesService(
         prefs,
-      ).setApiBaseUrlOverride(' https://staging.oracy.app/api/ ');
+      ).setApiBaseUrlOverride(' https://staging.oracy.app/ ');
 
       final apiBaseUrl = await readBackgroundApiBaseUrl();
 
-      expect(apiBaseUrl, 'https://staging.oracy.app/api');
+      expect(apiBaseUrl, 'https://staging.oracy.app');
+    },
+  );
+
+  test(
+    'Given a background API key bound to a previous URL, When background sync loads configuration, Then the key is cleared before use',
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      final preferences = PreferencesService(prefs);
+      await preferences.markApiKeyBoundToCurrentUrl();
+      await preferences.setApiBaseUrlOverride('https://staging.oracy.app');
+      final events = <String>[];
+      var apiKey = 'oracy_sk_existing';
+
+      final apiBaseUrl = await readBackgroundApiBaseUrl(
+        readApiKey: () async {
+          events.add('read-for-reconcile');
+          return apiKey;
+        },
+        deleteApiKey: () async {
+          events.add('delete-stale-key');
+          apiKey = '';
+        },
+      );
+      events.add('read-for-sync');
+
+      expect(apiBaseUrl, 'https://staging.oracy.app');
+      expect(apiKey, isEmpty);
+      expect(events, [
+        'read-for-reconcile',
+        'delete-stale-key',
+        'read-for-sync',
+      ]);
+      expect(preferences.lastEffectiveApiBaseUrl, 'https://staging.oracy.app');
     },
   );
 

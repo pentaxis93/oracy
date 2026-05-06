@@ -9,3 +9,5 @@ flutter build apk --dart-define=ORACY_API_BASE_URL=https://staging.oracy.app
 ```
 
 Users and developers can also change the server URL at runtime from Settings. Runtime configuration wins over the build-time default until the user resets it. Changing the effective server URL clears the stored API key so credentials for one backend are not sent to another backend.
+
+Configured server URLs must be origin-only values such as `https://staging.oracy.app`. Do not include the API path prefix; client requests already target `/api/v1`.
