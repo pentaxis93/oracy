@@ -67,7 +67,7 @@ fn deployment_readme_documents_reverse_proxy_networking_patterns() {
     let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
 
     assert!(readme.contains("127.0.0.1:8080:8080"));
-    assert!(readme.contains("Network=oracy-proxy.network"));
+    assert!(readme.contains("Network=ingress.network"));
     assert!(readme.contains("http://oracy:8080"));
     assert!(readme.contains("When\n  rendering `oracy.container`"));
     assert!(readme.contains("leave the public `PublishPort=` directive out"));
@@ -81,6 +81,72 @@ fn deployment_readme_documents_reverse_proxy_networking_patterns() {
     assert!(readme.contains("0.0.0.0:8080:8080"));
     assert!(readme.contains("is reachability, not protection"));
     assert!(readme.contains("verify that the port is blocked from untrusted networks"));
+}
+
+#[test]
+fn deployment_readme_documents_fresh_reverse_proxy_substrate() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+    let fresh_substrate = markdown_section(&readme, "Provision A Fresh Reverse Proxy Substrate");
+
+    assert!(fresh_substrate.contains("ingress.network"));
+    assert!(fresh_substrate.contains("[Network]"));
+    assert!(fresh_substrate.contains("NetworkName=ingress"));
+    assert!(fresh_substrate.contains("Network=ingress.network"));
+    assert!(fresh_substrate.contains("NetworkAlias=oracy"));
+    assert!(fresh_substrate.contains("http://oracy:8080"));
+    assert!(fresh_substrate.contains("PublishPort=80:80"));
+    assert!(fresh_substrate.contains("PublishPort=443:443"));
+    assert!(fresh_substrate.contains("PublishPort=443:443/udp"));
+    assert!(fresh_substrate.contains("/data"));
+    assert!(fresh_substrate.contains("/config"));
+    assert!(fresh_substrate.contains("TLS"));
+}
+
+#[test]
+fn deployment_readme_discloses_user_scope_low_port_policy_for_fresh_proxy() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+    let fresh_substrate = markdown_section(&readme, "Provision A Fresh Reverse Proxy Substrate");
+
+    assert!(fresh_substrate.contains("user-scope"));
+    assert!(fresh_substrate.contains("PublishPort=80:80"));
+    assert!(fresh_substrate.contains("PublishPort=443:443"));
+    assert!(fresh_substrate.contains("PublishPort=443:443/udp"));
+    assert!(fresh_substrate.contains("net.ipv4.ip_unprivileged_port_start=80"));
+    assert!(fresh_substrate.contains("1024"));
+    assert!(fresh_substrate.contains("host-wide"));
+    assert!(fresh_substrate.contains("all unprivileged processes"));
+}
+
+#[test]
+fn deployment_readme_constructs_all_fresh_quadlet_references() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+    let fresh_substrate = markdown_section(&readme, "Provision A Fresh Reverse Proxy Substrate");
+
+    for reference in fresh_quadlet_references(fresh_substrate) {
+        let (name, unit_type, construction_key) = reference_unit_construction(&reference)
+            .unwrap_or_else(|| {
+                panic!("{reference} should use a Quadlet unit suffix covered by this test")
+            });
+
+        assert!(
+            fresh_substrate.contains(unit_type),
+            "{reference} should document a {unit_type} unit"
+        );
+        assert!(
+            fresh_substrate.contains(&format!("{construction_key}={name}")),
+            "{reference} should document {construction_key}={name}"
+        );
+    }
+}
+
+#[test]
+fn deployment_readme_resolves_shared_network_reference_to_ingress_unit() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+    let normalized = normalize_whitespace(&readme);
+
+    assert!(normalized.contains("operator-owned `ingress.network` unit"));
+    assert!(readme.contains("`ingress.network` Quadlet"));
+    assert!(!readme.contains("oracy-proxy.network"));
 }
 
 #[test]
@@ -138,4 +204,44 @@ fn markdown_section<'a>(document: &'a str, heading: &str) -> &'a str {
         .map_or(document.len(), |offset| after_heading + offset);
 
     &document[start..end]
+}
+
+fn normalize_whitespace(document: &str) -> String {
+    document.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn fresh_quadlet_references(section: &str) -> Vec<String> {
+    let mut references = Vec::new();
+
+    for line in section.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(reference) = (match key {
+            "Network" => Some(value),
+            "Volume" => value.split_once(':').map(|(source, _)| source),
+            _ => None,
+        }) else {
+            continue;
+        };
+
+        if reference.ends_with(".network") || reference.ends_with(".volume") {
+            references.push(reference.to_owned());
+        }
+    }
+
+    references.sort();
+    references.dedup();
+    references
+}
+
+fn reference_unit_construction(reference: &str) -> Option<(&str, &'static str, &'static str)> {
+    reference
+        .strip_suffix(".network")
+        .map(|name| (name, "[Network]", "NetworkName"))
+        .or_else(|| {
+            reference
+                .strip_suffix(".volume")
+                .map(|name| (name, "[Volume]", "VolumeName"))
+        })
 }
