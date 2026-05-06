@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix Android release APK SQLite packaging so the Flutter client bundles native
+  SQLite through the current `sqlite3` package, with CI coverage for APK native
+  library contents and runtime database opening on Android.
 - Make the Flutter client's API base URL configurable through
   `ORACY_API_BASE_URL` build defaults and a runtime Settings override, with
   credential clearing when the effective server URL changes and origin-only

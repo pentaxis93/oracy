@@ -38,4 +38,8 @@ Frontend:
 cd client
 flutter analyze
 flutter test
+flutter build apk --release
+dart run tool/verify_android_release_sqlite.dart build/app/outputs/flutter-apk/app-release.apk
+flutter drive -d <android-device-id> --driver=test_driver/integration_test.dart --target=integration_test/database_open_test.dart
+flutter build web
 ```

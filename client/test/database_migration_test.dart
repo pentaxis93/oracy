@@ -54,7 +54,7 @@ void main() {
           ('/tmp/legacy_two.wav', 1713300001000, 2, 2, 'timeout', 1713300002000, NULL, NULL);
       ''');
       legacyDb.execute('PRAGMA user_version = 2;');
-      legacyDb.dispose();
+      legacyDb.close();
 
       final db = AppDatabase(NativeDatabase(dbFile));
       addTearDown(db.close);

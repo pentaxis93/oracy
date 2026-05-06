@@ -11,3 +11,19 @@ flutter build apk --dart-define=ORACY_API_BASE_URL=https://staging.oracy.app
 Users and developers can also change the server URL at runtime from Settings. Runtime configuration wins over the build-time default until the user resets it. Changing the effective server URL clears the stored API key so credentials for one backend are not sent to another backend.
 
 Configured server URLs must be origin-only values such as `https://staging.oracy.app`. Do not include the API path prefix; client requests already target `/api/v1`.
+
+## Quality gates
+
+Before review, the client must pass analysis, unit/widget tests, Android release
+APK packaging verification, the Android database-open integration test on an
+emulator or device, and a web build. Substitute the attached Android emulator
+or device id reported by `flutter devices`:
+
+```sh
+flutter analyze
+flutter test
+flutter build apk --release
+dart run tool/verify_android_release_sqlite.dart build/app/outputs/flutter-apk/app-release.apk
+flutter drive -d <android-device-id> --driver=test_driver/integration_test.dart --target=integration_test/database_open_test.dart
+flutter build web
+```
