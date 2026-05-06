@@ -165,6 +165,24 @@ Leave Oracy's public API `PublishPort=` directive out in this topology. The
 proxy reaches the backend through `http://oracy:8080` on the ingress network,
 and the public internet reaches only the proxy.
 
+Create the Caddy state volumes in the same Quadlet directory:
+
+```ini
+[Unit]
+Description=Operator reverse proxy TLS state
+
+[Volume]
+VolumeName=caddy-data
+```
+
+```ini
+[Unit]
+Description=Operator reverse proxy config state
+
+[Volume]
+VolumeName=caddy-config
+```
+
 The concrete proxy is operator scope. A Caddy Quadlet is one illustrative
 containerized proxy shape:
 
@@ -201,10 +219,10 @@ oracy.example.com {
 ```
 
 Persist the proxy's TLS state. For Caddy, `/data` carries certificates and
-other state, and `/config` carries persistent configuration state. Back those
-paths with named or host-backed volumes such as `caddy-data.volume` and
-`caddy-config.volume`; a stateless proxy container loses certificates on
-restart and can create avoidable ACME rate-limit pressure.
+other state, and `/config` carries persistent configuration state. The
+`caddy-data.volume` and `caddy-config.volume` units above back those container
+paths with named Podman volumes; a stateless proxy container loses
+certificates on restart and can create avoidable ACME rate-limit pressure.
 
 ## Operator-Owned Values
 

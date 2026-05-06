@@ -103,6 +103,28 @@ fn deployment_readme_documents_fresh_reverse_proxy_substrate() {
 }
 
 #[test]
+fn deployment_readme_constructs_all_fresh_quadlet_references() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+    let fresh_substrate = markdown_section(&readme, "Provision A Fresh Reverse Proxy Substrate");
+
+    for reference in fresh_quadlet_references(fresh_substrate) {
+        let (name, unit_type, construction_key) = reference_unit_construction(&reference)
+            .unwrap_or_else(|| {
+                panic!("{reference} should use a Quadlet unit suffix covered by this test")
+            });
+
+        assert!(
+            fresh_substrate.contains(unit_type),
+            "{reference} should document a {unit_type} unit"
+        );
+        assert!(
+            fresh_substrate.contains(&format!("{construction_key}={name}")),
+            "{reference} should document {construction_key}={name}"
+        );
+    }
+}
+
+#[test]
 fn deployment_readme_resolves_shared_network_reference_to_ingress_unit() {
     let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
     let normalized = normalize_whitespace(&readme);
@@ -171,4 +193,40 @@ fn markdown_section<'a>(document: &'a str, heading: &str) -> &'a str {
 
 fn normalize_whitespace(document: &str) -> String {
     document.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn fresh_quadlet_references(section: &str) -> Vec<String> {
+    let mut references = Vec::new();
+
+    for line in section.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(reference) = (match key {
+            "Network" => Some(value),
+            "Volume" => value.split_once(':').map(|(source, _)| source),
+            _ => None,
+        }) else {
+            continue;
+        };
+
+        if reference.ends_with(".network") || reference.ends_with(".volume") {
+            references.push(reference.to_owned());
+        }
+    }
+
+    references.sort();
+    references.dedup();
+    references
+}
+
+fn reference_unit_construction(reference: &str) -> Option<(&str, &'static str, &'static str)> {
+    reference
+        .strip_suffix(".network")
+        .map(|name| (name, "[Network]", "NetworkName"))
+        .or_else(|| {
+            reference
+                .strip_suffix(".volume")
+                .map(|name| (name, "[Volume]", "VolumeName"))
+        })
 }
