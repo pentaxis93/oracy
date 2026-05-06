@@ -88,10 +88,8 @@ client traffic:
   runtime's host gateway name such as `host.containers.internal` for Podman or
   `host.docker.internal` for Docker.
 
-  Docker Desktop provides `host.docker.internal` automatically on macOS and
-  Windows. Docker on Linux does not; add the host gateway name to the isolated
-  proxy container with `--add-host=host.docker.internal:host-gateway` or, in
-  Compose:
+  For Docker on Linux, add the host gateway name to the isolated proxy
+  container with `--add-host=host.docker.internal:host-gateway` or, in Compose:
 
   ```yaml
   extra_hosts:

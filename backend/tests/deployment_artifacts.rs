@@ -84,6 +84,15 @@ fn deployment_readme_documents_reverse_proxy_networking_patterns() {
 }
 
 #[test]
+fn deployment_readme_keeps_backend_deployment_guidance_linux_scoped() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+
+    assert!(!readme.contains("Docker Desktop"));
+    assert!(!readme.contains("macOS"));
+    assert!(!readme.contains("Windows"));
+}
+
+#[test]
 fn deployment_contract_supports_common_reverse_proxy_topologies() {
     let contract =
         std::fs::read_to_string("../spec/deployment.md").expect("read deployment contract");
