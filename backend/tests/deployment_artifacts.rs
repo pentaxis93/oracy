@@ -67,7 +67,7 @@ fn deployment_readme_documents_reverse_proxy_networking_patterns() {
     let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
 
     assert!(readme.contains("127.0.0.1:8080:8080"));
-    assert!(readme.contains("Network=oracy-proxy.network"));
+    assert!(readme.contains("Network=ingress.network"));
     assert!(readme.contains("http://oracy:8080"));
     assert!(readme.contains("When\n  rendering `oracy.container`"));
     assert!(readme.contains("leave the public `PublishPort=` directive out"));
@@ -81,6 +81,35 @@ fn deployment_readme_documents_reverse_proxy_networking_patterns() {
     assert!(readme.contains("0.0.0.0:8080:8080"));
     assert!(readme.contains("is reachability, not protection"));
     assert!(readme.contains("verify that the port is blocked from untrusted networks"));
+}
+
+#[test]
+fn deployment_readme_documents_fresh_reverse_proxy_substrate() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+    let fresh_substrate = markdown_section(&readme, "Provision A Fresh Reverse Proxy Substrate");
+
+    assert!(fresh_substrate.contains("ingress.network"));
+    assert!(fresh_substrate.contains("[Network]"));
+    assert!(fresh_substrate.contains("NetworkName=ingress"));
+    assert!(fresh_substrate.contains("Network=ingress.network"));
+    assert!(fresh_substrate.contains("NetworkAlias=oracy"));
+    assert!(fresh_substrate.contains("http://oracy:8080"));
+    assert!(fresh_substrate.contains("PublishPort=80:80"));
+    assert!(fresh_substrate.contains("PublishPort=443:443"));
+    assert!(fresh_substrate.contains("PublishPort=443:443/udp"));
+    assert!(fresh_substrate.contains("/data"));
+    assert!(fresh_substrate.contains("/config"));
+    assert!(fresh_substrate.contains("TLS"));
+}
+
+#[test]
+fn deployment_readme_resolves_shared_network_reference_to_ingress_unit() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+    let normalized = normalize_whitespace(&readme);
+
+    assert!(normalized.contains("operator-owned `ingress.network` unit"));
+    assert!(readme.contains("`ingress.network` Quadlet"));
+    assert!(!readme.contains("oracy-proxy.network"));
 }
 
 #[test]
@@ -138,4 +167,8 @@ fn markdown_section<'a>(document: &'a str, heading: &str) -> &'a str {
         .map_or(document.len(), |offset| after_heading + offset);
 
     &document[start..end]
+}
+
+fn normalize_whitespace(document: &str) -> String {
+    document.split_whitespace().collect::<Vec<_>>().join(" ")
 }

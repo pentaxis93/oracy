@@ -73,12 +73,12 @@ client traffic:
   and add a shared network, for example:
 
   ```ini
-  Network=oracy-proxy.network
+  Network=ingress.network
   NetworkAlias=oracy
   ```
 
-  For Podman Quadlets, provide the matching operator-owned
-  `oracy-proxy.network` unit or replace the example with your existing network.
+  For Podman Quadlets, provide the matching operator-owned `ingress.network`
+  unit or replace the example with your existing network.
   Put the proxy on the same network and proxy to `http://oracy:8080`. Docker
   Compose services in the same project use shared service DNS by default; use
   the Compose service name or network alias `oracy` for the backend service.
@@ -130,6 +130,81 @@ The Quadlet template's `[Install]` relationship makes the generated service
 part of the user default target at `daemon-reload` time. For boot persistence
 under user-scope systemd, enable lingering for the service account through the
 host provisioning mechanism.
+
+## Provision A Fresh Reverse Proxy Substrate
+
+If the host does not already have a reverse proxy, provision the ingress fabric
+as operator-owned infrastructure before joining Oracy to it. The ingress
+network and proxy are not Oracy artifacts; Oracy only needs a private route to
+the proxy.
+
+For Podman Quadlet deployments, create an `ingress.network` Quadlet in the same
+user-scope Quadlet directory as the persistent services:
+
+```ini
+[Unit]
+Description=Operator ingress network
+
+[Network]
+NetworkName=ingress
+
+[Install]
+WantedBy=default.target
+```
+
+`NetworkName=ingress` gives the Podman network an operator-owned name instead
+of an app-specific name. Render `oracy.container` with the shared-network
+shape from the install section:
+
+```ini
+Network=ingress.network
+NetworkAlias=oracy
+```
+
+Leave Oracy's public API `PublishPort=` directive out in this topology. The
+proxy reaches the backend through `http://oracy:8080` on the ingress network,
+and the public internet reaches only the proxy.
+
+The concrete proxy is operator scope. A Caddy Quadlet is one illustrative
+containerized proxy shape:
+
+```ini
+[Unit]
+Description=Operator reverse proxy
+
+[Container]
+Image=docker.io/library/caddy:2
+ContainerName=ingress-proxy
+Network=ingress.network
+PublishPort=80:80
+PublishPort=443:443
+PublishPort=443:443/udp
+Volume=/var/lib/caddy/Caddyfile:/etc/caddy/Caddyfile:ro,Z
+Volume=caddy-data.volume:/data:rw,Z
+Volume=caddy-config.volume:/config:rw,Z
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+The Caddyfile for that proxy would route the public site to Oracy by its
+network alias:
+
+```caddyfile
+oracy.example.com {
+	reverse_proxy http://oracy:8080
+}
+```
+
+Persist the proxy's TLS state. For Caddy, `/data` carries certificates and
+other state, and `/config` carries persistent configuration state. Back those
+paths with named or host-backed volumes such as `caddy-data.volume` and
+`caddy-config.volume`; a stateless proxy container loses certificates on
+restart and can create avoidable ACME rate-limit pressure.
 
 ## Operator-Owned Values
 
