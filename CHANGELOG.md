@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Bound Android Gradle memory and worker defaults so release APK builds fit on
+  representative 16 GB developer workstations.
 - Fix Android release APK SQLite packaging so the Flutter client bundles native
   SQLite through the current `sqlite3` package, with CI coverage for APK native
   library contents and runtime database opening on Android.
