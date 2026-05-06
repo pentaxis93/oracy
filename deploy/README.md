@@ -68,8 +68,8 @@ client traffic:
   example `@ORACY_PUBLIC_PUBLISH@=127.0.0.1:8080:8080`, and proxy to
   `http://127.0.0.1:8080`.
 - Shared container network: if the reverse proxy can join the same Docker or
-  Podman network as Oracy, do not publish the public API on the host. After
-  rendering `oracy.container`, remove the public `PublishPort=@ORACY_PUBLIC_PUBLISH@` line
+  Podman network as Oracy, do not publish the public API on the host. When
+  rendering `oracy.container`, leave the public `PublishPort=` directive out
   and add a shared network, for example:
 
   ```ini

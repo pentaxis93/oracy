@@ -69,7 +69,9 @@ fn deployment_readme_documents_reverse_proxy_networking_patterns() {
     assert!(readme.contains("127.0.0.1:8080:8080"));
     assert!(readme.contains("Network=oracy-proxy.network"));
     assert!(readme.contains("http://oracy:8080"));
-    assert!(readme.contains("remove the public `PublishPort=@ORACY_PUBLIC_PUBLISH@` line"));
+    assert!(readme.contains("When\n  rendering `oracy.container`"));
+    assert!(readme.contains("leave the public `PublishPort=` directive out"));
+    assert!(!readme.contains("remove the public `PublishPort=@ORACY_PUBLIC_PUBLISH@` line"));
     assert!(readme.contains("host.containers.internal"));
     assert!(readme.contains("host.docker.internal"));
     assert!(readme.contains("--add-host=host.docker.internal:host-gateway"));
