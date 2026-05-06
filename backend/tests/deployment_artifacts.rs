@@ -143,16 +143,27 @@ fn deployment_readme_constructs_all_fresh_quadlet_references() {
 fn deployment_readme_documents_existing_deployment_cutover_structure() {
     let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
     let cutover = markdown_section(&readme, "Cut Over From An Existing Deployment");
+    let normalized = normalize_whitespace(cutover);
 
+    assert!(cutover.contains("parallel-then-swap"));
+    assert!(cutover.contains("stop-then-replace"));
     assert!(cutover.contains("pre-cutover validation"));
     assert!(cutover.contains("new-stack standup"));
+    assert!(cutover.contains("ingress candidate wiring"));
+    assert!(cutover.contains("candidate validation"));
     assert!(cutover.contains("swap"));
     assert!(cutover.contains("decommission"));
     assert!(cutover.contains("post-cutover validation"));
     assert!(cutover.contains("rollback"));
+    assert!(cutover.contains("downtime"));
+    assert!(cutover.contains("canonical"));
+    assert!(cutover.contains("stop previous deployment"));
+    assert!(cutover.contains("production validation"));
+    assert!(normalized.contains("has no separate candidate validation phase"));
     assert!(cutover.contains("previous deployment"));
     assert!(cutover.contains("previous ingress"));
     assert!(cutover.contains("Provision A Fresh Reverse Proxy Substrate"));
+    assert!(normalized.contains("If either strategy decouples a reverse proxy"));
 }
 
 #[test]
@@ -167,7 +178,10 @@ fn deployment_readme_classifies_cutover_reversibility_and_data_handling() {
     assert!(cutover.contains("discard"));
     assert!(cutover.contains("capture for separate migration"));
     assert!(normalized.contains("migration tooling is out of scope"));
-    assert!(normalized.contains("accepted by the new stack after the swap"));
+    assert!(normalized.contains("For `parallel-then-swap`, roll back ingress first"));
+    assert!(normalized.contains("For `stop-then-replace`, stop the replacement stack first"));
+    assert!(normalized.contains("accepted by the new stack after public traffic reaches it"));
+    assert!(normalized.contains("preserve the new state for separate reconciliation"));
 }
 
 #[test]

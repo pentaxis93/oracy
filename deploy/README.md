@@ -236,6 +236,9 @@ Existing deployments can differ in version, process manager, container runtime,
 proxy placement, storage layout, and whether the reverse proxy was bundled with
 the old stack. Treat the old system as the previous deployment, previous
 ingress, and previous state. Do not assume its shape when planning cutover.
+If either strategy decouples a reverse proxy that was bundled with the previous
+deployment, use `Provision A Fresh Reverse Proxy Substrate` as the construction
+reference for the new operator-owned ingress fabric.
 
 Decide the previous state disposition before touching ingress:
 
@@ -245,25 +248,47 @@ Decide the previous state disposition before touching ingress:
 | `capture for separate migration` | Reversible until the captured copy becomes the only retained source | Stop old writers long enough to take a consistent copy or archive for later migration. The migration tooling is out of scope for `v0.1.0`; this capture only preserves material for separate work. |
 | `discard` | `irreversible-state` | Remove previous state only after explicit operator acceptance that the old data and rollback surface are no longer needed. |
 
-Classify every cutover operation before running it:
+Choose the cutover strategy that matches the operator constraint:
+
+| Strategy | Choose when | Tradeoff |
+|----------|-------------|----------|
+| `parallel-then-swap` | Public downtime avoidance matters most, and the operator can tolerate temporary parallel topology. | Requires private alternate ports, candidate ingress, and coexistence naming until the swap completes. |
+| `stop-then-replace` | Brief downtime is acceptable, and canonical names, ports, routes, and topology should be true from the start. | Production traffic stops during replacement, and validation happens only after the new stack owns the public path. |
+
+Classify every `parallel-then-swap` operation before running it:
 
 | Phase | Classification | Required outcome |
 |-------|----------------|------------------|
 | pre-cutover validation | Reversible | The previous public path is healthy, the previous state disposition is chosen, rollback ownership is assigned, and the operator knows which previous ingress setting can be restored. |
 | new-stack standup | Reversible | The new Oracy backend starts beside the previous deployment on private ports, networks, and state paths that do not steal production traffic. |
-| ingress candidate wiring | Reversible | The new backend is reachable through a candidate route while the previous ingress still serves production. If cutover decouples a proxy that used to be bundled with the previous deployment, use `Provision A Fresh Reverse Proxy Substrate` as the construction reference for the new operator-owned ingress fabric. |
+| ingress candidate wiring | Reversible | The new backend is reachable through a candidate route while the previous ingress still serves production. |
 | candidate validation | Reversible | Health, authentication, transcription submission, history/search reads, and metrics are validated against the candidate route without depending on production DNS or the old public path being disabled. |
 | swap | `irreversible-state` boundary | Public DNS, proxy routing, load-balancer target, or equivalent ingress ownership moves from the previous deployment to the new stack. New client writes may now land in the new state store. |
 | post-cutover validation | `irreversible-state` boundary | The public Oracy URL, operator metrics path, retained-audio path, and SQLite persistence path validate on the new stack after real ingress has moved. |
 | decommission | `irreversible-state` once state or rollback surfaces are removed | Disable the previous deployment only after post-cutover validation passes. Remove previous state, secrets, routes, volumes, or host bindings only after the rollback window is intentionally closed. |
 
-If the new deployment fails after the swap, roll back ingress first: restore the
-previous DNS, proxy route, load-balancer target, or host publish that pointed to
-the previous deployment. Restart or re-enable the previous deployment against
-preserved previous state, then validate the old public path before making more
-changes. Any writes accepted by the new stack after the swap are not
-automatically present in the previous state; preserve the new state for separate
-reconciliation rather than deleting it during rollback.
+Classify every `stop-then-replace` operation before running it:
+
+| Phase | Classification | Required outcome |
+|-------|----------------|------------------|
+| pre-cutover validation | Reversible | The previous public path is healthy, the previous state disposition is chosen, rollback ownership is assigned, and the operator knows which previous deployment command and ingress setting can be restored. |
+| stop previous deployment | Reversible while previous state, configuration, and ingress settings are retained | The previous deployment is intentionally stopped, old writers are quiesced, and public Oracy downtime is accepted for the replacement window. |
+| new-stack standup | Reversible until public writes are accepted | The new Oracy backend, state path, and ingress are built with canonical names, ports, routes, and network aliases instead of temporary coexistence values. |
+| production validation | `irreversible-state` boundary once public writes are accepted | The public Oracy URL, authentication, transcription submission, history/search reads, operator metrics path, retained-audio path, and SQLite persistence path validate on the replacement stack. Stop-then-replace has no separate candidate validation phase because validation happens through the production path. |
+| rollback-window retention | Reversible | The previous state, configuration, secrets, routes, volumes, and host bindings remain available until the operator accepts the replacement and closes the rollback window. |
+| decommission | `irreversible-state` once state or rollback surfaces are removed | Remove previous state, secrets, routes, volumes, or host bindings only after production validation passes and the rollback window is intentionally closed. |
+
+Rollback model differs by strategy. For `parallel-then-swap`, roll back ingress
+first: restore the previous DNS, proxy route, load-balancer target, or host
+publish that pointed to the previous deployment. Restart or re-enable the
+previous deployment against preserved previous state, then validate the old
+public path before making more changes. For `stop-then-replace`, stop the
+replacement stack first, restore the previous ingress setting, then restart or
+re-enable the previous deployment against preserved previous state and
+configuration. Under either strategy, any writes accepted by the new stack after
+public traffic reaches it are not automatically present in the previous state;
+preserve the new state for separate reconciliation rather than deleting it
+during rollback.
 
 ## Operator-Owned Values
 

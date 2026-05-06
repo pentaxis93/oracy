@@ -4,10 +4,10 @@
 
 - Bound Android Gradle memory and worker defaults so release APK builds fit on
   representative 16 GB developer workstations.
-- Document cutover from existing Oracy deployments, including heterogeneous
-  prior-state handling, reversible versus irreversible-state operation
-  classification, data disposition choices, rollback, and reverse-proxy
-  substrate integration.
+- Document parallel-then-swap and stop-then-replace cutover strategies for
+  existing Oracy deployments, including heterogeneous prior-state handling,
+  reversible versus irreversible-state operation classification, data
+  disposition choices, rollback, and reverse-proxy substrate integration.
 - Document fresh reverse-proxy substrate provisioning for backend deployments,
   including an operator-owned ingress Quadlet network and persistent TLS state
   for containerized proxies, with the rootless low-port binding requirement
