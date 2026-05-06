@@ -37,3 +37,47 @@ jobs:
       - name: Test
         working-directory: client
         run: flutter test
+
+      - name: Build Android release APK
+        working-directory: client
+        run: flutter build apk --release
+
+      - name: Verify Android release SQLite packaging
+        working-directory: client
+        run: dart run tool/verify_android_release_sqlite.dart build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Build web
+        working-directory: client
+        run: flutter build web
+
+  android-database-open:
+    name: Android Database Open
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        working-directory: client
+        run: flutter pub get
+
+      - name: Run Android database-open integration test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          script: cd client && flutter drive -d emulator-5554 --driver=test_driver/integration_test.dart --target=integration_test/database_open_test.dart
