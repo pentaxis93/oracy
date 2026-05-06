@@ -117,6 +117,32 @@ splitting before OpenAI transcription requests. Operators must provide
 `ffmpeg` and `ffprobe` on `PATH` for the backend process. Startup fails if
 either tool is missing or cannot execute.
 
+## Public API Reverse Proxy
+
+The backend's public API listener is intended to sit behind an
+operator-managed reverse proxy for internet-facing deployments. Operators must
+place the public listener on a network surface reachable by that proxy and not
+broader than the deployment's access-control boundary.
+
+Supported `v0.1.0` reverse-proxy topologies are:
+
+- A host-system reverse proxy reaches Oracy through a host-loopback publish.
+- A shared container network lets the proxy reach Oracy by container DNS, with
+  no host public API publish required.
+- An isolated container reverse proxy reaches Oracy through the container
+  runtime's host gateway and a non-loopback host publish.
+
+Loopback binding is the preferred default when the proxy runs on the host or
+shares the host network namespace. A proxy running in an isolated container
+cannot reach a host-loopback-only publish by using the host gateway; the backend
+must instead share the proxy's container network or publish on a host address
+reachable from that container.
+
+For isolated proxy containers, non-loopback binding is reachability, not protection.
+Operators must provide an operator-managed firewall, host network policy, or
+equivalent control and verify that the published port is blocked from untrusted
+networks.
+
 ## Operator Metrics
 
 The backend exposes Prometheus-compatible metrics from an operator listener

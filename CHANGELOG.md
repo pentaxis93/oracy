@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Document supported reverse-proxy networking patterns for backend Quadlet
+  deployments, including shared container networks, Linux Docker host-gateway
+  setup, and firewall requirements for non-loopback public API publishes.
 - Fix the backend Quadlet template's SELinux handling so dedicated
   config and state mounts work under default confined Podman on
   SELinux-enforcing hosts.
