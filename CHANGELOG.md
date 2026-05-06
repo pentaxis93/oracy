@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Make the Flutter client's API base URL configurable through
+  `ORACY_API_BASE_URL` build defaults and a runtime Settings override, with
+  credential clearing when the effective server URL changes.
 - Document supported reverse-proxy networking patterns for backend Quadlet
   deployments, including shared container networks, Linux Docker host-gateway
   setup, and firewall requirements for non-loopback public API publishes.

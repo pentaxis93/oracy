@@ -2,12 +2,14 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:oracy/services/api_base_url_config.dart';
+import 'package:oracy/services/preferences_service.dart';
+
+export 'package:oracy/services/api_base_url_config.dart'
+    show kDefaultBaseUrl, normalizeApiBaseUrl;
 
 /// Key used to store the API key in secure storage.
 const kApiKeyStorageKey = 'oracy_api_key';
-
-/// Default API base URL.
-const kDefaultBaseUrl = 'https://api.oracy.app';
 
 /// Service for secure storage of sensitive data.
 class SecureStorageService {
@@ -137,7 +139,11 @@ class ApiClientFactory {
 /// Provider for API client factory.
 final apiClientFactoryProvider = Provider<ApiClientFactory>((ref) {
   final storage = ref.watch(secureStorageProvider);
-  return ApiClientFactory(storage);
+  final preferences = ref.watch(preferencesServiceProvider);
+  return ApiClientFactory(
+    storage,
+    config: ApiClientConfig(baseUrl: preferences.apiBaseUrl),
+  );
 });
 
 /// Provider for the main Dio client.

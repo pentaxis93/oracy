@@ -7,8 +7,10 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:oracy/db/database.dart';
 import 'package:oracy/services/background_sync_service.dart';
+import 'package:oracy/services/preferences_service.dart';
 import 'package:oracy/services/recording_recovery_service.dart';
 import 'package:oracy/services/transcription_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'helpers/test_utils.dart';
 
@@ -71,6 +73,7 @@ void main() {
   setUp(() async {
     tempDir = await Directory.systemTemp.createTemp('oracy_bg_sync_test_');
     db = AppDatabase(NativeDatabase.memory());
+    SharedPreferences.setMockInitialValues({});
   });
 
   tearDown(() async {
@@ -85,6 +88,20 @@ void main() {
     await file.writeAsBytes(List<int>.filled(2048, 1));
     return file;
   }
+
+  test(
+    'Given an API base URL override, When background sync loads configuration, Then it uses the same normalized server URL',
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      await PreferencesService(
+        prefs,
+      ).setApiBaseUrlOverride(' https://staging.oracy.app/api/ ');
+
+      final apiBaseUrl = await readBackgroundApiBaseUrl();
+
+      expect(apiBaseUrl, 'https://staging.oracy.app/api');
+    },
+  );
 
   test(
     'Given a background sync pass, When an uploading row is stale, Then it is restored to failed and returned to the pending queue',

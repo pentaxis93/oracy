@@ -6,9 +6,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:oracy/db/database.dart';
 import 'package:oracy/services/api_client.dart';
+import 'package:oracy/services/preferences_service.dart';
 import 'package:oracy/services/recording_recovery_service.dart';
 import 'package:oracy/services/transcription_service.dart';
 import 'package:oracy/services/upload_retry_policy.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
 /// Unique name for the background sync task.
@@ -32,6 +34,12 @@ typedef BackgroundTranscriptionServiceFactory =
     TranscriptionService Function(String apiKey);
 typedef BackgroundRecordingReconciler = Future<int> Function(AppDatabase db);
 
+Future<String> readBackgroundApiBaseUrl() async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.reload();
+  return PreferencesService(prefs).apiBaseUrl;
+}
+
 /// Top-level callback dispatcher for workmanager.
 ///
 /// This must be a top-level function and cannot be a class method.
@@ -45,6 +53,7 @@ void callbackDispatcher() {
       final connectivity = Connectivity();
       const storage = FlutterSecureStorage();
       final db = AppDatabase();
+      final apiBaseUrl = await readBackgroundApiBaseUrl();
 
       try {
         return await runBackgroundSyncPass(
@@ -54,7 +63,7 @@ void callbackDispatcher() {
           createTranscriptionService: (apiKey) {
             final dio = Dio(
               BaseOptions(
-                baseUrl: kDefaultBaseUrl,
+                baseUrl: apiBaseUrl,
                 headers: {'Authorization': 'Bearer $apiKey'},
                 connectTimeout: const Duration(seconds: 30),
                 receiveTimeout: const Duration(minutes: 5),
