@@ -184,7 +184,13 @@ VolumeName=caddy-config
 ```
 
 The concrete proxy is operator scope. A Caddy Quadlet is one illustrative
-containerized proxy shape:
+containerized proxy shape. Because this user-scope rootless example publishes
+host ports 80 and 443, the host must allow unprivileged low-port binding before
+the proxy starts. Standard rootless Linux rejects host ports below 1024; for
+this example, provision `net.ipv4.ip_unprivileged_port_start=80` or lower
+through the host's persistent sysctl mechanism. That sysctl is host-wide: it
+allows all unprivileged processes on the host, not only this Caddy container,
+to bind ports at or above the configured floor.
 
 ```ini
 [Unit]

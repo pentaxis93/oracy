@@ -103,6 +103,21 @@ fn deployment_readme_documents_fresh_reverse_proxy_substrate() {
 }
 
 #[test]
+fn deployment_readme_discloses_user_scope_low_port_policy_for_fresh_proxy() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+    let fresh_substrate = markdown_section(&readme, "Provision A Fresh Reverse Proxy Substrate");
+
+    assert!(fresh_substrate.contains("user-scope"));
+    assert!(fresh_substrate.contains("PublishPort=80:80"));
+    assert!(fresh_substrate.contains("PublishPort=443:443"));
+    assert!(fresh_substrate.contains("PublishPort=443:443/udp"));
+    assert!(fresh_substrate.contains("net.ipv4.ip_unprivileged_port_start=80"));
+    assert!(fresh_substrate.contains("1024"));
+    assert!(fresh_substrate.contains("host-wide"));
+    assert!(fresh_substrate.contains("all unprivileged processes"));
+}
+
+#[test]
 fn deployment_readme_constructs_all_fresh_quadlet_references() {
     let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
     let fresh_substrate = markdown_section(&readme, "Provision A Fresh Reverse Proxy Substrate");
