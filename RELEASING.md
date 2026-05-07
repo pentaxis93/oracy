@@ -31,11 +31,12 @@ Before tagging:
 git checkout main
 git pull --ff-only
 git status --short
-./scripts/release-check metadata
+./scripts/release-check release "vX.Y.Z"
 ```
 
-The changelog must be ready for the tag: `## Unreleased` is present and empty,
-and the release notes live under `## [X.Y.Z] - YYYY-MM-DD`.
+The release check must target the tag being cut. It verifies that source
+versions match `X.Y.Z`, `## Unreleased` is present and empty, and the release
+notes live under `## [X.Y.Z] - YYYY-MM-DD`.
 
 ## Atomic Release Operation
 
