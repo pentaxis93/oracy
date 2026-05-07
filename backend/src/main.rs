@@ -14,7 +14,7 @@ use oracy_backend::transcription_worker::{
     run_worker_loop,
 };
 use tokio::sync::broadcast;
-use tracing::error;
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() {
@@ -119,8 +119,13 @@ async fn serve_public_and_operator(
     tokio::spawn(wait_for_shutdown_signal(sender));
 
     tokio::try_join!(
-        serve(listen_addr, app, public_receiver),
-        serve(operator_listen_addr, operator_app, operator_receiver),
+        serve("public", listen_addr, app, public_receiver),
+        serve(
+            "operator",
+            operator_listen_addr,
+            operator_app,
+            operator_receiver
+        ),
     )?;
     Ok(())
 }
@@ -143,11 +148,14 @@ fn shutdown_broadcast() -> ShutdownBroadcast {
 }
 
 async fn serve(
+    listener_name: &str,
     listen_addr: SocketAddr,
     app: axum::Router,
     mut shutdown: broadcast::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
+    let bound_addr = listener.local_addr()?;
+    info!("oracy {listener_name} listener bound to {bound_addr}");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let _ = shutdown.recv().await;
