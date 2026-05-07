@@ -862,6 +862,7 @@ key = "key-one"
     let mut child = Command::new(env!("CARGO_BIN_EXE_oracy-backend"))
         .env("ORACY_CONFIG", &config_path)
         .env("OPENAI_API_KEY", "test-openai-key")
+        .env("RUST_LOG", "info")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
