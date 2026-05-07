@@ -3,7 +3,6 @@ use std::fs;
 use std::io::Read;
 #[cfg(unix)]
 use std::net::{SocketAddr, TcpListener, TcpStream};
-#[cfg(unix)]
 use std::process::{Child, Command, ExitStatus, Stdio};
 #[cfg(unix)]
 use std::thread;
@@ -14,6 +13,30 @@ use oracy_backend::bootstrap::{BootstrapError, load_runtime_from_env, load_runti
 use tempfile::TempDir;
 
 mod support;
+
+#[test]
+fn backend_version_exits_before_runtime_configuration_is_loaded() {
+    let output = Command::new(env!("CARGO_BIN_EXE_oracy-backend"))
+        .arg("--version")
+        .env_remove("ORACY_CONFIG")
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .expect("run backend --version");
+
+    assert!(
+        output.status.success(),
+        "--version should exit successfully without runtime configuration"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout is utf8"),
+        format!("oracy-backend {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "--version should not emit stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 #[tokio::test]
 async fn startup_rejects_missing_oracy_config_env() {

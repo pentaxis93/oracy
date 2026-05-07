@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## [0.1.0] - 2026-05-06
+
+- Adopt a documented release discipline with lockstep version checks,
+  annotated-tag and GitHub Release publication gates, backend binary
+  `--version` reporting, and local backend container artifact verification.
 - Bound Android Gradle memory and worker defaults so release APK builds fit on
   representative 16 GB developer workstations.
 - Document parallel-then-swap and stop-then-replace cutover strategies for

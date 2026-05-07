@@ -1,3 +1,4 @@
+use std::env;
 use std::net::SocketAddr;
 
 use oracy_backend::abandonment_sweeper::{AbandonmentSweeperConfig, run_abandonment_sweeper_loop};
@@ -17,11 +18,39 @@ use tracing::error;
 
 #[tokio::main]
 async fn main() {
+    match startup_command(env::args().skip(1)) {
+        StartupCommand::Run => {}
+        StartupCommand::Version => {
+            println!("oracy-backend {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        StartupCommand::UsageError(message) => {
+            eprintln!("{message}");
+            eprintln!("usage: oracy-backend [--version]");
+            std::process::exit(2);
+        }
+    }
+
     init_tracing();
 
     if let Err(error) = run().await {
         error!("{error}");
         std::process::exit(1);
+    }
+}
+
+enum StartupCommand {
+    Run,
+    Version,
+    UsageError(String),
+}
+
+fn startup_command(mut args: impl Iterator<Item = String>) -> StartupCommand {
+    match (args.next(), args.next()) {
+        (None, None) => StartupCommand::Run,
+        (Some(flag), None) if flag == "--version" => StartupCommand::Version,
+        (Some(flag), None) => StartupCommand::UsageError(format!("unknown argument: {flag}")),
+        _ => StartupCommand::UsageError("too many arguments".to_owned()),
     }
 }
 
