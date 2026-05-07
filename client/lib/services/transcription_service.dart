@@ -784,6 +784,35 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
           )
         : null;
 
+    WebUploadPayload? durablePayload;
+    try {
+      durablePayload = queuedUpload == null
+          ? null
+          : await _ensureDurableQueuedFileData(
+              queuedUpload,
+              recordedAt: foregroundAttempt?.recordedAt,
+            );
+    } catch (e, stackTrace) {
+      final classification = classifyUploadFailure(e);
+      await _markQueuedUploadFailed(
+        queuedUploadId,
+        classification: classification,
+      );
+      _handleForegroundFailure(foregroundAttempt, classification);
+
+      if (kDebugMode) {
+        debugPrint('[TRANSCRIPTION] Caught exception: $e');
+        debugPrint('[TRANSCRIPTION] Stack trace: $stackTrace');
+      }
+      state = TranscriptionError(
+        classification.message,
+        errorType: classification.errorType,
+        filePath: filePath,
+        isRetryable: classification.isRetryable,
+      );
+      return;
+    }
+
     // Check for API key first
     final storage = ref.read(secureStorageProvider);
     await ref
@@ -825,12 +854,6 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
 
     try {
       final service = ref.read(transcriptionServiceProvider);
-      final durablePayload = queuedUpload == null
-          ? null
-          : await _ensureDurableQueuedFileData(
-              queuedUpload,
-              recordedAt: foregroundAttempt?.recordedAt,
-            );
 
       state = const TranscriptionUploading(progress: 0.0);
 

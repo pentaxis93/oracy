@@ -859,6 +859,55 @@ void main() {
   );
 
   test(
+    'Given no API key is configured for a web blob, When foreground transcription queues it, Then durable bytes remain recoverable for retry',
+    () async {
+      const blobUrl = 'blob:https://oracy.test/missing-key';
+      final service = _CapturingTranscriptionService();
+      final readerKeys = <String?>[];
+      container = ProviderContainer(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          secureStorageProvider.overrideWith((_) => MockSecureStorage()),
+          appDatabaseProvider.overrideWithValue(db),
+          transcriptionServiceProvider.overrideWith((_) => service),
+          fileDataReaderProvider.overrideWithValue((
+            String filePath, {
+            String? idempotencyKey,
+          }) async {
+            readerKeys.add(idempotencyKey);
+            return FileData(
+              bytes: Uint8List.fromList([7, 8, 9]),
+              filename: 'recording_1234.webm',
+            );
+          }),
+        ],
+      );
+
+      await container
+          .read(transcriptionProvider.notifier)
+          .transcribe(blobUrl, recordedAt: testRecordingStartedAt);
+
+      final state = container.read(transcriptionProvider);
+      final storedUpload = await db.getUploadByAudioPath(blobUrl);
+      final payload = await db.getWebUploadPayload(
+        storedUpload!.idempotencyKey!,
+      );
+
+      expect(state, isA<TranscriptionError>());
+      expect(
+        (state as TranscriptionError).errorType,
+        TranscriptionErrorType.auth,
+      );
+      expect(service.filePaths, isEmpty);
+      expect(storedUpload.status, UploadStatus.pending.index);
+      expect(readerKeys, [storedUpload.idempotencyKey]);
+      expect(payload, isNotNull);
+      expect(payload!.audioBytes, Uint8List.fromList([7, 8, 9]));
+      expect(payload.recordedAt?.toUtc(), testRecordingStartedAt);
+    },
+  );
+
+  test(
     'Given durable web blob persistence fails, When foreground upload starts, Then the failure is reported through transcription state',
     () async {
       const blobUrl = 'blob:https://oracy.test/stale';
@@ -888,6 +937,45 @@ void main() {
       final storedUpload = await db.getUploadByAudioPath(blobUrl);
 
       expect(state, isA<TranscriptionError>());
+      expect(service.filePaths, isEmpty);
+      expect(storedUpload, isNotNull);
+      expect(storedUpload!.status, UploadStatus.terminalFailure.index);
+    },
+  );
+
+  test(
+    'Given durable web blob persistence fails before API key configuration, When foreground upload starts, Then the failure is reported through transcription state',
+    () async {
+      const blobUrl = 'blob:https://oracy.test/no-key-stale';
+      final service = _CapturingTranscriptionService();
+      container = ProviderContainer(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          secureStorageProvider.overrideWith((_) => MockSecureStorage()),
+          appDatabaseProvider.overrideWithValue(db),
+          transcriptionServiceProvider.overrideWith((_) => service),
+          fileDataReaderProvider.overrideWithValue((
+            String filePath, {
+            String? idempotencyKey,
+          }) async {
+            throw StateError('stale blob URL');
+          }),
+        ],
+      );
+
+      await container
+          .read(transcriptionProvider.notifier)
+          .transcribe(blobUrl, recordedAt: testRecordingStartedAt);
+
+      final state = container.read(transcriptionProvider);
+      final storedUpload = await db.getUploadByAudioPath(blobUrl);
+
+      expect(state, isA<TranscriptionError>());
+      expect(
+        (state as TranscriptionError).errorType,
+        TranscriptionErrorType.unknown,
+      );
+      expect(state.isRetryable, isFalse);
       expect(service.filePaths, isEmpty);
       expect(storedUpload, isNotNull);
       expect(storedUpload!.status, UploadStatus.terminalFailure.index);
