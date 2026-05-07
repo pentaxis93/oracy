@@ -1,9 +1,11 @@
 use std::fs;
 #[cfg(unix)]
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 #[cfg(unix)]
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(unix)]
+use std::sync::mpsc::{self, Receiver};
 #[cfg(unix)]
 use std::thread;
 #[cfg(unix)]
@@ -841,15 +843,12 @@ fn backend_process_exits_zero_after_sigterm() {
     let tempdir = TempDir::new().expect("tempdir");
     let accepted_audio_dir = tempdir.path().join("accepted-audio");
     fs::create_dir(&accepted_audio_dir).expect("create accepted audio dir");
-    let listen_port = unused_loopback_port();
-    let operator_port = unused_loopback_port();
-    assert_ne!(listen_port, operator_port);
     let config_path = write_config(
         &tempdir,
         format!(
             r#"
-listen_addr = "127.0.0.1:{listen_port}"
-operator_listen_addr = "127.0.0.1:{operator_port}"
+listen_addr = "127.0.0.1:0"
+operator_listen_addr = "127.0.0.2:0"
 accepted_audio_dir = "{}"
 
 [[api_keys]]
@@ -868,8 +867,15 @@ key = "key-one"
         .spawn()
         .expect("spawn backend");
 
-    wait_for_tcp_listener(&mut child, listen_port);
-    wait_for_tcp_listener(&mut child, operator_port);
+    let stdout = child.stdout.take().expect("child stdout should be piped");
+    let stdout_lines = stdout_lines(stdout);
+    let mut captured_stdout = Vec::new();
+
+    let listen_addr =
+        wait_for_bound_listener(&mut child, &stdout_lines, &mut captured_stdout, "public");
+    let operator_addr =
+        wait_for_bound_listener(&mut child, &stdout_lines, &mut captured_stdout, "operator");
+    assert_ne!(listen_addr, operator_addr);
 
     let signal_status = Command::new("kill")
         .arg("-TERM")
@@ -879,7 +885,11 @@ key = "key-one"
     assert!(signal_status.success(), "kill -TERM should succeed");
 
     let status = wait_for_child_exit(&mut child, Duration::from_secs(5)).unwrap_or_else(|| {
-        panic_with_child_output(&mut child, "backend did not exit after SIGTERM")
+        panic_with_child_output(
+            &mut child,
+            "backend did not exit after SIGTERM",
+            &captured_stdout,
+        )
     });
 
     assert!(
@@ -1116,23 +1126,64 @@ fn write_config_without_database_path(tempdir: &TempDir, contents: String) -> st
 }
 
 #[cfg(unix)]
-// FIXME(#86): This probe-then-bind helper has a TOCTOU port race; avoid new
-// process-level integration test reuse until the race-free strategy lands.
-fn unused_loopback_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind unused port")
-        .local_addr()
-        .expect("local addr")
-        .port()
+fn stdout_lines(stdout: impl Read + Send + 'static) -> Receiver<String> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let line = line.unwrap_or_else(|error| format!("failed to read stdout line: {error}"));
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    receiver
 }
 
 #[cfg(unix)]
-fn wait_for_tcp_listener(child: &mut Child, port: u16) {
+fn wait_for_bound_listener(
+    child: &mut Child,
+    stdout_lines: &Receiver<String>,
+    captured_stdout: &mut Vec<String>,
+    listener_name: &str,
+) -> SocketAddr {
     let deadline = Instant::now() + Duration::from_secs(5);
-    let addr: SocketAddr = format!("127.0.0.1:{port}")
-        .parse()
-        .expect("loopback socket address");
+    loop {
+        if let Ok(line) = stdout_lines.recv_timeout(Duration::from_millis(25)) {
+            if let Some(addr) = bound_listener_addr(&line, listener_name) {
+                captured_stdout.push(line);
+                wait_for_tcp_listener(child, addr, captured_stdout);
+                return addr;
+            }
+            captured_stdout.push(line);
+        }
+        if let Some(status) = child.try_wait().expect("poll child") {
+            panic_with_child_output(
+                child,
+                &format!("backend exited before {listener_name} listener became ready: {status}"),
+                captured_stdout,
+            );
+        }
+        if Instant::now() >= deadline {
+            panic_with_child_output(
+                child,
+                &format!("backend did not report bound {listener_name} listener"),
+                captured_stdout,
+            );
+        }
+    }
+}
 
+#[cfg(unix)]
+fn bound_listener_addr(line: &str, listener_name: &str) -> Option<SocketAddr> {
+    let marker = format!("oracy {listener_name} listener bound to ");
+    let (_, rest) = line.split_once(&marker)?;
+    rest.split_whitespace().next()?.parse().ok()
+}
+
+#[cfg(unix)]
+fn wait_for_tcp_listener(child: &mut Child, addr: SocketAddr, captured_stdout: &[String]) {
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
             return;
@@ -1141,12 +1192,14 @@ fn wait_for_tcp_listener(child: &mut Child, port: u16) {
             panic_with_child_output(
                 child,
                 &format!("backend exited before listener {addr} became ready: {status}"),
+                captured_stdout,
             );
         }
         if Instant::now() >= deadline {
             panic_with_child_output(
                 child,
                 &format!("backend listener {addr} did not become ready"),
+                captured_stdout,
             );
         }
         thread::sleep(Duration::from_millis(25));
@@ -1168,13 +1221,17 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Option<ExitStatu
 }
 
 #[cfg(unix)]
-fn panic_with_child_output(child: &mut Child, message: &str) -> ! {
+fn panic_with_child_output(child: &mut Child, message: &str, captured_stdout: &[String]) -> ! {
     let _ = child.kill();
     let _ = child.wait();
     let mut stdout = String::new();
     let mut stderr = String::new();
     if let Some(mut pipe) = child.stdout.take() {
         let _ = pipe.read_to_string(&mut stdout);
+    }
+    if !captured_stdout.is_empty() {
+        stdout = captured_stdout.join("\n");
+        stdout.push('\n');
     }
     if let Some(mut pipe) = child.stderr.take() {
         let _ = pipe.read_to_string(&mut stderr);
