@@ -278,6 +278,17 @@ Classify every `stop-then-replace` operation before running it:
 | rollback-window retention | Reversible | The previous state, configuration, secrets, routes, volumes, and host bindings remain available until the operator accepts the replacement and closes the rollback window. |
 | decommission | `irreversible-state` once state or rollback surfaces are removed | Remove previous state, secrets, routes, volumes, or host bindings only after production validation passes and the rollback window is intentionally closed. |
 
+When `stop-then-replace` must reclaim canonical paths or names from the
+start, preserve-via-backup is one realization of rollback-window retention:
+move the previous substrate to a backup location before creating the
+replacement at the canonical location. For example, move previous
+`/var/lib/oracy` to `/var/lib/oracy.rollback`, then create the replacement
+`/var/lib/oracy` for the new stack. Keep that backup substrate, along with the
+previous configuration, secrets, routes, volumes, and host bindings required
+for rollback, until the rollback window is intentionally closed. Operators may
+choose a different rollback substrate, such as an off-host backup, when it
+preserves the same rollback capability.
+
 Rollback model differs by strategy. For `parallel-then-swap`, roll back ingress
 first: restore the previous DNS, proxy route, load-balancer target, or host
 publish that pointed to the previous deployment. Restart or re-enable the
