@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.1.1] - 2026-05-07
+
 - Clarify `stop-then-replace` cutover guidance so operators can preserve
   previous canonical-path substrate through a rollback-window backup before
   creating the replacement deployment at canonical paths.

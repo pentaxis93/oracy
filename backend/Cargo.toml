@@ -1,6 +1,6 @@
 [package]
 name = "oracy-backend"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Oracy backend: the Rust service that catches voice and keeps it as durable voice notes."
 license = "MIT"
