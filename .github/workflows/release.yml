@@ -57,6 +57,13 @@ jobs:
         run: |
           test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
 
+      - name: Require tag target on main
+        run: |
+          set -euo pipefail
+          git fetch --force origin refs/heads/main:refs/remotes/origin/main
+          tag_commit="$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")"
+          git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
