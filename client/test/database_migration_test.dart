@@ -79,4 +79,69 @@ void main() {
       );
     },
   );
+
+  test(
+    'Given a schema 4 web payload exists, When it is upgraded, Then the recording timestamp column is nullable',
+    () async {
+      final legacyDb = sqlite.sqlite3.open(dbFile.path);
+      legacyDb.execute('''
+        CREATE TABLE pending_uploads (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          audio_path TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          retry_count INTEGER NOT NULL DEFAULT 0,
+          status INTEGER NOT NULL DEFAULT 0,
+          error_message TEXT,
+          updated_at INTEGER,
+          language TEXT,
+          idempotency_key TEXT
+        );
+      ''');
+      legacyDb.execute('''
+        CREATE UNIQUE INDEX pending_uploads_audio_path_unique
+        ON pending_uploads (audio_path);
+      ''');
+      legacyDb.execute('''
+        CREATE TABLE web_upload_payloads (
+          idempotency_key TEXT NOT NULL PRIMARY KEY,
+          audio_path TEXT NOT NULL,
+          audio_bytes BLOB NOT NULL,
+          filename TEXT NOT NULL,
+          content_type TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER
+        );
+      ''');
+      legacyDb.execute('''
+        INSERT INTO web_upload_payloads (
+          idempotency_key,
+          audio_path,
+          audio_bytes,
+          filename,
+          content_type,
+          created_at,
+          updated_at
+        ) VALUES (
+          'legacy-web-key',
+          'blob:https://oracy.test/legacy',
+          x'010203',
+          'recording_1234.webm',
+          NULL,
+          1713300000000,
+          NULL
+        );
+      ''');
+      legacyDb.execute('PRAGMA user_version = 4;');
+      legacyDb.close();
+
+      final db = AppDatabase(NativeDatabase(dbFile));
+      addTearDown(db.close);
+
+      final payload = await db.getWebUploadPayload('legacy-web-key');
+
+      expect(payload, isNotNull);
+      expect(payload!.recordedAt, isNull);
+      expect(payload.audioPath, 'blob:https://oracy.test/legacy');
+    },
+  );
 }

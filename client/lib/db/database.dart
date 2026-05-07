@@ -86,6 +86,9 @@ class WebUploadPayloads extends Table {
   /// Optional multipart content type.
   TextColumn get contentType => text().nullable()();
 
+  /// Original recording timestamp supplied by the foreground recorder.
+  DateTimeColumn get recordedAt => dateTime().nullable()();
+
   /// When this payload was first persisted.
   DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
 
@@ -101,7 +104,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _openConnection());
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -119,6 +122,9 @@ class AppDatabase extends _$AppDatabase {
       }
       if (from < 4) {
         await m.createTable(webUploadPayloads);
+      }
+      if (from >= 4 && from < 5) {
+        await m.addColumn(webUploadPayloads, webUploadPayloads.recordedAt);
       }
     },
   );
@@ -421,6 +427,7 @@ class AppDatabase extends _$AppDatabase {
     required List<int> bytes,
     required String filename,
     String? contentType,
+    DateTime? recordedAt,
   }) {
     return into(webUploadPayloads).insert(
       WebUploadPayloadsCompanion.insert(
@@ -429,6 +436,7 @@ class AppDatabase extends _$AppDatabase {
         audioBytes: Uint8List.fromList(bytes),
         filename: filename,
         contentType: Value(contentType),
+        recordedAt: Value(recordedAt?.toUtc()),
         updatedAt: Value(DateTime.now()),
       ),
       mode: InsertMode.insertOrReplace,
@@ -488,6 +496,7 @@ class AppDatabase extends _$AppDatabase {
       bytes: payload.audioBytes,
       filename: payload.filename,
       contentType: payload.contentType,
+      recordedAt: payload.recordedAt,
     );
     await deleteWebUploadPayload(previousKey);
   }

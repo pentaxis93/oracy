@@ -645,6 +645,17 @@ class $WebUploadPayloadsTable extends WebUploadPayloads
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _recordedAtMeta = const VerificationMeta(
+    'recordedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> recordedAt = GeneratedColumn<DateTime>(
+    'recorded_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _createdAtMeta = const VerificationMeta(
     'createdAt',
   );
@@ -675,6 +686,7 @@ class $WebUploadPayloadsTable extends WebUploadPayloads
     audioBytes,
     filename,
     contentType,
+    recordedAt,
     createdAt,
     updatedAt,
   ];
@@ -734,6 +746,12 @@ class $WebUploadPayloadsTable extends WebUploadPayloads
         ),
       );
     }
+    if (data.containsKey('recorded_at')) {
+      context.handle(
+        _recordedAtMeta,
+        recordedAt.isAcceptableOrUnknown(data['recorded_at']!, _recordedAtMeta),
+      );
+    }
     if (data.containsKey('created_at')) {
       context.handle(
         _createdAtMeta,
@@ -775,6 +793,10 @@ class $WebUploadPayloadsTable extends WebUploadPayloads
         DriftSqlType.string,
         data['${effectivePrefix}content_type'],
       ),
+      recordedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}recorded_at'],
+      ),
       createdAt: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}created_at'],
@@ -809,6 +831,9 @@ class WebUploadPayload extends DataClass
   /// Optional multipart content type.
   final String? contentType;
 
+  /// Original recording timestamp supplied by the foreground recorder.
+  final DateTime? recordedAt;
+
   /// When this payload was first persisted.
   final DateTime createdAt;
 
@@ -820,6 +845,7 @@ class WebUploadPayload extends DataClass
     required this.audioBytes,
     required this.filename,
     this.contentType,
+    this.recordedAt,
     required this.createdAt,
     this.updatedAt,
   });
@@ -832,6 +858,9 @@ class WebUploadPayload extends DataClass
     map['filename'] = Variable<String>(filename);
     if (!nullToAbsent || contentType != null) {
       map['content_type'] = Variable<String>(contentType);
+    }
+    if (!nullToAbsent || recordedAt != null) {
+      map['recorded_at'] = Variable<DateTime>(recordedAt);
     }
     map['created_at'] = Variable<DateTime>(createdAt);
     if (!nullToAbsent || updatedAt != null) {
@@ -849,6 +878,9 @@ class WebUploadPayload extends DataClass
       contentType: contentType == null && nullToAbsent
           ? const Value.absent()
           : Value(contentType),
+      recordedAt: recordedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(recordedAt),
       createdAt: Value(createdAt),
       updatedAt: updatedAt == null && nullToAbsent
           ? const Value.absent()
@@ -867,6 +899,7 @@ class WebUploadPayload extends DataClass
       audioBytes: serializer.fromJson<Uint8List>(json['audioBytes']),
       filename: serializer.fromJson<String>(json['filename']),
       contentType: serializer.fromJson<String?>(json['contentType']),
+      recordedAt: serializer.fromJson<DateTime?>(json['recordedAt']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       updatedAt: serializer.fromJson<DateTime?>(json['updatedAt']),
     );
@@ -880,6 +913,7 @@ class WebUploadPayload extends DataClass
       'audioBytes': serializer.toJson<Uint8List>(audioBytes),
       'filename': serializer.toJson<String>(filename),
       'contentType': serializer.toJson<String?>(contentType),
+      'recordedAt': serializer.toJson<DateTime?>(recordedAt),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'updatedAt': serializer.toJson<DateTime?>(updatedAt),
     };
@@ -891,6 +925,7 @@ class WebUploadPayload extends DataClass
     Uint8List? audioBytes,
     String? filename,
     Value<String?> contentType = const Value.absent(),
+    Value<DateTime?> recordedAt = const Value.absent(),
     DateTime? createdAt,
     Value<DateTime?> updatedAt = const Value.absent(),
   }) => WebUploadPayload(
@@ -899,6 +934,7 @@ class WebUploadPayload extends DataClass
     audioBytes: audioBytes ?? this.audioBytes,
     filename: filename ?? this.filename,
     contentType: contentType.present ? contentType.value : this.contentType,
+    recordedAt: recordedAt.present ? recordedAt.value : this.recordedAt,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt.present ? updatedAt.value : this.updatedAt,
   );
@@ -915,6 +951,9 @@ class WebUploadPayload extends DataClass
       contentType: data.contentType.present
           ? data.contentType.value
           : this.contentType,
+      recordedAt: data.recordedAt.present
+          ? data.recordedAt.value
+          : this.recordedAt,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
     );
@@ -928,6 +967,7 @@ class WebUploadPayload extends DataClass
           ..write('audioBytes: $audioBytes, ')
           ..write('filename: $filename, ')
           ..write('contentType: $contentType, ')
+          ..write('recordedAt: $recordedAt, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt')
           ..write(')'))
@@ -941,6 +981,7 @@ class WebUploadPayload extends DataClass
     $driftBlobEquality.hash(audioBytes),
     filename,
     contentType,
+    recordedAt,
     createdAt,
     updatedAt,
   );
@@ -953,6 +994,7 @@ class WebUploadPayload extends DataClass
           $driftBlobEquality.equals(other.audioBytes, this.audioBytes) &&
           other.filename == this.filename &&
           other.contentType == this.contentType &&
+          other.recordedAt == this.recordedAt &&
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt);
 }
@@ -963,6 +1005,7 @@ class WebUploadPayloadsCompanion extends UpdateCompanion<WebUploadPayload> {
   final Value<Uint8List> audioBytes;
   final Value<String> filename;
   final Value<String?> contentType;
+  final Value<DateTime?> recordedAt;
   final Value<DateTime> createdAt;
   final Value<DateTime?> updatedAt;
   final Value<int> rowid;
@@ -972,6 +1015,7 @@ class WebUploadPayloadsCompanion extends UpdateCompanion<WebUploadPayload> {
     this.audioBytes = const Value.absent(),
     this.filename = const Value.absent(),
     this.contentType = const Value.absent(),
+    this.recordedAt = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -982,6 +1026,7 @@ class WebUploadPayloadsCompanion extends UpdateCompanion<WebUploadPayload> {
     required Uint8List audioBytes,
     required String filename,
     this.contentType = const Value.absent(),
+    this.recordedAt = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -995,6 +1040,7 @@ class WebUploadPayloadsCompanion extends UpdateCompanion<WebUploadPayload> {
     Expression<Uint8List>? audioBytes,
     Expression<String>? filename,
     Expression<String>? contentType,
+    Expression<DateTime>? recordedAt,
     Expression<DateTime>? createdAt,
     Expression<DateTime>? updatedAt,
     Expression<int>? rowid,
@@ -1005,6 +1051,7 @@ class WebUploadPayloadsCompanion extends UpdateCompanion<WebUploadPayload> {
       if (audioBytes != null) 'audio_bytes': audioBytes,
       if (filename != null) 'filename': filename,
       if (contentType != null) 'content_type': contentType,
+      if (recordedAt != null) 'recorded_at': recordedAt,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
       if (rowid != null) 'rowid': rowid,
@@ -1017,6 +1064,7 @@ class WebUploadPayloadsCompanion extends UpdateCompanion<WebUploadPayload> {
     Value<Uint8List>? audioBytes,
     Value<String>? filename,
     Value<String?>? contentType,
+    Value<DateTime?>? recordedAt,
     Value<DateTime>? createdAt,
     Value<DateTime?>? updatedAt,
     Value<int>? rowid,
@@ -1027,6 +1075,7 @@ class WebUploadPayloadsCompanion extends UpdateCompanion<WebUploadPayload> {
       audioBytes: audioBytes ?? this.audioBytes,
       filename: filename ?? this.filename,
       contentType: contentType ?? this.contentType,
+      recordedAt: recordedAt ?? this.recordedAt,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       rowid: rowid ?? this.rowid,
@@ -1051,6 +1100,9 @@ class WebUploadPayloadsCompanion extends UpdateCompanion<WebUploadPayload> {
     if (contentType.present) {
       map['content_type'] = Variable<String>(contentType.value);
     }
+    if (recordedAt.present) {
+      map['recorded_at'] = Variable<DateTime>(recordedAt.value);
+    }
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
@@ -1071,6 +1123,7 @@ class WebUploadPayloadsCompanion extends UpdateCompanion<WebUploadPayload> {
           ..write('audioBytes: $audioBytes, ')
           ..write('filename: $filename, ')
           ..write('contentType: $contentType, ')
+          ..write('recordedAt: $recordedAt, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('rowid: $rowid')
@@ -1380,6 +1433,7 @@ typedef $$WebUploadPayloadsTableCreateCompanionBuilder =
       required Uint8List audioBytes,
       required String filename,
       Value<String?> contentType,
+      Value<DateTime?> recordedAt,
       Value<DateTime> createdAt,
       Value<DateTime?> updatedAt,
       Value<int> rowid,
@@ -1391,6 +1445,7 @@ typedef $$WebUploadPayloadsTableUpdateCompanionBuilder =
       Value<Uint8List> audioBytes,
       Value<String> filename,
       Value<String?> contentType,
+      Value<DateTime?> recordedAt,
       Value<DateTime> createdAt,
       Value<DateTime?> updatedAt,
       Value<int> rowid,
@@ -1427,6 +1482,11 @@ class $$WebUploadPayloadsTableFilterComposer
 
   ColumnFilters<String> get contentType => $composableBuilder(
     column: $table.contentType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get recordedAt => $composableBuilder(
+    column: $table.recordedAt,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -1475,6 +1535,11 @@ class $$WebUploadPayloadsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<DateTime> get recordedAt => $composableBuilder(
+    column: $table.recordedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get createdAt => $composableBuilder(
     column: $table.createdAt,
     builder: (column) => ColumnOrderings(column),
@@ -1513,6 +1578,11 @@ class $$WebUploadPayloadsTableAnnotationComposer
 
   GeneratedColumn<String> get contentType => $composableBuilder(
     column: $table.contentType,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get recordedAt => $composableBuilder(
+    column: $table.recordedAt,
     builder: (column) => column,
   );
 
@@ -1568,6 +1638,7 @@ class $$WebUploadPayloadsTableTableManager
                 Value<Uint8List> audioBytes = const Value.absent(),
                 Value<String> filename = const Value.absent(),
                 Value<String?> contentType = const Value.absent(),
+                Value<DateTime?> recordedAt = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<DateTime?> updatedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
@@ -1577,6 +1648,7 @@ class $$WebUploadPayloadsTableTableManager
                 audioBytes: audioBytes,
                 filename: filename,
                 contentType: contentType,
+                recordedAt: recordedAt,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
                 rowid: rowid,
@@ -1588,6 +1660,7 @@ class $$WebUploadPayloadsTableTableManager
                 required Uint8List audioBytes,
                 required String filename,
                 Value<String?> contentType = const Value.absent(),
+                Value<DateTime?> recordedAt = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<DateTime?> updatedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
@@ -1597,6 +1670,7 @@ class $$WebUploadPayloadsTableTableManager
                 audioBytes: audioBytes,
                 filename: filename,
                 contentType: contentType,
+                recordedAt: recordedAt,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
                 rowid: rowid,

@@ -776,7 +776,7 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
     final queuedUpload = queuedUploadId == null
         ? null
         : await db.getUploadById(queuedUploadId);
-    final foregroundAttempt = queuedUpload == null
+    final foregroundAttempt = queuedUpload == null || recordedAt != null
         ? _ensureForegroundAttempt(
             filePath,
             language: language,
@@ -825,6 +825,12 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
 
     try {
       final service = ref.read(transcriptionServiceProvider);
+      final durablePayload = queuedUpload == null
+          ? null
+          : await _ensureDurableQueuedFileData(
+              queuedUpload,
+              recordedAt: foregroundAttempt?.recordedAt,
+            );
 
       state = const TranscriptionUploading(progress: 0.0);
 
@@ -833,9 +839,10 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
         language: language,
         idempotencyKey:
             queuedUpload?.idempotencyKey ?? foregroundAttempt!.idempotencyKey,
-        recordedAt: queuedUpload == null
-            ? foregroundAttempt!.recordedAt
-            : recordedAtForQueuedUpload(queuedUpload),
+        recordedAt:
+            foregroundAttempt?.recordedAt ??
+            durablePayload?.recordedAt?.toUtc() ??
+            recordedAtForQueuedUpload(queuedUpload!),
         onProgress: (progress) {
           // Only update if still in uploading state
           if (state is TranscriptionUploading) {
@@ -912,21 +919,52 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
       audioPath: filePath,
       language: language,
     );
-    final upload = await db.getUploadById(uploadId);
-
-    if (_requiresDurableQueuedFileData(filePath) &&
-        upload?.idempotencyKey != null) {
-      final idempotencyKey = upload!.idempotencyKey!;
-      final persisted = await db.getWebUploadPayload(idempotencyKey);
-      if (persisted == null) {
-        await ref.read(fileDataReaderProvider)(
-          filePath,
-          idempotencyKey: idempotencyKey,
-        );
-      }
-    }
 
     return uploadId;
+  }
+
+  Future<WebUploadPayload?> _ensureDurableQueuedFileData(
+    PendingUpload upload, {
+    DateTime? recordedAt,
+  }) async {
+    if (!_requiresDurableQueuedFileData(upload.audioPath) ||
+        upload.idempotencyKey == null) {
+      return null;
+    }
+
+    final db = ref.read(appDatabaseProvider);
+    final idempotencyKey = upload.idempotencyKey!;
+    final normalizedRecordedAt = recordedAt?.toUtc();
+    final persisted = await db.getWebUploadPayload(idempotencyKey);
+    if (persisted != null) {
+      if (normalizedRecordedAt != null &&
+          persisted.recordedAt?.toUtc() != normalizedRecordedAt) {
+        await db.upsertWebUploadPayload(
+          idempotencyKey: idempotencyKey,
+          audioPath: persisted.audioPath,
+          bytes: persisted.audioBytes,
+          filename: persisted.filename,
+          contentType: persisted.contentType,
+          recordedAt: normalizedRecordedAt,
+        );
+        return db.getWebUploadPayload(idempotencyKey);
+      }
+      return persisted;
+    }
+
+    final fileData = await ref.read(fileDataReaderProvider)(
+      upload.audioPath,
+      idempotencyKey: idempotencyKey,
+    );
+    await db.upsertWebUploadPayload(
+      idempotencyKey: idempotencyKey,
+      audioPath: upload.audioPath,
+      bytes: fileData.bytes,
+      filename: fileData.filename,
+      contentType: fileData.contentType?.toString(),
+      recordedAt: normalizedRecordedAt,
+    );
+    return db.getWebUploadPayload(idempotencyKey);
   }
 
   _ForegroundTranscriptionAttempt _ensureForegroundAttempt(

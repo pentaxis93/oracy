@@ -782,6 +782,7 @@ void main() {
         audioPath: blobUrl,
         bytes: [1, 2, 3],
         filename: 'recording_1234.webm',
+        recordedAt: testRecordingStartedAt,
       );
       container = ProviderContainer(
         overrides: [
@@ -805,7 +806,7 @@ void main() {
       );
       expect(service.filePaths, [blobUrl]);
       expect(service.idempotencyKeys, [idempotencyKey]);
-      expect(service.recordedAts.single, isA<DateTime>());
+      expect(service.recordedAts.single, testRecordingStartedAt);
       expect(await db.getUploadByAudioPath(blobUrl), isNull);
       expect(await db.getWebUploadPayload(idempotencyKey), isNull);
     },
@@ -853,6 +854,43 @@ void main() {
         container.read(transcriptionProvider),
         isA<TranscriptionSuccess>(),
       );
+      expect(service.recordedAts, [testRecordingStartedAt]);
+    },
+  );
+
+  test(
+    'Given durable web blob persistence fails, When foreground upload starts, Then the failure is reported through transcription state',
+    () async {
+      const blobUrl = 'blob:https://oracy.test/stale';
+      final service = _CapturingTranscriptionService();
+      container = ProviderContainer(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          secureStorageProvider.overrideWith(
+            (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
+          ),
+          appDatabaseProvider.overrideWithValue(db),
+          transcriptionServiceProvider.overrideWith((_) => service),
+          fileDataReaderProvider.overrideWithValue((
+            String filePath, {
+            String? idempotencyKey,
+          }) async {
+            throw StateError('stale blob URL');
+          }),
+        ],
+      );
+
+      await container
+          .read(transcriptionProvider.notifier)
+          .transcribe(blobUrl, recordedAt: testRecordingStartedAt);
+
+      final state = container.read(transcriptionProvider);
+      final storedUpload = await db.getUploadByAudioPath(blobUrl);
+
+      expect(state, isA<TranscriptionError>());
+      expect(service.filePaths, isEmpty);
+      expect(storedUpload, isNotNull);
+      expect(storedUpload!.status, UploadStatus.terminalFailure.index);
     },
   );
 

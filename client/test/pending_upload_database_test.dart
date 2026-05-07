@@ -120,4 +120,24 @@ void main() {
       expect(await db.getWebUploadPayload('orphaned-key'), isNull);
     },
   );
+
+  test(
+    'Given durable web audio bytes include a recording timestamp, When the payload is stored, Then the timestamp is persisted',
+    () async {
+      final recordedAt = DateTime.utc(2026, 4, 21, 18, 29, 55);
+
+      await db.upsertWebUploadPayload(
+        idempotencyKey: 'timestamped-key',
+        audioPath: 'blob:https://oracy.test/timestamped',
+        bytes: [1, 2, 3],
+        filename: 'recording_1234.webm',
+        recordedAt: recordedAt,
+      );
+
+      final payload = await db.getWebUploadPayload('timestamped-key');
+
+      expect(payload, isNotNull);
+      expect(payload!.recordedAt!.toUtc(), recordedAt);
+    },
+  );
 }
