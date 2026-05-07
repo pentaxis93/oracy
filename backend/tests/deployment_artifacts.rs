@@ -185,6 +185,24 @@ fn deployment_readme_classifies_cutover_reversibility_and_data_handling() {
 }
 
 #[test]
+fn deployment_readme_surfaces_stop_then_replace_preserve_via_backup_pattern() {
+    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
+    let cutover = markdown_section(&readme, "Cut Over From An Existing Deployment");
+    let stop_then_replace = text_between(
+        cutover,
+        "Classify every `stop-then-replace` operation before running it:",
+        "Rollback model differs by strategy.",
+    );
+    let normalized = normalize_whitespace(stop_then_replace);
+
+    assert!(stop_then_replace.contains("preserve-via-backup"));
+    assert!(normalized.contains("reclaim canonical paths or names"));
+    assert!(stop_then_replace.contains("/var/lib/oracy.rollback"));
+    assert!(normalized.contains("replacement `/var/lib/oracy`"));
+    assert!(normalized.contains("rollback window is intentionally closed"));
+}
+
+#[test]
 fn deployment_readme_resolves_shared_network_reference_to_ingress_unit() {
     let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
     let normalized = normalize_whitespace(&readme);
@@ -253,6 +271,18 @@ fn markdown_section<'a>(document: &'a str, heading: &str) -> &'a str {
 
 fn normalize_whitespace(document: &str) -> String {
     document.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn text_between<'a>(document: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+    let start = document
+        .find(start_marker)
+        .unwrap_or_else(|| panic!("{start_marker} should exist"));
+    let after_start = start + start_marker.len();
+    let end = document[after_start..]
+        .find(end_marker)
+        .map_or(document.len(), |offset| after_start + offset);
+
+    &document[start..end]
 }
 
 fn fresh_quadlet_references(section: &str) -> Vec<String> {
