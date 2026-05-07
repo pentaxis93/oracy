@@ -3,7 +3,7 @@
 
 import 'transcription_service.dart';
 
-Future<FileData> getFileData(String filePath) {
+Future<FileData> getFileData(String filePath, {String? idempotencyKey}) {
   throw UnsupportedError('Platform not supported');
 }
 

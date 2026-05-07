@@ -25,6 +25,8 @@ final _uuid = const Uuid();
 
 typedef TranscriptionSleep = Future<void> Function(Duration duration);
 typedef TranscriptionNow = DateTime Function();
+typedef FileDataReader =
+    Future<FileData> Function(String filePath, {String? idempotencyKey});
 
 Future<void> _defaultSleep(Duration duration) => Future.delayed(duration);
 
@@ -165,7 +167,19 @@ final localFileDeleterProvider = Provider<LocalFileDeleter>((ref) {
 });
 
 final foregroundTranscriptionsAreQueuedProvider = Provider<bool>((ref) {
-  return !kIsWeb;
+  return true;
+});
+
+final fileDataReaderProvider = Provider<FileDataReader>((ref) {
+  final platformReader = platform.getFileData;
+  if (!kIsWeb) {
+    return platformReader;
+  }
+
+  return durableWebFileDataReader(
+    ref.watch(appDatabaseProvider),
+    platformReader,
+  );
 });
 
 class TranscriptionError extends TranscriptionState {
@@ -397,14 +411,17 @@ class TranscriptionService {
   final Duration pollInterval;
   final TranscriptionSleep _sleep;
   final TranscriptionNow _now;
+  final FileDataReader _readFileData;
 
   TranscriptionService(
     this._dio, {
     this.pollInterval = defaultTranscriptionPollInterval,
     TranscriptionSleep sleep = _defaultSleep,
     TranscriptionNow? now,
+    FileDataReader? fileDataReader,
   }) : _sleep = sleep,
-       _now = now ?? DateTime.now;
+       _now = now ?? DateTime.now,
+       _readFileData = fileDataReader ?? platform.getFileData;
 
   /// Upload an audio file through the v0.1.0 transcription-job protocol.
   /// On native platforms, filePath is a file system path.
@@ -426,7 +443,10 @@ class TranscriptionService {
     if (kDebugMode) {
       debugPrint('[TRANSCRIPTION_SERVICE] Calling platform.getFileData...');
     }
-    final fileData = await platform.getFileData(filePath);
+    final fileData = await _readFileData(
+      filePath,
+      idempotencyKey: idempotencyKey,
+    );
     if (kDebugMode) {
       debugPrint(
         '[TRANSCRIPTION_SERVICE] Got ${fileData.bytes.length} bytes, filename: ${fileData.filename}',
@@ -579,6 +599,53 @@ class FileData {
   });
 }
 
+FileDataReader durableWebFileDataReader(
+  AppDatabase db,
+  FileDataReader fallbackReader,
+) {
+  return (String filePath, {String? idempotencyKey}) async {
+    if (idempotencyKey != null && idempotencyKey.isNotEmpty) {
+      final persisted = await db.getWebUploadPayload(idempotencyKey);
+      if (persisted != null) {
+        return FileData(
+          bytes: persisted.audioBytes,
+          filename: persisted.filename,
+          contentType: dioMediaTypeFromString(persisted.contentType),
+        );
+      }
+    }
+
+    final fileData = await fallbackReader(
+      filePath,
+      idempotencyKey: idempotencyKey,
+    );
+    if (idempotencyKey != null && idempotencyKey.isNotEmpty) {
+      await db.upsertWebUploadPayload(
+        idempotencyKey: idempotencyKey,
+        audioPath: filePath,
+        bytes: fileData.bytes,
+        filename: fileData.filename,
+        contentType: fileData.contentType?.toString(),
+      );
+    }
+    return fileData;
+  };
+}
+
+DioMediaType? dioMediaTypeFromString(String? value) {
+  if (value == null || value.isEmpty) {
+    return null;
+  }
+
+  final mediaType = value.split(';').first.trim().toLowerCase();
+  final parts = mediaType.split('/');
+  if (parts.length != 2 || parts.any((part) => part.isEmpty)) {
+    return null;
+  }
+
+  return DioMediaType(parts[0], parts[1]);
+}
+
 MultipartFile multipartFileFromFileData(FileData fileData) {
   return MultipartFile.fromBytes(
     fileData.bytes,
@@ -593,6 +660,10 @@ String? audioFormatFromFilename(String filename) {
     'm4a' || 'mp3' || 'wav' || 'webm' => extension,
     _ => null,
   };
+}
+
+bool _requiresDurableQueuedFileData(String filePath) {
+  return filePath.startsWith('blob:');
 }
 
 List<Uint8List> chunkAudio(Uint8List bytes) {
@@ -654,7 +725,10 @@ int? _recordingTimestampFromPath(String audioPath) {
 /// Provider for transcription service.
 final transcriptionServiceProvider = Provider<TranscriptionService>((ref) {
   final dio = ref.watch(apiClientProvider);
-  return TranscriptionService(dio);
+  return TranscriptionService(
+    dio,
+    fileDataReader: ref.watch(fileDataReaderProvider),
+  );
 });
 
 /// Notifier for managing transcription state.
@@ -833,9 +907,26 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
       return null;
     }
 
-    return ref
-        .read(appDatabaseProvider)
-        .ensurePendingUpload(audioPath: filePath, language: language);
+    final db = ref.read(appDatabaseProvider);
+    final uploadId = await db.ensurePendingUpload(
+      audioPath: filePath,
+      language: language,
+    );
+    final upload = await db.getUploadById(uploadId);
+
+    if (_requiresDurableQueuedFileData(filePath) &&
+        upload?.idempotencyKey != null) {
+      final idempotencyKey = upload!.idempotencyKey!;
+      final persisted = await db.getWebUploadPayload(idempotencyKey);
+      if (persisted == null) {
+        await ref.read(fileDataReaderProvider)(
+          filePath,
+          idempotencyKey: idempotencyKey,
+        );
+      }
+    }
+
+    return uploadId;
   }
 
   _ForegroundTranscriptionAttempt _ensureForegroundAttempt(
@@ -897,6 +988,25 @@ class TranscriptionNotifier extends Notifier<TranscriptionState> {
       uploadId,
       classification,
     );
+  }
+
+  /// Resume the oldest queued upload after a browser restart.
+  Future<bool> resumeRecoverableUpload() async {
+    if (state is! TranscriptionIdle) {
+      return false;
+    }
+
+    final db = ref.read(appDatabaseProvider);
+    await db.cleanupStaleWebUploadPayloads();
+    await db.restoreUploadingUploadsAfterRestart();
+    final pendingUploads = await db.getPendingUploads();
+    if (pendingUploads.isEmpty) {
+      return false;
+    }
+
+    final upload = pendingUploads.first;
+    await _transcribe(upload.audioPath, language: upload.language);
+    return true;
   }
 
   /// Retry the last failed transcription.

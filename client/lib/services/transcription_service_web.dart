@@ -6,7 +6,7 @@ import 'package:web/web.dart' as web;
 import 'transcription_service.dart';
 import 'web_recording_upload_metadata.dart';
 
-Future<FileData> getFileData(String filePath) async {
+Future<FileData> getFileData(String filePath, {String? idempotencyKey}) async {
   // On web, filePath is a blob URL (e.g., blob:https://oracy.app/...)
   // We need to fetch the blob and convert it to bytes
 

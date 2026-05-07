@@ -89,4 +89,35 @@ void main() {
       expect(storedUploads, hasLength(1));
     },
   );
+
+  test(
+    'Given durable web audio bytes are stored for a queued upload, When stale web payload cleanup runs, Then referenced bytes remain and orphaned stale bytes are removed',
+    () async {
+      await db.addPendingUpload(
+        audioPath: 'blob:https://oracy.test/live',
+        idempotencyKey: 'live-key',
+      );
+      await db.upsertWebUploadPayload(
+        idempotencyKey: 'live-key',
+        audioPath: 'blob:https://oracy.test/live',
+        bytes: [1, 2, 3],
+        filename: 'recording_1234.webm',
+      );
+      await db.upsertWebUploadPayload(
+        idempotencyKey: 'orphaned-key',
+        audioPath: 'blob:https://oracy.test/orphaned',
+        bytes: [4, 5, 6],
+        filename: 'recording_5678.wav',
+        contentType: 'audio/wav',
+      );
+
+      final removed = await db.cleanupStaleWebUploadPayloads(
+        maxAge: const Duration(days: -1),
+      );
+
+      expect(removed, 1);
+      expect(await db.getWebUploadPayload('live-key'), isNotNull);
+      expect(await db.getWebUploadPayload('orphaned-key'), isNull);
+    },
+  );
 }

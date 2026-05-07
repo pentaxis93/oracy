@@ -3,7 +3,7 @@
 import 'dart:io';
 import 'transcription_service.dart';
 
-Future<FileData> getFileData(String filePath) async {
+Future<FileData> getFileData(String filePath, {String? idempotencyKey}) async {
   final file = File(filePath);
   if (!await file.exists()) {
     throw Exception('Audio file not found: $filePath');

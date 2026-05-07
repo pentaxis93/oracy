@@ -69,12 +69,39 @@ class PendingUploads extends Table {
   ];
 }
 
-@DriftDatabase(tables: [PendingUploads])
+/// Browser-side audio bytes and multipart metadata for durable web retries.
+class WebUploadPayloads extends Table {
+  /// Stable key shared with the backend idempotency key for this attempt.
+  TextColumn get idempotencyKey => text()();
+
+  /// Original browser blob URL or durable upload source.
+  TextColumn get audioPath => text()();
+
+  /// Audio bytes required for chunk replay after a browser reload.
+  BlobColumn get audioBytes => blob()();
+
+  /// Multipart filename derived from the original web recording metadata.
+  TextColumn get filename => text()();
+
+  /// Optional multipart content type.
+  TextColumn get contentType => text().nullable()();
+
+  /// When this payload was first persisted.
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  /// When this payload was last refreshed.
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {idempotencyKey};
+}
+
+@DriftDatabase(tables: [PendingUploads, WebUploadPayloads])
 class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _openConnection());
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -89,6 +116,9 @@ class AppDatabase extends _$AppDatabase {
           'ON pending_uploads (audio_path)',
         );
         await _backfillMissingIdempotencyKeys();
+      }
+      if (from < 4) {
+        await m.createTable(webUploadPayloads);
       }
     },
   );
@@ -218,12 +248,31 @@ class AppDatabase extends _$AppDatabase {
 
   /// Replace the idempotency key before starting an intentional fresh attempt.
   Future<int> replaceUploadIdempotencyKey(int id) {
-    return (update(pendingUploads)..where((t) => t.id.equals(id))).write(
-      PendingUploadsCompanion(
-        idempotencyKey: Value(_uuid.v4()),
-        updatedAt: Value(DateTime.now()),
-      ),
-    );
+    return transaction(() async {
+      final upload = await getUploadById(id);
+      if (upload == null) {
+        return 0;
+      }
+
+      final previousKey = upload.idempotencyKey;
+      final nextKey = _uuid.v4();
+      final updated =
+          await (update(pendingUploads)..where((t) => t.id.equals(id))).write(
+            PendingUploadsCompanion(
+              idempotencyKey: Value(nextKey),
+              updatedAt: Value(DateTime.now()),
+            ),
+          );
+
+      if (previousKey != null && previousKey.isNotEmpty) {
+        await _replaceWebUploadPayloadIdempotencyKey(
+          previousKey: previousKey,
+          nextKey: nextKey,
+        );
+      }
+
+      return updated;
+    });
   }
 
   /// Mark upload as permanently failed and excluded from automatic retries.
@@ -250,7 +299,7 @@ class AppDatabase extends _$AppDatabase {
   /// Mark upload as completed and optionally delete the record.
   Future<int> markAsCompleted(int id, {bool deleteRecord = true}) async {
     if (deleteRecord) {
-      return (delete(pendingUploads)..where((t) => t.id.equals(id))).go();
+      return deletePendingUpload(id);
     }
     return updateUploadStatus(id, UploadStatus.completed);
   }
@@ -281,9 +330,34 @@ class AppDatabase extends _$AppDatabase {
         );
   }
 
+  /// Restore every uploading row after a browser restart.
+  Future<int> restoreUploadingUploadsAfterRestart() {
+    return (update(
+      pendingUploads,
+    )..where((t) => t.status.equals(UploadStatus.uploading.index))).write(
+      PendingUploadsCompanion(
+        status: Value(UploadStatus.failed.index),
+        errorMessage: const Value('Upload interrupted before completion.'),
+        updatedAt: Value(DateTime.now()),
+      ),
+    );
+  }
+
   /// Delete a pending upload by ID.
   Future<int> deletePendingUpload(int id) {
-    return (delete(pendingUploads)..where((t) => t.id.equals(id))).go();
+    return transaction(() async {
+      final upload = await getUploadById(id);
+      final deleted = await (delete(
+        pendingUploads,
+      )..where((t) => t.id.equals(id))).go();
+
+      final key = upload?.idempotencyKey;
+      if (key != null && key.isNotEmpty) {
+        await deleteWebUploadPayload(key);
+      }
+
+      return deleted;
+    });
   }
 
   /// Get uploads whose server work succeeded but local file cleanup still needs retrying.
@@ -338,6 +412,84 @@ class AppDatabase extends _$AppDatabase {
               t.createdAt.isSmallerThanValue(cutoff),
         ))
         .go();
+  }
+
+  /// Store or refresh durable browser audio bytes for a queued web upload.
+  Future<int> upsertWebUploadPayload({
+    required String idempotencyKey,
+    required String audioPath,
+    required List<int> bytes,
+    required String filename,
+    String? contentType,
+  }) {
+    return into(webUploadPayloads).insert(
+      WebUploadPayloadsCompanion.insert(
+        idempotencyKey: idempotencyKey,
+        audioPath: audioPath,
+        audioBytes: Uint8List.fromList(bytes),
+        filename: filename,
+        contentType: Value(contentType),
+        updatedAt: Value(DateTime.now()),
+      ),
+      mode: InsertMode.insertOrReplace,
+    );
+  }
+
+  /// Load durable browser audio bytes by the upload idempotency key.
+  Future<WebUploadPayload?> getWebUploadPayload(String idempotencyKey) {
+    return (select(
+      webUploadPayloads,
+    )..where((t) => t.idempotencyKey.equals(idempotencyKey))).getSingleOrNull();
+  }
+
+  /// Delete durable browser audio bytes for a completed or discarded upload.
+  Future<int> deleteWebUploadPayload(String idempotencyKey) {
+    return (delete(
+      webUploadPayloads,
+    )..where((t) => t.idempotencyKey.equals(idempotencyKey))).go();
+  }
+
+  /// Remove stale browser payloads that are no longer referenced by the queue.
+  Future<int> cleanupStaleWebUploadPayloads({
+    Duration maxAge = const Duration(days: 7),
+  }) async {
+    final cutoff = DateTime.now().subtract(maxAge);
+    final queuedKeys = (await select(pendingUploads).get())
+        .map((upload) => upload.idempotencyKey)
+        .whereType<String>()
+        .where((key) => key.isNotEmpty)
+        .toSet();
+    final stalePayloads = await (select(
+      webUploadPayloads,
+    )..where((t) => t.createdAt.isSmallerThanValue(cutoff))).get();
+
+    var removed = 0;
+    for (final payload in stalePayloads) {
+      if (queuedKeys.contains(payload.idempotencyKey)) {
+        continue;
+      }
+      removed += await deleteWebUploadPayload(payload.idempotencyKey);
+    }
+    return removed;
+  }
+
+  Future<void> _replaceWebUploadPayloadIdempotencyKey({
+    required String previousKey,
+    required String nextKey,
+  }) async {
+    final payload = await getWebUploadPayload(previousKey);
+    if (payload == null) {
+      return;
+    }
+
+    await upsertWebUploadPayload(
+      idempotencyKey: nextKey,
+      audioPath: payload.audioPath,
+      bytes: payload.audioBytes,
+      filename: payload.filename,
+      contentType: payload.contentType,
+    );
+    await deleteWebUploadPayload(previousKey);
   }
 
   Future<void> _dedupePendingUploadsByAudioPath() async {

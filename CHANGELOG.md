@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Persist web submission audio bytes and attempt metadata so browser reloads
+  can resume interrupted uploads with the original `Idempotency-Key` instead of
+  creating duplicate backend attempts.
 - Clarify `stop-then-replace` cutover guidance so operators can preserve
   previous canonical-path substrate through a rollback-window backup before
   creating the replacement deployment at canonical paths.

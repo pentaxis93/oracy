@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:drift/drift.dart' show Value;
@@ -61,6 +62,28 @@ class _RecordingTimestampTranscriptionService extends TranscriptionService {
     required DateTime recordedAt,
     void Function(double progress)? onProgress,
   }) async {
+    recordedAts.add(recordedAt);
+    return TranscriptionSubmissionVoiceNote(createMockVoiceNote());
+  }
+}
+
+class _CapturingTranscriptionService extends TranscriptionService {
+  _CapturingTranscriptionService() : super(Dio());
+
+  final filePaths = <String>[];
+  final idempotencyKeys = <String>[];
+  final recordedAts = <DateTime>[];
+
+  @override
+  Future<TranscriptionSubmissionResult> transcribe(
+    String filePath, {
+    String? language,
+    required String idempotencyKey,
+    required DateTime recordedAt,
+    void Function(double progress)? onProgress,
+  }) async {
+    filePaths.add(filePath);
+    idempotencyKeys.add(idempotencyKey);
     recordedAts.add(recordedAt);
     return TranscriptionSubmissionVoiceNote(createMockVoiceNote());
   }
@@ -738,6 +761,97 @@ void main() {
       expect(
         await container.read(transcriptionProvider.notifier).retry(),
         isFalse,
+      );
+    },
+  );
+
+  test(
+    'Given a web submission was interrupted by reload, When recoverable upload resumes, Then it reuses the stored idempotency key and clears persisted bytes',
+    () async {
+      const blobUrl = 'blob:https://oracy.test/reload';
+      const idempotencyKey = 'stable-web-key';
+      final service = _CapturingTranscriptionService();
+      final uploadId = await db.addPendingUpload(
+        audioPath: blobUrl,
+        language: 'en',
+        idempotencyKey: idempotencyKey,
+      );
+      await db.markAsUploading(uploadId);
+      await db.upsertWebUploadPayload(
+        idempotencyKey: idempotencyKey,
+        audioPath: blobUrl,
+        bytes: [1, 2, 3],
+        filename: 'recording_1234.webm',
+      );
+      container = ProviderContainer(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          secureStorageProvider.overrideWith(
+            (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
+          ),
+          appDatabaseProvider.overrideWithValue(db),
+          transcriptionServiceProvider.overrideWith((_) => service),
+        ],
+      );
+
+      final resumed = await container
+          .read(transcriptionProvider.notifier)
+          .resumeRecoverableUpload();
+
+      expect(resumed, isTrue);
+      expect(
+        container.read(transcriptionProvider),
+        isA<TranscriptionSuccess>(),
+      );
+      expect(service.filePaths, [blobUrl]);
+      expect(service.idempotencyKeys, [idempotencyKey]);
+      expect(service.recordedAts.single, isA<DateTime>());
+      expect(await db.getUploadByAudioPath(blobUrl), isNull);
+      expect(await db.getWebUploadPayload(idempotencyKey), isNull);
+    },
+  );
+
+  test(
+    'Given a web blob submission starts, When it is queued for upload, Then durable bytes are persisted before the transcription service runs',
+    () async {
+      const blobUrl = 'blob:https://oracy.test/fresh';
+      final service = _CapturingTranscriptionService();
+      final readerKeys = <String?>[];
+      container = ProviderContainer(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          secureStorageProvider.overrideWith(
+            (_) => MockSecureStorage(apiKey: 'oracy_sk_test'),
+          ),
+          appDatabaseProvider.overrideWithValue(db),
+          transcriptionServiceProvider.overrideWith((_) => service),
+          fileDataReaderProvider.overrideWithValue((
+            String filePath, {
+            String? idempotencyKey,
+          }) async {
+            readerKeys.add(idempotencyKey);
+            await db.upsertWebUploadPayload(
+              idempotencyKey: idempotencyKey!,
+              audioPath: filePath,
+              bytes: [4, 5, 6],
+              filename: 'recording_1234.webm',
+            );
+            return FileData(
+              bytes: Uint8List.fromList([4, 5, 6]),
+              filename: 'recording_1234.webm',
+            );
+          }),
+        ],
+      );
+
+      await container
+          .read(transcriptionProvider.notifier)
+          .transcribe(blobUrl, recordedAt: testRecordingStartedAt);
+
+      expect(readerKeys, [service.idempotencyKeys.single]);
+      expect(
+        container.read(transcriptionProvider),
+        isA<TranscriptionSuccess>(),
       );
     },
   );

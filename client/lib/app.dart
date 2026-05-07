@@ -76,6 +76,11 @@ class _HomePageState extends ConsumerState<HomePage>
       }
       HomeWidgetService.setOnRecordCallback(_startRecordingFromWidget);
       _setupTranscriptionListener();
+      if (kIsWeb) {
+        unawaited(
+          ref.read(transcriptionProvider.notifier).resumeRecoverableUpload(),
+        );
+      }
     });
   }
 
