@@ -11,6 +11,12 @@ Oracy uses one repository tag for all release artifacts. The tag is
 `client/pubspec.yaml` release version is `X.Y.Z` with a platform build suffix
 such as `+1`.
 
+The client build suffix is a monotonically increasing platform build number,
+not a per-release counter. Each released client artifact advances it from the
+previous released value so update channels that require monotonically
+increasing build identifiers can accept upgrades. For example, a release after
+`0.1.0+1` uses `0.1.1+2`.
+
 The tag is the source-truth identity. Artifacts built from the tag must report
 that identity:
 
@@ -24,6 +30,12 @@ that identity:
 
 A releasable commit is on `main`, up to date with `origin/main`, and has a
 clean working tree. `--allow-dirty` is not part of the release path.
+
+Before tagging, the release metadata lives in source. `CHANGELOG.md` has an
+empty `## Unreleased` section and a release heading for `X.Y.Z`; backend and
+client source versions report the same `X.Y.Z` release identity; the client
+build suffix has advanced from the previous released value. These changes land
+on `main` before the tag is cut.
 
 Before tagging:
 
@@ -67,6 +79,12 @@ Operators still own deployment artifacts and host state. Build or promote the
 deployment image from the release tag, tag it with the release identity, update
 the deployment reference to that immutable tag, and validate the live service.
 Registry publishing is not owned by this repository yet.
+
+The repository release ceremony ends when the annotated tag has been pushed,
+the release workflow has completed, and the GitHub Release exists with notes
+sourced from `CHANGELOG.md`. Deployment promotion, deployment-reference
+updates, and live-service validation begin after that boundary and remain
+operator-owned.
 
 Manual GitHub Release creation, when needed after a workflow failure, uses the
 same notes source:
