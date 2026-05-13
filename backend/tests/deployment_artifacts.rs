@@ -1,259 +1,280 @@
-#[test]
-fn quadlet_template_publishes_operator_metrics_on_loopback_by_default() {
-    let template = std::fs::read_to_string("../deploy/quadlet/oracy.container.in")
-        .expect("read container Quadlet template");
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-    assert!(template.contains("PublishPort=@ORACY_PUBLIC_PUBLISH@"));
-    assert!(template.contains("PublishPort=127.0.0.1:@ORACY_OPERATOR_HOST_PORT@:9090"));
-    assert!(!template.contains("PublishPort=0.0.0.0:@ORACY_OPERATOR_HOST_PORT@:9090"));
+#[test]
+fn shipped_quadlet_artifacts_define_oracy_scoped_ingress_fabric() {
+    let quadlet_root = deploy_path("quadlet");
+    let container = read_deploy("quadlet/oracy.container.in");
+    let caddy_container = read_deploy("quadlet/oracy-caddy.container.in");
+    let ingress_network = read_deploy("quadlet/oracy-ingress.network");
+    let caddy_data = read_deploy("quadlet/oracy-caddy-data.volume");
+    let caddy_config = read_deploy("quadlet/oracy-caddy-config.volume");
+
+    assert_file_exists(quadlet_root.join("oracy.container.in"));
+    assert_file_exists(quadlet_root.join("oracy-data.volume.in"));
+    assert_file_exists(quadlet_root.join("oracy-ingress.network"));
+    assert_file_exists(quadlet_root.join("oracy-caddy.container.in"));
+    assert_file_exists(quadlet_root.join("oracy-caddy-data.volume"));
+    assert_file_exists(quadlet_root.join("oracy-caddy-config.volume"));
+
+    assert_contains_all(
+        &container,
+        &[
+            "ContainerName=oracy",
+            "Volume=@ORACY_CONFIG_PATH@:/etc/oracy/oracy.toml:ro,Z",
+            "Volume=oracy-data.volume:/var/lib/oracy:rw,Z",
+            "Network=oracy-ingress.network",
+            "NetworkAlias=oracy",
+            "PublishPort=127.0.0.1:@ORACY_OPERATOR_HOST_PORT@:9090",
+            "StopTimeout=30",
+            "TimeoutStopSec=40",
+        ],
+    );
+    assert_contains_all(
+        &read_deploy("quadlet/oracy-data.volume.in"),
+        &["Device=@ORACY_STATE_DIR@", "Type=none", "Options=bind"],
+    );
+    assert_contains_all(
+        &caddy_container,
+        &[
+            "ContainerName=oracy-caddy",
+            "Network=oracy-ingress.network",
+            "PublishPort=80:80",
+            "PublishPort=443:443",
+            "PublishPort=443:443/udp",
+            "Volume=@ORACY_CADDYFILE_PATH@:/etc/caddy/Caddyfile:ro,Z",
+            "Volume=oracy-caddy-data.volume:/data:rw,Z",
+            "Volume=oracy-caddy-config.volume:/config:rw,Z",
+        ],
+    );
+    assert_contains_all(
+        &ingress_network,
+        &["[Network]", "NetworkName=oracy-ingress"],
+    );
+    assert_contains_all(&caddy_data, &["[Volume]", "VolumeName=oracy-caddy-data"]);
+    assert_contains_all(
+        &caddy_config,
+        &["[Volume]", "VolumeName=oracy-caddy-config"],
+    );
 }
 
 #[test]
-fn quadlet_template_mounts_host_bound_state_through_volume_template() {
-    let container = std::fs::read_to_string("../deploy/quadlet/oracy.container.in")
-        .expect("read container Quadlet template");
-    let volume = std::fs::read_to_string("../deploy/quadlet/oracy-data.volume.in")
-        .expect("read volume Quadlet template");
+fn shipped_caddyfile_template_routes_oracy_public_api() {
+    let caddyfile = read_deploy("examples/Caddyfile.in");
 
-    assert!(container.contains("Volume=oracy-data.volume:/var/lib/oracy:rw"));
-    assert!(volume.contains("Device=@ORACY_STATE_DIR@"));
-    assert!(volume.contains("Type=none"));
-    assert!(volume.contains("Options=bind"));
+    assert_contains_all(
+        &caddyfile,
+        &[
+            "@ORACY_PUBLIC_HOSTNAME@ {",
+            "output stdout",
+            "format json",
+            "reverse_proxy http://oracy:8080",
+            "header_up X-Real-IP {http.request.remote.host}",
+            "read_timeout 300s",
+            "write_timeout 300s",
+            "X-Content-Type-Options nosniff",
+            "X-Frame-Options DENY",
+            "Referrer-Policy strict-origin-when-cross-origin",
+            "-Server",
+        ],
+    );
 }
 
 #[test]
-fn quadlet_template_privately_relabels_selinux_visible_mounts() {
-    let template = std::fs::read_to_string("../deploy/quadlet/oracy.container.in")
-        .expect("read container Quadlet template");
+fn template_suffixes_match_placeholder_presence() {
+    for artifact in deploy_files("quadlet")
+        .into_iter()
+        .chain(deploy_files("examples"))
+    {
+        let contents = std::fs::read_to_string(&artifact)
+            .unwrap_or_else(|_| panic!("read {}", artifact.display()));
+        let has_placeholder = !template_variables(&contents).is_empty();
+        let has_template_suffix = artifact
+            .extension()
+            .is_some_and(|extension| extension == "in");
 
-    assert!(template.contains("Volume=@ORACY_CONFIG_PATH@:/etc/oracy/oracy.toml:ro,Z"));
-    assert!(template.contains("Volume=oracy-data.volume:/var/lib/oracy:rw,Z"));
-    assert!(!template.contains("SecurityLabelDisable=true"));
-}
-
-#[test]
-fn quadlet_template_grants_podman_a_full_thirty_second_stop_window() {
-    let template = std::fs::read_to_string("../deploy/quadlet/oracy.container.in")
-        .expect("read container Quadlet template");
-
-    let stop_timeout = quadlet_seconds(&template, "StopTimeout");
-    let timeout_stop_sec = quadlet_seconds(&template, "TimeoutStopSec");
-
-    assert_eq!(stop_timeout, 30);
-    assert_eq!(timeout_stop_sec, 40);
-    assert!(timeout_stop_sec > stop_timeout);
-}
-
-#[test]
-fn deployment_readme_manages_the_quadlet_generated_service_unit() {
-    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
-
-    assert!(readme.contains("systemctl --user start oracy.service"));
-    assert!(readme.contains("systemctl --user status oracy.service"));
-    assert!(!readme.contains("systemctl --user start oracy.container"));
-    assert!(!readme.contains("systemctl --user enable oracy.service"));
-}
-
-#[test]
-fn deployment_readme_names_quadlet_rendered_filenames() {
-    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
-
-    assert!(readme.contains("oracy.container"));
-    assert!(readme.contains("oracy-data.volume"));
-}
-
-#[test]
-fn deployment_readme_documents_reverse_proxy_networking_patterns() {
-    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
-
-    assert!(readme.contains("127.0.0.1:8080:8080"));
-    assert!(readme.contains("Network=ingress.network"));
-    assert!(readme.contains("http://oracy:8080"));
-    assert!(readme.contains("When\n  rendering `oracy.container`"));
-    assert!(readme.contains("leave the public `PublishPort=` directive out"));
-    assert!(!readme.contains("remove the public `PublishPort=@ORACY_PUBLIC_PUBLISH@` line"));
-    assert!(readme.contains("host.containers.internal"));
-    assert!(readme.contains("host.docker.internal"));
-    assert!(readme.contains("--add-host=host.docker.internal:host-gateway"));
-    assert!(readme.contains("extra_hosts"));
-    assert!(readme.contains("host.docker.internal:host-gateway"));
-    assert!(readme.contains("host-gateway"));
-    assert!(readme.contains("0.0.0.0:8080:8080"));
-    assert!(readme.contains("is reachability, not protection"));
-    assert!(readme.contains("verify that the port is blocked from untrusted networks"));
-}
-
-#[test]
-fn deployment_readme_documents_fresh_reverse_proxy_substrate() {
-    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
-    let fresh_substrate = markdown_section(&readme, "Provision A Fresh Reverse Proxy Substrate");
-
-    assert!(fresh_substrate.contains("ingress.network"));
-    assert!(fresh_substrate.contains("[Network]"));
-    assert!(fresh_substrate.contains("NetworkName=ingress"));
-    assert!(fresh_substrate.contains("Network=ingress.network"));
-    assert!(fresh_substrate.contains("NetworkAlias=oracy"));
-    assert!(fresh_substrate.contains("http://oracy:8080"));
-    assert!(fresh_substrate.contains("PublishPort=80:80"));
-    assert!(fresh_substrate.contains("PublishPort=443:443"));
-    assert!(fresh_substrate.contains("PublishPort=443:443/udp"));
-    assert!(fresh_substrate.contains("/data"));
-    assert!(fresh_substrate.contains("/config"));
-    assert!(fresh_substrate.contains("TLS"));
-}
-
-#[test]
-fn deployment_readme_discloses_user_scope_low_port_policy_for_fresh_proxy() {
-    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
-    let fresh_substrate = markdown_section(&readme, "Provision A Fresh Reverse Proxy Substrate");
-
-    assert!(fresh_substrate.contains("user-scope"));
-    assert!(fresh_substrate.contains("PublishPort=80:80"));
-    assert!(fresh_substrate.contains("PublishPort=443:443"));
-    assert!(fresh_substrate.contains("PublishPort=443:443/udp"));
-    assert!(fresh_substrate.contains("net.ipv4.ip_unprivileged_port_start=80"));
-    assert!(fresh_substrate.contains("1024"));
-    assert!(fresh_substrate.contains("host-wide"));
-    assert!(fresh_substrate.contains("all unprivileged processes"));
-}
-
-#[test]
-fn deployment_readme_constructs_all_fresh_quadlet_references() {
-    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
-    let fresh_substrate = markdown_section(&readme, "Provision A Fresh Reverse Proxy Substrate");
-
-    for reference in fresh_quadlet_references(fresh_substrate) {
-        let (name, unit_type, construction_key) = reference_unit_construction(&reference)
-            .unwrap_or_else(|| {
-                panic!("{reference} should use a Quadlet unit suffix covered by this test")
-            });
-
-        assert!(
-            fresh_substrate.contains(unit_type),
-            "{reference} should document a {unit_type} unit"
-        );
-        assert!(
-            fresh_substrate.contains(&format!("{construction_key}={name}")),
-            "{reference} should document {construction_key}={name}"
+        assert_eq!(
+            has_placeholder,
+            has_template_suffix,
+            "{} should use .in exactly when it contains @VAR@ placeholders",
+            artifact.display()
         );
     }
 }
 
 #[test]
-fn deployment_readme_documents_existing_deployment_cutover_structure() {
-    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
-    let cutover = markdown_section(&readme, "Cut Over From An Existing Deployment");
-    let normalized = normalize_whitespace(cutover);
+fn deployment_readme_documents_all_shipped_template_variables() {
+    let readme = read_deploy("README.md");
+    let variables = deploy_files("quadlet")
+        .into_iter()
+        .chain(deploy_files("examples"))
+        .flat_map(|path| {
+            let contents = std::fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("read {}", path.display()));
+            template_variables(&contents)
+        })
+        .collect::<BTreeSet<_>>();
 
-    assert!(cutover.contains("parallel-then-swap"));
-    assert!(cutover.contains("stop-then-replace"));
-    assert!(cutover.contains("pre-cutover validation"));
-    assert!(cutover.contains("new-stack standup"));
-    assert!(cutover.contains("ingress candidate wiring"));
-    assert!(cutover.contains("candidate validation"));
-    assert!(cutover.contains("swap"));
-    assert!(cutover.contains("decommission"));
-    assert!(cutover.contains("post-cutover validation"));
-    assert!(cutover.contains("rollback"));
-    assert!(cutover.contains("downtime"));
-    assert!(cutover.contains("canonical"));
-    assert!(cutover.contains("stop previous deployment"));
-    assert!(cutover.contains("production validation"));
-    assert!(normalized.contains("has no separate candidate validation phase"));
-    assert!(cutover.contains("previous deployment"));
-    assert!(cutover.contains("previous ingress"));
-    assert!(cutover.contains("Provision A Fresh Reverse Proxy Substrate"));
-    assert!(normalized.contains("If either strategy decouples a reverse proxy"));
+    for variable in variables {
+        assert!(
+            readme.contains(&format!("- `@{variable}@`:")),
+            "README should document @{variable}@ in Operator-Owned Values"
+        );
+    }
 }
 
 #[test]
-fn deployment_readme_classifies_cutover_reversibility_and_data_handling() {
-    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
-    let cutover = markdown_section(&readme, "Cut Over From An Existing Deployment");
-    let normalized = normalize_whitespace(cutover);
+fn deployment_readme_install_section_names_every_shipped_quadlet() {
+    let readme = read_deploy("README.md");
+    let install = markdown_section(&readme, "Install Quadlets");
 
-    assert!(cutover.contains("reversible"));
-    assert!(cutover.contains("irreversible-state"));
-    assert!(cutover.contains("preserve"));
-    assert!(cutover.contains("discard"));
-    assert!(cutover.contains("capture for separate migration"));
-    assert!(normalized.contains("migration tooling is out of scope"));
-    assert!(normalized.contains("For `parallel-then-swap`, roll back ingress first"));
-    assert!(normalized.contains("For `stop-then-replace`, stop the replacement stack first"));
-    assert!(normalized.contains("accepted by the new stack after public traffic reaches it"));
-    assert!(normalized.contains("preserve the new state for separate reconciliation"));
+    for artifact in deploy_files("quadlet") {
+        let filename = artifact
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("quadlet artifact should have utf-8 filename");
+
+        assert!(
+            install.contains(filename),
+            "Install Quadlets section should name {filename}"
+        );
+    }
 }
 
 #[test]
-fn deployment_readme_surfaces_stop_then_replace_preserve_via_backup_pattern() {
-    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
-    let cutover = markdown_section(&readme, "Cut Over From An Existing Deployment");
-    let stop_then_replace = text_between(
-        cutover,
-        "Classify every `stop-then-replace` operation before running it:",
-        "Rollback model differs by strategy.",
-    );
-    let normalized = normalize_whitespace(stop_then_replace);
+fn deployment_readme_presents_the_caddy_shared_network_shape_as_canonical() {
+    let readme = read_deploy("README.md");
+    let install = markdown_section(&readme, "Install Quadlets");
+    let deployment_shape = canonical_shape_tokens(&[
+        read_deploy("quadlet/oracy.container.in"),
+        read_deploy("quadlet/oracy-caddy.container.in"),
+        read_deploy("quadlet/oracy-ingress.network"),
+        read_deploy("examples/Caddyfile.in"),
+    ]);
 
-    assert!(stop_then_replace.contains("preserve-via-backup"));
-    assert!(normalized.contains("reclaim canonical paths or names"));
-    assert!(stop_then_replace.contains("/var/lib/oracy.rollback"));
-    assert!(normalized.contains("replacement `/var/lib/oracy`"));
-    assert!(normalized.contains("rollback window is intentionally closed"));
+    for token in deployment_shape {
+        assert!(
+            install.contains(&token),
+            "Install Quadlets section should expose canonical deployment token {token}"
+        );
+    }
 }
 
 #[test]
-fn deployment_readme_resolves_shared_network_reference_to_ingress_unit() {
-    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
-    let normalized = normalize_whitespace(&readme);
-
-    assert!(normalized.contains("operator-owned `ingress.network` unit"));
-    assert!(readme.contains("`ingress.network` Quadlet"));
-    assert!(!readme.contains("oracy-proxy.network"));
-}
-
-#[test]
-fn deployment_readme_keeps_backend_deployment_guidance_linux_scoped() {
-    let readme = std::fs::read_to_string("../deploy/README.md").expect("read deployment README");
-
-    assert!(!readme.contains("Docker Desktop"));
-    assert!(!readme.contains("macOS"));
-    assert!(!readme.contains("Windows"));
-}
-
-#[test]
-fn deployment_contract_supports_common_reverse_proxy_topologies() {
+fn deployment_contract_names_the_supported_oracy_scoped_ingress_substrate() {
     let contract =
         std::fs::read_to_string("../spec/deployment.md").expect("read deployment contract");
     let public_api = markdown_section(&contract, "Public API Reverse Proxy");
 
-    assert!(public_api.contains("host-system reverse proxy"));
-    assert!(public_api.contains("shared container network"));
-    assert!(public_api.contains("isolated container reverse proxy"));
-    assert!(public_api.contains("operator-managed firewall"));
-    assert!(public_api.contains("non-loopback binding is reachability, not protection"));
+    for token in [
+        "oracy-ingress.network",
+        "oracy-caddy.container",
+        "oracy-caddy-data.volume",
+        "oracy-caddy-config.volume",
+        "Caddy",
+        "http://oracy:8080",
+    ] {
+        assert!(
+            public_api.contains(token),
+            "deployment contract should name supported substrate token {token}"
+        );
+    }
 }
 
-#[test]
-fn deployment_contract_documents_selinux_labeling_for_all_state_storage() {
-    let contract =
-        std::fs::read_to_string("../spec/deployment.md").expect("read deployment contract");
-    let accepted_audio = markdown_section(&contract, "Accepted Audio Directory");
-    let sqlite_database = markdown_section(&contract, "SQLite Database File");
-
-    assert!(accepted_audio.contains("On SELinux-enforcing hosts"));
-    assert!(sqlite_database.contains("On SELinux-enforcing hosts"));
-    assert!(sqlite_database.contains("parent directory"));
-    assert!(sqlite_database.contains("SQLite sidecar files"));
+fn deploy_path(relative: impl AsRef<Path>) -> PathBuf {
+    Path::new("../deploy").join(relative)
 }
 
-fn quadlet_seconds(template: &str, key: &str) -> u64 {
-    template
-        .lines()
-        .find_map(|line| line.strip_prefix(&format!("{key}=")))
-        .unwrap_or_else(|| panic!("{key} should be declared"))
-        .parse()
-        .unwrap_or_else(|_| panic!("{key} should be declared as plain seconds"))
+fn read_deploy(relative: &str) -> String {
+    let path = deploy_path(relative);
+    std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {}", path.display()))
+}
+
+fn assert_file_exists(path: PathBuf) {
+    assert!(path.is_file(), "{} should exist", path.display());
+}
+
+fn assert_contains_all(document: &str, required: &[&str]) {
+    for item in required {
+        assert!(document.contains(item), "document should contain {item}");
+    }
+}
+
+fn deploy_files(relative: &str) -> Vec<PathBuf> {
+    let root = deploy_path(relative);
+    let mut files = std::fs::read_dir(&root)
+        .unwrap_or_else(|_| panic!("read {}", root.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|_| panic!("read directory entry from {}", root.display()))
+                .path()
+        })
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+
+    files.sort();
+    files
+}
+
+fn template_variables(contents: &str) -> BTreeSet<String> {
+    let mut variables = BTreeSet::new();
+    let bytes = contents.as_bytes();
+    let mut index = 0;
+
+    while let Some(start_offset) = contents[index..].find('@') {
+        let start = index + start_offset;
+        let Some(end_offset) = contents[start + 1..].find('@') else {
+            break;
+        };
+        let end = start + 1 + end_offset;
+        let candidate = &contents[start + 1..end];
+
+        if !candidate.is_empty()
+            && candidate
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_uppercase() || byte.is_ascii_digit())
+            && bytes.get(start) == Some(&b'@')
+            && bytes.get(end) == Some(&b'@')
+        {
+            variables.insert(candidate.to_owned());
+        }
+
+        index = end + 1;
+    }
+
+    variables
+}
+
+fn canonical_shape_tokens(artifacts: &[String]) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::new();
+
+    for artifact in artifacts {
+        for line in artifact.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key {
+                "ContainerName" | "Network" | "NetworkAlias" | "NetworkName" | "VolumeName"
+                    if !value.starts_with('@') =>
+                {
+                    tokens.insert(value.to_owned());
+                }
+                "Volume" => {
+                    if let Some((source, _)) = value.split_once(':') {
+                        if !source.starts_with('@') {
+                            tokens.insert(source.to_owned());
+                        }
+                    }
+                }
+                "reverse_proxy" => {
+                    tokens.insert(value.trim().to_owned());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    tokens
 }
 
 fn markdown_section<'a>(document: &'a str, heading: &str) -> &'a str {
@@ -267,56 +288,4 @@ fn markdown_section<'a>(document: &'a str, heading: &str) -> &'a str {
         .map_or(document.len(), |offset| after_heading + offset);
 
     &document[start..end]
-}
-
-fn normalize_whitespace(document: &str) -> String {
-    document.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn text_between<'a>(document: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
-    let start = document
-        .find(start_marker)
-        .unwrap_or_else(|| panic!("{start_marker} should exist"));
-    let after_start = start + start_marker.len();
-    let end = document[after_start..]
-        .find(end_marker)
-        .map_or(document.len(), |offset| after_start + offset);
-
-    &document[start..end]
-}
-
-fn fresh_quadlet_references(section: &str) -> Vec<String> {
-    let mut references = Vec::new();
-
-    for line in section.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let Some(reference) = (match key {
-            "Network" => Some(value),
-            "Volume" => value.split_once(':').map(|(source, _)| source),
-            _ => None,
-        }) else {
-            continue;
-        };
-
-        if reference.ends_with(".network") || reference.ends_with(".volume") {
-            references.push(reference.to_owned());
-        }
-    }
-
-    references.sort();
-    references.dedup();
-    references
-}
-
-fn reference_unit_construction(reference: &str) -> Option<(&str, &'static str, &'static str)> {
-    reference
-        .strip_suffix(".network")
-        .map(|name| (name, "[Network]", "NetworkName"))
-        .or_else(|| {
-            reference
-                .strip_suffix(".volume")
-                .map(|name| (name, "[Volume]", "VolumeName"))
-        })
 }

@@ -1,0 +1,22 @@
+[Unit]
+Description=Oracy Caddy reverse proxy
+
+[Container]
+Image=docker.io/library/caddy:2
+ContainerName=oracy-caddy
+Network=oracy-ingress.network
+PublishPort=80:80
+PublishPort=443:443
+PublishPort=443:443/udp
+Volume=@ORACY_CADDYFILE_PATH@:/etc/caddy/Caddyfile:ro,Z
+Volume=oracy-caddy-data.volume:/data:rw,Z
+Volume=oracy-caddy-config.volume:/config:rw,Z
+StopTimeout=30
+
+[Service]
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+
+[Install]
+WantedBy=default.target

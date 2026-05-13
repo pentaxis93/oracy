@@ -1,6 +1,6 @@
 # Oracy Deployment Contract
 
-Target release: `v0.1.0`
+Target release: `v0.1.2`
 
 ## Purpose
 
@@ -13,9 +13,10 @@ durability commitments under nominal load.
 behavior. This document describes the infrastructure responsibilities behind
 those settings.
 
-The generic container and Quadlet artifacts that implement this contract ship
-in [`deploy/`](../deploy/). Those artifacts are templates: the repository owns
-the build and service shape, while operators provide concrete host bindings.
+The generic container, Quadlet, and Caddy artifacts that implement this
+contract ship in [`deploy/`](../deploy/). Those artifacts are templates: the
+repository owns the build, service shape, and Oracy-scoped ingress substrate,
+while operators provide concrete host bindings.
 
 ## Audience
 
@@ -119,29 +120,27 @@ either tool is missing or cannot execute.
 
 ## Public API Reverse Proxy
 
-The backend's public API listener is intended to sit behind an
-operator-managed reverse proxy for internet-facing deployments. Operators must
-place the public listener on a network surface reachable by that proxy and not
-broader than the deployment's access-control boundary.
+The backend's public API listener sits behind the Oracy-scoped reverse-proxy
+substrate for internet-facing deployments. The supported `v0.1.2` deployment
+contract is a shared container network: `oracy.container` and
+`oracy-caddy.container` both join `oracy-ingress.network`, the backend exposes
+the public API to that network as `http://oracy:8080`, and Caddy owns the
+public host bindings.
 
-Supported `v0.1.0` reverse-proxy topologies are:
+The shipped ingress substrate is:
 
-- A host-system reverse proxy reaches Oracy through a host-loopback publish.
-- A shared container network lets the proxy reach Oracy by container DNS, with
-  no host public API publish required.
-- An isolated container reverse proxy reaches Oracy through the container
-  runtime's host gateway and a non-loopback host publish.
+- `oracy-ingress.network`, whose Podman network name is `oracy-ingress`.
+- `oracy-caddy.container`, a Caddy reverse-proxy container on that network.
+- `oracy-caddy-data.volume`, which persists Caddy `/data` TLS state.
+- `oracy-caddy-config.volume`, which persists Caddy `/config` state.
+- `deploy/examples/Caddyfile.in`, which templates the public hostname and
+  proxies to `http://oracy:8080`.
 
-Loopback binding is the preferred default when the proxy runs on the host or
-shares the host network namespace. A proxy running in an isolated container
-cannot reach a host-loopback-only publish by using the host gateway; the backend
-must instead share the proxy's container network or publish on a host address
-reachable from that container.
-
-For isolated proxy containers, non-loopback binding is reachability, not protection.
-Operators must provide an operator-managed firewall, host network policy, or
-equivalent control and verify that the published port is blocked from untrusted
-networks.
+The backend public API is not published directly to the host in the shipped
+recipe. Caddy publishes `80`, `443/tcp`, and `443/udp`; on rootless Podman
+hosts, operators must provision the host policy that allows unprivileged
+low-port binding. Operator metrics remain separate from this public route and
+are published to host loopback by the backend Quadlet template.
 
 ## Operator Metrics
 

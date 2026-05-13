@@ -1,9 +1,14 @@
 # Oracy Backend Deployment
 
-This directory contains generic deployment artifacts for the Rust backend.
-The repository owns the image build, service shape, and persistence template;
-operators own concrete host bindings such as paths, ports, permissions, image
-tags, and secrets.
+This directory contains the Oracy-owned deployment substrate for the Rust
+backend. The `v0.1.2` recipe targets Fedora CoreOS with rootless Podman
+Quadlet generators: the backend runs behind an Oracy-scoped Caddy reverse
+proxy on a private Oracy ingress network.
+
+The repository owns the image build, Quadlet service shape, Caddy ingress
+fabric, and persistence templates. Operators own concrete host bindings such
+as paths, image tags, credentials, public hostname, and the host policy that
+allows rootless Caddy to bind public HTTPS ports.
 
 ## Build The Image
 
@@ -30,19 +35,20 @@ The backend process inside the container must be able to create and update
 On rootless Podman deployments, verify the host ownership and UID/GID mapping
 used by the service account before starting the unit.
 
-The shipped Quadlet template privately relabels the mounted config file and
-state volume for confined Podman containers on SELinux-enforcing hosts. Use
-host paths dedicated to this Oracy service; do not share those paths with other
-containers.
+The shipped Quadlet templates privately relabel the mounted backend config,
+backend state, and Caddyfile for confined Podman containers on
+SELinux-enforcing hosts. Use host paths dedicated to this Oracy service; do
+not share those paths with other containers.
 
 ## Configure The Backend
 
 Use [`examples/oracy.toml`](examples/oracy.toml) as the starting point for the
-container-mounted config. The default container-internal listeners are:
+container-mounted backend config. The default container-internal listeners are:
 
-- `0.0.0.0:8080` for the public API.
+- `0.0.0.0:8080` for the public API, reachable only from the Oracy ingress
+  network in the shipped deployment.
 - `0.0.0.0:9090` for operator metrics, published to host loopback by the
-  Quadlet template.
+  backend Quadlet template.
 
 Put the OpenAI credential in an environment file readable by the service
 account, for example:
@@ -52,64 +58,86 @@ install -m 0600 /dev/null /var/lib/oracy/oracy.env
 printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" > /var/lib/oracy/oracy.env
 ```
 
+Render [`examples/Caddyfile.in`](examples/Caddyfile.in) with the public Oracy
+API hostname and place the result at the host path supplied through
+`@ORACY_CADDYFILE_PATH@`.
+
 ## Install Quadlets
 
-Render the templates from [`quadlet/`](quadlet/) into
-`~/.config/containers/systemd/` for the service account, replacing the
-`@...@` placeholders with host values and removing the `.in` suffix:
+Render the templates from [`quadlet/`](quadlet/) and
+[`examples/`](examples/) into the service account's persistent configuration,
+replacing `@...@` placeholders with host values and removing the `.in` suffix
+from rendered files.
+
+Quadlet artifacts:
 
 - `quadlet/oracy.container.in` renders to `oracy.container`.
 - `quadlet/oracy-data.volume.in` renders to `oracy-data.volume`.
+- `quadlet/oracy-ingress.network` copies as `oracy-ingress.network`.
+- `quadlet/oracy-caddy.container.in` renders to `oracy-caddy.container`.
+- `quadlet/oracy-caddy-data.volume` copies as `oracy-caddy-data.volume`.
+- `quadlet/oracy-caddy-config.volume` copies as `oracy-caddy-config.volume`.
 
-Choose the public API network surface for the reverse proxy that will receive
-client traffic:
+Caddy artifact:
 
-- Host-system reverse proxy: keep Oracy published only to host loopback, for
-  example `@ORACY_PUBLIC_PUBLISH@=127.0.0.1:8080:8080`, and proxy to
-  `http://127.0.0.1:8080`.
-- Shared container network: if the reverse proxy can join the same Docker or
-  Podman network as Oracy, do not publish the public API on the host. When
-  rendering `oracy.container`, leave the public `PublishPort=` directive out
-  and add a shared network, for example:
+- `examples/Caddyfile.in` renders to the host path supplied as
+  `@ORACY_CADDYFILE_PATH@`.
 
-  ```ini
-  Network=ingress.network
-  NetworkAlias=oracy
-  ```
+The rendered Quadlet files normally live in
+`~/.config/containers/systemd/` for the service account. The canonical
+deployment shape is:
 
-  For Podman Quadlets, provide the matching operator-owned `ingress.network`
-  unit or replace the example with your existing network.
-  Put the proxy on the same network and proxy to `http://oracy:8080`. Docker
-  Compose services in the same project use shared service DNS by default; use
-  the Compose service name or network alias `oracy` for the backend service.
-- Isolated container reverse proxy: if the proxy cannot share Oracy's
-  container network, publish Oracy on a host address reachable from that proxy,
-  for example `@ORACY_PUBLIC_PUBLISH@=0.0.0.0:8080:8080`, and proxy through the
-  runtime's host gateway name such as `host.containers.internal` for Podman or
-  `host.docker.internal` for Docker.
+- Backend container: `oracy`
+- Reverse proxy container: `oracy-caddy`
+- Shared ingress network unit: `oracy-ingress.network`
+- Podman network name: `oracy-ingress`
+- Backend DNS alias on that network: `oracy`
+- Caddy TLS state volume: `oracy-caddy-data.volume`
+- Caddy config state volume: `oracy-caddy-config.volume`
+- Public site block: `@ORACY_PUBLIC_HOSTNAME@`
 
-  For Docker on Linux, add the host gateway name to the isolated proxy
-  container with `--add-host=host.docker.internal:host-gateway` or, in Compose:
+The backend joins `oracy-ingress.network` and exposes the public API to Caddy
+as `http://oracy:8080`. Caddy owns the public host bindings:
 
-  ```yaml
-  extra_hosts:
-    - "host.docker.internal:host-gateway"
-  ```
+```ini
+PublishPort=80:80
+PublishPort=443:443
+PublishPort=443:443/udp
+```
 
-  Podman provides `host.containers.internal` automatically and does not need
-  this Docker-specific mapping.
+Because this is a user-scope rootless deployment, the host must allow
+unprivileged low-port binding before Caddy starts. Standard rootless Linux
+rejects host ports below `1024`; provision
+`net.ipv4.ip_unprivileged_port_start=80` or lower through the host's persistent
+sysctl mechanism. That sysctl is host-wide: it allows all unprivileged
+processes on the host, not only `oracy-caddy`, to bind ports at or above the
+configured floor.
 
-  A non-loopback publish such as `0.0.0.0:8080:8080` is reachability, not protection.
-  Use it only with operator-managed firewall rules or equivalent host network
-  policy, and verify that the port is blocked from untrusted networks before
-  treating the binding as protected. Prefer binding to a specific private host
-  interface over `0.0.0.0` when the deployment has one.
+Caddy persists TLS and runtime state through named Podman volumes. `/data`
+carries certificates and other TLS state; `/config` carries persistent Caddy
+configuration state. A stateless proxy container loses certificates on restart
+and can create avoidable ACME rate-limit pressure.
 
-A proxy running in an isolated container cannot reach an Oracy port published
-only on host loopback unless the proxy shares the host network namespace. In
-that case, use the host-system pattern intentionally.
+After rendering:
 
-The operator metrics publish line intentionally defaults to host loopback:
+```sh
+systemctl --user daemon-reload
+systemctl --user start oracy-ingress-network.service
+systemctl --user start oracy-data-volume.service
+systemctl --user start oracy-caddy-data-volume.service
+systemctl --user start oracy-caddy-config-volume.service
+systemctl --user start oracy.service
+systemctl --user start oracy-caddy.service
+systemctl --user status oracy.service
+systemctl --user status oracy-caddy.service
+```
+
+The generated container and network services include `[Install]` relationships
+for the user default target. For boot persistence under user-scope systemd,
+enable lingering for the service account through the host provisioning
+mechanism.
+
+The operator metrics publish line intentionally stays on host loopback:
 
 ```ini
 PublishPort=127.0.0.1:@ORACY_OPERATOR_HOST_PORT@:9090
@@ -118,117 +146,25 @@ PublishPort=127.0.0.1:@ORACY_OPERATOR_HOST_PORT@:9090
 Keep that loopback binding unless another protected operator network surface
 is intentionally provided.
 
-After templating:
+## Alternate Scenario Audit
 
-```sh
-systemctl --user daemon-reload
-systemctl --user start oracy.service
-systemctl --user status oracy.service
-```
+The retained deployment recipe is the Oracy-scoped shared container network
+using Caddy. It is the primary path because it lets an independent Oracy
+operator deploy backend, ingress network, reverse proxy, and TLS state as one
+self-contained unit. Multi-app hosts keep modularity by running per-app
+ingress fabrics instead of sharing an operator-wide reverse proxy substrate.
 
-The Quadlet template's `[Install]` relationship makes the generated service
-part of the user default target at `daemon-reload` time. For boot persistence
-under user-scope systemd, enable lingering for the service account through the
-host provisioning mechanism.
+The prior host-system reverse-proxy scenario is not retained as a deployment
+recipe. It fits operators who already manage a host-wide ingress layer, but
+that layer is operator-owned infrastructure rather than Oracy-owned substrate;
+keeping it as an equal recipe would preserve the framing this deployment
+surface now rejects.
 
-## Provision A Fresh Reverse Proxy Substrate
-
-If the host does not already have a reverse proxy, provision the ingress fabric
-as operator-owned infrastructure before joining Oracy to it. The ingress
-network and proxy are not Oracy artifacts; Oracy only needs a private route to
-the proxy.
-
-For Podman Quadlet deployments, create an `ingress.network` Quadlet in the same
-user-scope Quadlet directory as the persistent services:
-
-```ini
-[Unit]
-Description=Operator ingress network
-
-[Network]
-NetworkName=ingress
-
-[Install]
-WantedBy=default.target
-```
-
-`NetworkName=ingress` gives the Podman network an operator-owned name instead
-of an app-specific name. Render `oracy.container` with the shared-network
-shape from the install section:
-
-```ini
-Network=ingress.network
-NetworkAlias=oracy
-```
-
-Leave Oracy's public API `PublishPort=` directive out in this topology. The
-proxy reaches the backend through `http://oracy:8080` on the ingress network,
-and the public internet reaches only the proxy.
-
-Create the Caddy state volumes in the same Quadlet directory:
-
-```ini
-[Unit]
-Description=Operator reverse proxy TLS state
-
-[Volume]
-VolumeName=caddy-data
-```
-
-```ini
-[Unit]
-Description=Operator reverse proxy config state
-
-[Volume]
-VolumeName=caddy-config
-```
-
-The concrete proxy is operator scope. A Caddy Quadlet is one illustrative
-containerized proxy shape. Because this user-scope rootless example publishes
-host ports 80 and 443, the host must allow unprivileged low-port binding before
-the proxy starts. Standard rootless Linux rejects host ports below 1024; for
-this example, provision `net.ipv4.ip_unprivileged_port_start=80` or lower
-through the host's persistent sysctl mechanism. That sysctl is host-wide: it
-allows all unprivileged processes on the host, not only this Caddy container,
-to bind ports at or above the configured floor.
-
-```ini
-[Unit]
-Description=Operator reverse proxy
-
-[Container]
-Image=docker.io/library/caddy:2
-ContainerName=ingress-proxy
-Network=ingress.network
-PublishPort=80:80
-PublishPort=443:443
-PublishPort=443:443/udp
-Volume=/var/lib/caddy/Caddyfile:/etc/caddy/Caddyfile:ro,Z
-Volume=caddy-data.volume:/data:rw,Z
-Volume=caddy-config.volume:/config:rw,Z
-
-[Service]
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-The Caddyfile for that proxy would route the public site to Oracy by its
-network alias:
-
-```caddyfile
-oracy.example.com {
-	reverse_proxy http://oracy:8080
-}
-```
-
-Persist the proxy's TLS state. For Caddy, `/data` carries certificates and
-other state, and `/config` carries persistent configuration state. The
-`caddy-data.volume` and `caddy-config.volume` units above back those container
-paths with named Podman volumes; a stateless proxy container loses
-certificates on restart and can create avoidable ACME rate-limit pressure.
+The prior isolated-container reverse-proxy scenario is not retained as a
+deployment recipe. It fits hosts where a proxy cannot share Oracy's network,
+but it requires a non-loopback backend publish plus host-gateway and firewall
+policy. That is a custom operator topology, not the complete Oracy-scoped
+fabric shipped here.
 
 ## Cut Over From An Existing Deployment
 
@@ -237,15 +173,15 @@ proxy placement, storage layout, and whether the reverse proxy was bundled with
 the old stack. Treat the old system as the previous deployment, previous
 ingress, and previous state. Do not assume its shape when planning cutover.
 If either strategy decouples a reverse proxy that was bundled with the previous
-deployment, use `Provision A Fresh Reverse Proxy Substrate` as the construction
-reference for the new operator-owned ingress fabric.
+deployment, use this Oracy-scoped Caddy ingress substrate as the construction
+reference for the new public path.
 
 Decide the previous state disposition before touching ingress:
 
 | Disposition | Classification | Operator commitment |
 |-------------|----------------|---------------------|
 | `preserve` | Reversible | Keep the previous state readable by the previous deployment until the new public path has passed validation and the rollback window is closed. |
-| `capture for separate migration` | Reversible until the captured copy becomes the only retained source | Stop old writers long enough to take a consistent copy or archive for later migration. The migration tooling is out of scope for `v0.1.0`; this capture only preserves material for separate work. |
+| `capture for separate migration` | Reversible until the captured copy becomes the only retained source | Stop old writers long enough to take a consistent copy or archive for later migration. The migration tooling is out of scope for `v0.1.x`; this capture only preserves material for separate work. |
 | `discard` | `irreversible-state` | Remove previous state only after explicit operator acceptance that the old data and rollback surface are no longer needed. |
 
 Choose the cutover strategy that matches the operator constraint:
@@ -278,14 +214,14 @@ Classify every `stop-then-replace` operation before running it:
 | rollback-window retention | Reversible | The previous state, configuration, secrets, routes, volumes, and host bindings remain available until the operator accepts the replacement and closes the rollback window. |
 | decommission | `irreversible-state` once state or rollback surfaces are removed | Remove previous state, secrets, routes, volumes, or host bindings only after production validation passes and the rollback window is intentionally closed. |
 
-When `stop-then-replace` must reclaim canonical paths or names from the
-start, preserve-via-backup is one realization of rollback-window retention:
-move the previous substrate to a backup location before creating the
-replacement at the canonical location. For example, move previous
-`/var/lib/oracy` to `/var/lib/oracy.rollback`, then create the replacement
-`/var/lib/oracy` for the new stack. Keep that backup substrate, along with the
-previous configuration, secrets, routes, volumes, and host bindings required
-for rollback, until the rollback window is intentionally closed. Operators may
+When `stop-then-replace` must reclaim canonical paths or names from the start,
+preserve-via-backup is one realization of rollback-window retention: move the
+previous substrate to a backup location before creating the replacement at the
+canonical location. For example, move previous `/var/lib/oracy` to
+`/var/lib/oracy.rollback`, then create the replacement `/var/lib/oracy` for
+the new stack. Keep that backup substrate, along with the previous
+configuration, secrets, routes, volumes, and host bindings required for
+rollback, until the rollback window is intentionally closed. Operators may
 choose a different rollback substrate, such as an off-host backup, when it
 preserves the same rollback capability.
 
@@ -296,10 +232,10 @@ previous deployment against preserved previous state, then validate the old
 public path before making more changes. For `stop-then-replace`, stop the
 replacement stack first, restore the previous ingress setting, then restart or
 re-enable the previous deployment against preserved previous state and
-configuration. Under either strategy, any writes accepted by the new stack after
-public traffic reaches it are not automatically present in the previous state;
-preserve the new state for separate reconciliation rather than deleting it
-during rollback.
+configuration. Under either strategy, any writes accepted by the new stack
+after public traffic reaches it are not automatically present in the previous
+state; preserve the new state for separate reconciliation rather than deleting
+it during rollback.
 
 ## Operator-Owned Values
 
@@ -308,8 +244,10 @@ during rollback.
   `OPENAI_API_KEY`.
 - `@ORACY_CONFIG_PATH@`: host path to the backend TOML configuration.
 - `@ORACY_STATE_DIR@`: host directory that persists SQLite and accepted audio.
-- `@ORACY_PUBLIC_PUBLISH@`: public API publish rule, such as
-  `127.0.0.1:8080:8080` or `0.0.0.0:8080:8080`. Omit the rendered public
-  publish line for shared container-network proxy deployments.
 - `@ORACY_OPERATOR_HOST_PORT@`: host loopback port for metrics, normally
   `9090`.
+- `@ORACY_CADDYFILE_PATH@`: host path to the rendered Caddyfile, such as
+  `/var/lib/oracy/Caddyfile`.
+- `@ORACY_PUBLIC_HOSTNAME@`: public DNS hostname for the Oracy API. No sensible
+  default exists; operators provide the real hostname, such as
+  `api.oracy.example`.
