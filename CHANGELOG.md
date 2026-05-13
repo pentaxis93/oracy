@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Complete the backend deployment substrate with Oracy-scoped Quadlet ingress,
+  Caddy reverse-proxy, persistent Caddy state volumes, and a templated
+  Caddyfile as the supported deployment recipe.
+
 ## [0.1.1] - 2026-05-07
 
 - Clarify `stop-then-replace` cutover guidance so operators can preserve

@@ -1,0 +1,8 @@
+[Unit]
+Description=Oracy ingress network
+
+[Network]
+NetworkName=oracy-ingress
+
+[Install]
+WantedBy=default.target

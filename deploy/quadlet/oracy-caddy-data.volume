@@ -1,0 +1,5 @@
+[Unit]
+Description=Oracy Caddy TLS state
+
+[Volume]
+VolumeName=oracy-caddy-data

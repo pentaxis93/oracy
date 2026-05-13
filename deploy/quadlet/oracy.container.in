@@ -9,7 +9,8 @@ Environment=ORACY_CONFIG=/etc/oracy/oracy.toml
 EnvironmentFile=@ORACY_ENV_FILE@
 Volume=@ORACY_CONFIG_PATH@:/etc/oracy/oracy.toml:ro,Z
 Volume=oracy-data.volume:/var/lib/oracy:rw,Z
-PublishPort=@ORACY_PUBLIC_PUBLISH@
+Network=oracy-ingress.network
+NetworkAlias=oracy
 PublishPort=127.0.0.1:@ORACY_OPERATOR_HOST_PORT@:9090
 StopTimeout=30
 
