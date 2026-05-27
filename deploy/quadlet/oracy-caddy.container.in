@@ -14,7 +14,7 @@ Volume=oracy-caddy-config.volume:/config:rw,Z
 StopTimeout=30
 
 [Service]
-Restart=on-failure
+Restart=always
 RestartSec=5
 TimeoutStopSec=40
 

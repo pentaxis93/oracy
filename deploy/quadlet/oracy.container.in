@@ -15,7 +15,7 @@ PublishPort=127.0.0.1:@ORACY_OPERATOR_HOST_PORT@:9090
 StopTimeout=30
 
 [Service]
-Restart=on-failure
+Restart=always
 RestartSec=5
 TimeoutStopSec=40
 
