@@ -1,8 +1,9 @@
 # Oracy
 
-Study the pentaxis93 commons before changing this project:
+Study the following before changing this project:
 
-- Principles: https://github.com/tesserine/commons
+- Principles: https://github.com/pentaxis93/principles
+- Conventions and ADRs: https://github.com/tesserine/commons
 
 ## Platform Scope
 
@@ -51,7 +52,7 @@ This matches the client's platform scope declaration (see
    "Out of scope" alone is not a disposition. Silent skipping is a violation —
    agents do not have stateful memory, so anything not fixed or filed is lost.
    Every observation gets one of the three dispositions. This discipline is
-   also encoded in tesserine/commons ADR-0003.
+   the [Obligation to Dissent](https://github.com/pentaxis93/principles/blob/main/principles/obligation-to-dissent.md) principle (formerly also encoded in tesserine/commons ADR-0003, now superseded).
 
 ## Working Stance
 
